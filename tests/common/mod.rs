@@ -18,6 +18,8 @@ pub struct World {
     pub bin: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
+    /// Stands in for the user's home, where the agent homes live.
+    pub home: PathBuf,
     pub work: PathBuf,
 }
 
@@ -74,10 +76,17 @@ impl World {
             bin: base.join("bin"),
             config: base.join("config"),
             state: base.join("state"),
+            home: base.join("home"),
             work: base.join("work"),
             _root: root,
         };
-        for dir in [&world.bin, &world.config, &world.state, &world.work] {
+        for dir in [
+            &world.bin,
+            &world.config,
+            &world.state,
+            &world.home,
+            &world.work,
+        ] {
             fs::create_dir_all(dir).unwrap();
         }
         for name in ["claude", "codex"] {
@@ -152,6 +161,8 @@ impl World {
             .current_dir(&self.work)
             .env("CAHOOTS_CONFIG_DIR", &self.config)
             .env("CAHOOTS_STATE_DIR", &self.state)
+            .env("CAHOOTS_HOME_DIR", &self.home)
+            .env_remove("CAHOOTS_DEV_REAL_DIRS")
             .env_remove("CLAUDECODE")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SANDBOX")

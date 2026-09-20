@@ -12,11 +12,15 @@ fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// Which cahoots directory an override names.
+/// Which directory an override names.
 #[derive(Debug, Clone, Copy)]
 pub enum DirKind {
     Config,
     State,
+    /// The user's home as `install` and `doctor` see it — where the agent
+    /// homes live. (A callee's `HOME` is never overridden: it is always the
+    /// passwd home, or the harness would not find its login.)
+    Home,
 }
 
 /// `CAHOOTS_CONFIG_DIR` / `CAHOOTS_STATE_DIR` — honoured ONLY by a dev build
@@ -29,8 +33,16 @@ pub fn dev_dir_override(kind: DirKind) -> Option<PathBuf> {
     let name = match kind {
         DirKind::Config => "CAHOOTS_CONFIG_DIR",
         DirKind::State => "CAHOOTS_STATE_DIR",
+        DirKind::Home => "CAHOOTS_HOME_DIR",
     };
     var(name).map(PathBuf::from)
+}
+
+/// A dev build works on throwaway directories ONLY, unless its developer says
+/// otherwise with `CAHOOTS_DEV_REAL_DIRS=1`. The default protects real state
+/// from the test suite and from a half-finished build; see `Dirs::resolve`.
+pub fn dev_real_dirs_allowed() -> bool {
+    cfg!(cahoots_dev_build) && var("CAHOOTS_DEV_REAL_DIRS").as_deref() == Some("1")
 }
 
 /// Whether directory overrides are compiled in at all.

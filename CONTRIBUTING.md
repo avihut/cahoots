@@ -16,7 +16,9 @@ mise run gate                  # every check CI and the hooks run, in one go
 
 `mise tasks` is the catalog of everything else. Builds made through mise are
 *dev builds* (`cahoots --version` says so): they honour the `CAHOOTS_*_DIR`
-overrides the tests use. Nothing a person installs does.
+overrides the tests use, and they refuse to touch your real config, state and
+agent homes unless you set `CAHOOTS_DEV_REAL_DIRS=1` on purpose. Nothing a
+person installs honours any of those variables.
 
 The git hooks (lefthook) format what you stage, check the commit message, and
 run the suite before a push. Two of them validate `daft.yml`, so a push — or a

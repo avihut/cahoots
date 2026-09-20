@@ -39,6 +39,27 @@ fails "$scripts/no-warnings.sh" /bin/sh -c 'exit 7'
 fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "warning: package diagnostic" >&2'
 fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "ld: warning: linker diagnostic"'
 
+# ── real-state.sh ───────────────────────────────────────────────────────────
+fake_home="$tmp/fake-home"
+mkdir -p "$fake_home/.claude/skills/cahoots" "$fake_home/.codex"
+printf 'installed by a person\n' >"$fake_home/.claude/skills/cahoots/SKILL.md"
+passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard /bin/sh -c 'echo harmless'
+# The guarded command's own failure passes through, tripwire or not.
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard /bin/sh -c 'exit 3'
+# A new file, a changed file, a removed file, a new agent definition: all trip it.
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "mkdir -p '$fake_home/.local/state/cahoots' && echo x >'$fake_home/.local/state/cahoots/install-manifest.json'"
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "echo edited >>'$fake_home/.claude/skills/cahoots/SKILL.md'"
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "mkdir -p '$fake_home/.codex/agents' && echo x >'$fake_home/.codex/agents/cahoots-delegate.toml'"
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "rm '$fake_home/.claude/skills/cahoots/SKILL.md'"
+# Somebody else's files in an agent home are none of its business.
+passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "mkdir -p '$fake_home/.claude/skills/other' && echo x >'$fake_home/.claude/skills/other/SKILL.md'"
+fails "$scripts/real-state.sh" guard
+
 # ── a fixture shaped like this repository ───────────────────────────────────
 repo="$tmp/repo"
 mkdir -p "$repo" "$tmp/no-hooks"

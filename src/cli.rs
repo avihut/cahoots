@@ -94,10 +94,22 @@ pub enum Verb {
     Notes,
     /// Review a sampled run (opt-in)
     Review,
-    /// Install the skill and agent definitions into the harnesses on this machine
-    Install,
-    /// Remove what `install` wrote
-    Uninstall,
+    /// Install (or update) the skill and agent definitions for the harnesses on this machine
+    Install {
+        /// Only this harness (the shared skill is always written)
+        #[arg(long)]
+        harness: Option<HarnessId>,
+        /// Say what would be written, and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove what `install` wrote — and only that
+    Uninstall {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the skill this version installs
+    Skill,
     /// Allow a harness to be used as a target (a run sends it repository content)
     Enable {
         harness: HarnessId,
@@ -142,7 +154,7 @@ pub fn tier_of(name: &str) -> Option<Tier> {
         "pick" | "run" | "wait" | "status" | "result" | "cancel" | "outcome" | "notes"
         | "review" => Tier::Agent,
         "install" | "uninstall" | "enable" | "learn" | "registry" => Tier::Human,
-        "doctor" | "report" | "exit-codes" | "__dirs" => Tier::Inspect,
+        "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
         "__supervise" => Tier::Internal,
         _ => return None,
     })
@@ -160,8 +172,9 @@ impl Verb {
             Verb::Outcome => "outcome",
             Verb::Notes => "notes",
             Verb::Review => "review",
-            Verb::Install => "install",
-            Verb::Uninstall => "uninstall",
+            Verb::Install { .. } => "install",
+            Verb::Uninstall { .. } => "uninstall",
+            Verb::Skill => "skill",
             Verb::Enable { .. } => "enable",
             Verb::Learn => "learn",
             Verb::Registry => "registry",
@@ -178,14 +191,20 @@ impl Verb {
     }
 }
 
-/// Decides the exit for a parsed command line. `stdin_is_terminal` is passed
-/// in so the policy is testable without a pty.
+/// Why a verb may not run at all, if it may not. PURE — it decides, it does
+/// nothing — so the policy can be tested without ever executing a verb. (A
+/// test that called `dispatch` to check this once ran a real `install`
+/// against a real home. Test THIS function.)
+pub fn refusal(verb: &Verb, stdin_is_terminal: bool) -> Option<Fail> {
+    (verb.tier() == Tier::Human && !stdin_is_terminal).then(|| {
+        Fail::policy("this verb changes what cahoots may do, so it only runs from a terminal")
+    })
+}
+
+/// Runs a parsed command line and returns what to print and exit with.
 pub fn dispatch(cli: Cli, stdin_is_terminal: bool) -> Envelope {
-    if cli.verb.tier() == Tier::Human && !stdin_is_terminal {
-        return Fail::policy(
-            "this verb changes what cahoots may do, so it only runs from a terminal",
-        )
-        .into();
+    if let Some(fail) = refusal(&cli.verb, stdin_is_terminal) {
+        return fail.into();
     }
     run_verb(cli.verb).unwrap_or_else(Envelope::from)
 }
@@ -199,6 +218,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             ok(serde_json::json!({
                 "config": dirs.config,
                 "state": dirs.state,
+                "home": dirs.home,
                 "overridden": dirs.overridden,
                 "dev_overrides_honoured": crate::env::dev_overrides_honoured(),
             }))
@@ -231,6 +251,39 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             ok(serde_json::json!({ "enabled": enabled }))
         }
         Verb::Doctor => crate::doctor::doctor(),
+        Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
+        Verb::Install { harness, dry_run } => {
+            let dirs = Dirs::resolve()?;
+            let files = crate::install::files::install(&dirs, harness, dry_run)?;
+            let rules: serde_json::Map<String, serde_json::Value> = HarnessId::ALL
+                .into_iter()
+                .filter(|id| harness.is_none_or(|only| only == *id))
+                .map(|id| {
+                    let missing = crate::install::rules::missing(&dirs.home, id);
+                    let lines: Vec<String> =
+                        missing.iter().map(|verb| crate::install::rules::rule(id, verb)).collect();
+                    (
+                        id.to_string(),
+                        serde_json::json!({ "add_to": crate::install::rules::rules_file(id), "rules": lines }),
+                    )
+                })
+                .collect();
+            let mut envelope = Envelope::new(
+                Exit::Ok,
+                "cahoots never edits a harness's permission rules: to let a harness delegate without \
+                 a prompt, add the rules below yourself. Then `cahoots enable <harness>` for each \
+                 target you want, and `cahoots doctor` to check."
+                    .to_string(),
+            );
+            envelope.data = Some(
+                serde_json::json!({ "dry_run": dry_run, "files": files, "rules_to_add": rules }),
+            );
+            Ok(envelope)
+        }
+        Verb::Uninstall { dry_run } => {
+            let files = crate::install::files::uninstall(&Dirs::resolve()?, dry_run)?;
+            ok(serde_json::json!({ "dry_run": dry_run, "files": files }))
+        }
         Verb::Wait { run, timeout } => client::wait(&run, timeout),
         Verb::Status { run } => client::status(run.as_deref()),
         Verb::Result { run } => client::result(&run),
@@ -248,7 +301,13 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
 /// Prints the envelope and turns it into the process's exit status. A closed
 /// pipe is a quiet exit, not a panic (docs/SPIKE.md S5).
 pub fn emit(envelope: &Envelope) -> ExitCode {
-    let line = serde_json::to_string(envelope).unwrap_or_else(|_| {
+    use std::io::IsTerminal;
+    let encode = if std::io::stdout().is_terminal() {
+        serde_json::to_string_pretty // a person is reading
+    } else {
+        serde_json::to_string // one line, for an agent
+    };
+    let line = encode(envelope).unwrap_or_else(|_| {
         format!(
             r#"{{"v":1,"code":{},"class":"{}"}}"#,
             envelope.code, envelope.class
@@ -295,9 +354,23 @@ mod tests {
 
     #[test]
     fn a_human_verb_is_refused_without_a_terminal() {
-        let parse = || Cli::try_parse_from(["cahoots", "install"]).unwrap();
-        assert_eq!(dispatch(parse(), false).code, Exit::Policy.code());
-        assert_ne!(dispatch(parse(), true).code, Exit::Policy.code());
+        // `refusal`, never `dispatch`: deciding must not mean doing.
+        for argv in [
+            vec!["cahoots", "install"],
+            vec!["cahoots", "uninstall"],
+            vec!["cahoots", "enable", "codex"],
+            vec!["cahoots", "registry"],
+        ] {
+            let verb = Cli::try_parse_from(argv).unwrap().verb;
+            let fail = refusal(&verb, false).expect("refused without a terminal");
+            assert_eq!(fail.exit, Exit::Policy);
+            assert!(refusal(&verb, true).is_none());
+        }
+        let status = Cli::try_parse_from(["cahoots", "status"]).unwrap().verb;
+        assert!(
+            refusal(&status, false).is_none(),
+            "an agent verb needs no terminal"
+        );
     }
 
     #[test]

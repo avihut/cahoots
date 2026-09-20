@@ -149,6 +149,22 @@ pub fn doctor() -> Res<Envelope> {
         });
     }
 
+    let stale = crate::install::files::stale(&dirs);
+    checks.push(if stale.is_empty() {
+        check(
+            "installed files",
+            Status::Ok,
+            "nothing installed is out of date",
+        )
+    } else {
+        let paths: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+        check(
+            "installed files",
+            Status::Warn,
+            format!("out of date — run `cahoots install`: {}", paths.join(", ")),
+        )
+    });
+
     match &registry.meters.agent_usage {
         None => checks.push(check(
             "meter: agent-usage",
