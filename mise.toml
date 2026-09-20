@@ -45,6 +45,10 @@ description = "The whole suite — no real harness is ever called, no network is
 # spawns git under them would operate on THIS repository.
 run = "scripts/no-warnings.sh env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
 
+[tasks.smoke]
+description = "LOCAL ONLY: one tiny REAL run in each direction (costs a little of both plans) — never part of the gate"
+run = "scripts/smoke.sh"
+
 # ── Quality gates ───────────────────────────────────────────────────────────
 # One task per check. lefthook.yml (commit / push), daft.yml (merge) and
 # .github/workflows/ci.yml all call these, so a check has exactly one

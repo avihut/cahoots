@@ -42,7 +42,16 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Verb {
     /// Choose the target (harness, model, effort) for a role, without running
-    Pick,
+    Pick {
+        #[arg(long)]
+        role: Role,
+        /// Only this harness
+        #[arg(long)]
+        to: Option<HarnessId>,
+        /// The harness that is asking (it is never picked)
+        #[arg(long)]
+        caller: Option<HarnessId>,
+    },
     /// Delegate a brief to another harness, under the gate
     Run {
         /// What the run is for: advise, review or explore
@@ -89,8 +98,13 @@ pub enum Verb {
     Install,
     /// Remove what `install` wrote
     Uninstall,
-    /// Allow a harness to be used as a target
-    Enable,
+    /// Allow a harness to be used as a target (a run sends it repository content)
+    Enable {
+        harness: HarnessId,
+        /// Stop delegating to it instead
+        #[arg(long)]
+        off: bool,
+    },
     /// List, show, revert or reset what was learned locally
     Learn,
     /// Show the effective registry of harnesses, models and roles
@@ -137,7 +151,7 @@ pub fn tier_of(name: &str) -> Option<Tier> {
 impl Verb {
     pub fn name(&self) -> &'static str {
         match self {
-            Verb::Pick => "pick",
+            Verb::Pick { .. } => "pick",
             Verb::Run { .. } => "run",
             Verb::Wait { .. } => "wait",
             Verb::Status { .. } => "status",
@@ -148,7 +162,7 @@ impl Verb {
             Verb::Review => "review",
             Verb::Install => "install",
             Verb::Uninstall => "uninstall",
-            Verb::Enable => "enable",
+            Verb::Enable { .. } => "enable",
             Verb::Learn => "learn",
             Verb::Registry => "registry",
             Verb::Doctor => "doctor",
@@ -211,6 +225,12 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             wait_secs: wait,
             timeout_secs: timeout,
         }),
+        Verb::Pick { role, to, caller } => client::pick_target(role, caller, to),
+        Verb::Enable { harness, off } => {
+            let enabled = crate::registry::set_enabled(&Dirs::resolve()?, harness, !off)?;
+            ok(serde_json::json!({ "enabled": enabled }))
+        }
+        Verb::Doctor => crate::doctor::doctor(),
         Verb::Wait { run, timeout } => client::wait(&run, timeout),
         Verb::Status { run } => client::status(run.as_deref()),
         Verb::Result { run } => client::result(&run),

@@ -13,11 +13,12 @@ use serde_json::{Value, json};
 use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
-use crate::harness::{self, Progress};
-use crate::model::{Candidate, HarnessId, Role};
+use crate::harness::Progress;
+use crate::model::{HarnessId, Role};
 use crate::paths::{self, Workspace};
+use crate::pick;
 use crate::registry::Registry;
-use crate::run::record::{self, RunDir, RunRecord, State, now, try_lock_file};
+use crate::run::record::{self, RunDir, RunRecord, State, now};
 use crate::spawn;
 
 const POLL: Duration = Duration::from_millis(150);
@@ -72,54 +73,22 @@ fn refuse_inside_a_sandbox(verb: &str) -> Res<()> {
     Ok(())
 }
 
-/// First enabled candidate for the role that is not the caller. `--to` narrows
-/// it to one harness. The gate (meters) joins this in `gate::admit`.
-pub fn candidates(
-    registry: &Registry,
-    role: Role,
-    caller: Option<HarnessId>,
-    to: Option<HarnessId>,
-) -> Res<Vec<Candidate>> {
-    if let Some(to) = to {
-        if Some(to) == caller {
-            return Err(Fail::policy(format!(
-                "{to} is the caller; a harness does not delegate to itself"
-            )));
-        }
-        if !registry.harness(to).enabled {
-            return Err(Fail::new(
-                Exit::TargetUnavailable,
-                format!(
-                    "{to} is not enabled as a target — a person enables it with `cahoots enable {to}`"
-                ),
-            ));
-        }
-    }
-    let list: Vec<Candidate> = registry.roles[&role]
-        .candidates
-        .iter()
-        .filter(|c| Some(c.harness) != caller)
-        .filter(|c| to.is_none_or(|to| c.harness == to))
-        .filter(|c| registry.harness(c.harness).enabled)
-        .cloned()
-        .collect();
-    if list.is_empty() {
-        return Err(Fail::new(
-            Exit::NoEligibleTarget,
-            format!(
-                "no enabled target for the {role} role — a person enables one with `cahoots enable <harness>`"
-            ),
-        ));
-    }
-    Ok(list)
-}
-
-fn slot_free(dirs: &Dirs, registry: &Registry, harness: HarnessId) -> bool {
-    let _ = crate::dirs::ensure_private_dir(&dirs.slots());
-    (0..registry.harness(harness).max_concurrent).any(|n| {
-        let path = dirs.slots().join(format!("{harness}.{n}.lock"));
-        matches!(try_lock_file(&path), Ok(Some(_)))
-    })
+/// `pick`: who `run` would ask right now, and why not the others. Read-only.
+pub fn pick_target(role: Role, caller: Option<HarnessId>, to: Option<HarnessId>) -> Res<Envelope> {
+    let dirs = Dirs::resolve()?;
+    let registry = Registry::load(&dirs)?;
+    let caller = resolve_caller(caller)?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
+    let workspace = Workspace::around(&cwd)?;
+    let choice = pick::choose(&dirs, &registry, role, caller, to, &workspace.roots())?;
+    Ok(Envelope::new(Exit::Ok, None).with_data(json!({
+        "role": role,
+        "target": choice.target,
+        "harness_version": choice.version.to_string(),
+        "gate_notes": choice.admission.notes,
+        "skipped": choice.skipped,
+    })))
 }
 
 pub fn run(args: RunArgs) -> Res<Envelope> {
@@ -156,44 +125,8 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         ));
     }
 
-    let list = candidates(&registry, args.role, caller, args.to)?;
-    let target = match list.iter().find(|c| slot_free(&dirs, &registry, c.harness)) {
-        Some(target) => target.clone(),
-        None => {
-            return Err(Fail::new(
-                Exit::Busy,
-                "every eligible target is already running as many jobs as it may",
-            ));
-        }
-    };
-    crate::gate::admit(&dirs, &registry, &target, args.role)?;
-
-    let tool = harness::harness(target.harness);
-    let entry = registry.harness(target.harness);
-    let binary = spawn::resolve_binary(tool.binary_name(), entry.binary.as_deref(), &roots)?;
-    let version = spawn::run_helper(&binary, &["--version"], None, Duration::from_secs(15))
-        .ok()
-        .and_then(|output| tool.fingerprint(&output.stdout));
-    let Some(version) = version else {
-        return Err(Fail::new(
-            Exit::TargetUnavailable,
-            format!(
-                "{} does not identify itself as {}",
-                binary.display(),
-                target.harness
-            ),
-        ));
-    };
-    if version < tool.tested().0 {
-        return Err(Fail::new(
-            Exit::TargetUnavailable,
-            format!(
-                "{} {version} is older than the oldest version cahoots supports ({})",
-                target.harness,
-                tool.tested().0
-            ),
-        ));
-    }
+    let choice = pick::choose(&dirs, &registry, args.role, caller, args.to, &roots)?;
+    let target = choice.target;
 
     let mut progress = Progress::default();
     if target.harness == HarnessId::Claude {
@@ -217,8 +150,9 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             .map_or(limit, |asked| asked.clamp(1, limit)),
         int_grace_secs: registry.limits.int_grace_secs,
         term_grace_secs: registry.limits.term_grace_secs,
-        binary,
-        harness_version: Some(version),
+        binary: choice.binary,
+        harness_version: Some(choice.version),
+        admission: choice.admission,
         created_at: now(),
         started_at: None,
         finished_at: None,
@@ -319,6 +253,7 @@ fn summary(record: &RunRecord) -> Value {
         },
         "resumable": record.progress.session_id.is_some(),
         "notes": record.progress.notes,
+        "gate_notes": record.admission.notes,
     })
 }
 

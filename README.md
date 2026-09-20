@@ -5,9 +5,9 @@ Claude Code, Codex, Antigravity CLI — can hand a task to one of the others as
 an advisor or a worker, the same way in every direction, without burning out
 any of your subscriptions.
 
-> **Status: pre-release.** The repository, its gates and the command surface
-> exist; the broker is being built in the open. Nothing here is installable
-> yet. `docs/ARCHITECTURE.md` is the design, `docs/SPIKE.md` is what the real
+> **Status: pre-release.** The broker works — Claude Code ⇄ Codex, read-only
+> roles, gate, run records (`mise run smoke` proves it against the real CLIs)
+> — but there is no installer and no release yet. `docs/ARCHITECTURE.md` is the design, `docs/SPIKE.md` is what the real
 > CLIs said about it, and the milestones are at the bottom of this page.
 
 ## What it is

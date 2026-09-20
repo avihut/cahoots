@@ -1,8 +1,8 @@
 # Architecture
 
-> This is the design the milestones build toward (README → Milestones). What
-> exists today is the command surface and the exit-code contract; each section
-> below says which milestone lands it.
+> This is the design the milestones build toward (README → Milestones); each
+> section says which milestone lands it. M0 and M1 exist today. Where the
+> spike changed the plan (`docs/SPIKE.md`), this document says what was built.
 
 ## Why a broker, and why a CLI
 
@@ -76,10 +76,13 @@ admitting the run that crosses the line.
 ## Registry and command construction (M1)
 
 Commands are built **in code**. A `Harness` trait turns a typed `RunSpec` into
-an argv array; a final `validate_argv(role, argv)` requires the read-only flag
-for read-only roles and rejects the flags that widen authority
-(`--dangerously-*`, `-c/--config`, `--add-dir`, `--settings`, …). The brief
-travels on stdin, never in argv.
+an argv array; a final `validate(role, argv)` requires the read-only proof for
+read-only roles and rejects the flags that widen authority
+(`--dangerously-*`, `--config`, `--add-dir`, `--settings`, …). The one `-c`
+cahoots emits — Codex's `model_reasoning_effort=<level>` — is held to exactly
+that shape. The caller hands the brief over as a FILE (`--brief <path>`: a
+heredoc or a pipe defeats Codex's rule matching); cahoots hands it to the
+callee on stdin, never in argv.
 
 The user's file holds typed knobs only — binary path, enabled, models and
 efforts, candidate order per role, caps — with `deny_unknown_fields`.

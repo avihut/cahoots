@@ -1,17 +1,134 @@
 //! Admission: may this target take one more run right now?
 //!
-//! Every configured meter must agree. The built-in **ledger** counts cahoots'
-//! own runs, so the gate works on day one without any tracker — and its
-//! runs-per-hour ceiling is what bounds an agent stuck in a retry loop.
+//! `used + reserve(role) ≤ cap`, and every configured meter must agree.
+//!
+//! - **agent-usage** asks the Agent Usage tracker's `usage-cli headroom`
+//!   (what share of the plan is used, how old that number is, where it is
+//!   heading). Its exit codes are the gate's exit codes, unchanged.
+//! - **ledger** is built in: cahoots' own run records. It works on day one
+//!   without any tracker, and its runs-per-hour ceiling is what bounds an
+//!   agent stuck in a retry loop.
+//!
+//! Anything the gate does not understand is a refusal. It fails closed.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::dirs::Dirs;
 use crate::exit::{Exit, Fail, Res};
-use crate::model::{Candidate, Role};
-use crate::registry::Registry;
+use crate::model::{Candidate, HarnessId, Role};
+use crate::registry::{DEFAULT_MAX_DATA_AGE_SECS, Registry};
 use crate::run::record::{self, now};
+use crate::spawn;
 
-pub fn admit(dirs: &Dirs, registry: &Registry, target: &Candidate, _role: Role) -> Res<()> {
-    ledger(dirs, registry, target)
+/// How much lower the cap is when a snapshot-on-use provider's number is
+/// stale. A stale reading is a lower bound on usage, so the margin is what
+/// pays for not knowing how much was used since.
+pub const STALE_MARGIN: u8 = 15;
+
+/// Why a run was let in — kept on the run record.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Admission {
+    /// The tracker's own answer, verbatim, when it was asked.
+    pub reading: Option<Value>,
+    pub notes: Vec<String>,
+}
+
+pub fn admit(dirs: &Dirs, registry: &Registry, target: &Candidate, role: Role) -> Res<Admission> {
+    ledger(dirs, registry, target)?;
+    agent_usage(registry, target.harness, role)
+}
+
+/// Providers whose numbers only refresh when the harness itself runs. For
+/// these a strict freshness guard would refuse forever: nothing but a run
+/// would ever make the data fresh again.
+const fn refreshes_on_use(harness: HarnessId) -> bool {
+    match harness {
+        HarnessId::Codex => true,
+        HarnessId::Claude => false,
+    }
+}
+
+fn agent_usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> {
+    let Some(meter) = &registry.meters.agent_usage else {
+        return Ok(Admission::default());
+    };
+    let binary = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[])
+        .map_err(|fail| Fail::new(Exit::NoDigest, format!("the usage meter: {}", fail.message)))?;
+    let cap = registry
+        .harness(harness)
+        .cap
+        .saturating_sub(role.reserve())
+        .max(1);
+    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
+
+    let ask = |cap: u8, guard_age: bool| -> Res<(Exit, Option<Value>)> {
+        let mut args = vec![
+            "headroom".to_string(),
+            "--provider".to_string(),
+            harness.as_str().to_string(),
+            "--cap".to_string(),
+            cap.to_string(),
+            "--forecast".to_string(),
+            "red".to_string(),
+            "--json".to_string(),
+        ];
+        if guard_age {
+            args.extend([
+                "--max-data-age".to_string(),
+                format!("{}m", max_age.div_ceil(60)),
+            ]);
+        }
+        let output =
+            spawn::run_helper(&binary, &args, None, Duration::from_secs(10)).map_err(|fail| {
+                Fail::new(Exit::NoDigest, format!("the usage meter: {}", fail.message))
+            })?;
+        let verdict = match output.status {
+            Some(0) => Exit::Ok,
+            Some(21) => Exit::Stale,
+            Some(24) => Exit::OverCap,
+            Some(25) => Exit::Forecast,
+            Some(26) => Exit::NoData,
+            // 13 (no digest), 19 (a usage-cli too old to know `headroom`),
+            // a signal, anything new: not an answer, so not a yes.
+            _ => Exit::NoDigest,
+        };
+        Ok((verdict, serde_json::from_str(output.stdout.trim()).ok()))
+    };
+
+    let (mut verdict, mut reading) = ask(cap, true)?;
+    let mut notes = Vec::new();
+    if verdict == Exit::Stale && refreshes_on_use(harness) {
+        let lowered = cap.saturating_sub(STALE_MARGIN).max(1);
+        (verdict, reading) = ask(lowered, false)?;
+        if verdict == Exit::Ok {
+            notes.push(format!(
+                "{harness}'s usage data was stale, so it was held to {lowered}% instead of {cap}% — this run refreshes it"
+            ));
+        }
+    }
+    if verdict == Exit::Ok {
+        return Ok(Admission { reading, notes });
+    }
+    let percent = reading.as_ref().and_then(|r| r["percent"].as_f64());
+    let used = percent.map_or(String::new(), |p| format!(" ({p:.0}% used)"));
+    let why = match verdict {
+        Exit::Stale => format!(
+            "{harness}'s usage data is older than {}m — is the tracker's daemon running?",
+            max_age.div_ceil(60)
+        ),
+        Exit::OverCap => format!("{harness} is over its cap of {cap}%{used}"),
+        Exit::Forecast => {
+            format!("{harness} is on course to run out before its limit resets{used}")
+        }
+        Exit::NoData => format!("the tracker has no usage numbers for {harness}"),
+        _ => format!(
+            "the usage meter gave no answer for {harness} — cahoots needs a usage-cli that has the `headroom` noun, and a running tracker"
+        ),
+    };
+    Err(Fail::new(verdict, why))
 }
 
 fn ledger(dirs: &Dirs, registry: &Registry, target: &Candidate) -> Res<()> {
