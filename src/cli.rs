@@ -54,7 +54,7 @@ pub enum Verb {
     },
     /// Delegate a brief to another harness, under the gate
     Run {
-        /// What the run is for: advise, review or explore
+        /// What the run is for: advise, review, explore — or implement, which writes
         #[arg(long)]
         role: Role,
         /// The brief, as a file (in the working directory, its repository, or a temp dir)
@@ -69,6 +69,12 @@ pub enum Verb {
         /// Where the callee works: another worktree of this repository
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// For a role that writes: work in a fresh worktree cut from HEAD
+        #[arg(long, conflicts_with = "in_place")]
+        fork: bool,
+        /// For a role that writes: work in this very tree (your config must allow it)
+        #[arg(long)]
+        in_place: bool,
         /// Seconds to wait for the answer before returning "not finished"
         #[arg(long)]
         wait: Option<u64>,
@@ -234,6 +240,8 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             to,
             caller,
             dir,
+            fork,
+            in_place,
             wait,
             timeout,
         } => client::run(RunArgs {
@@ -242,6 +250,8 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             to,
             caller,
             dir,
+            fork,
+            in_place,
             wait_secs: wait,
             timeout_secs: timeout,
         }),
@@ -381,7 +391,9 @@ mod tests {
             Cli::try_parse_from(argv)
         };
         assert!(run(&["--role", "review"]).is_ok());
-        assert!(run(&["--role", "implement"]).is_err());
+        assert!(run(&["--role", "implement", "--fork"]).is_ok());
+        assert!(run(&["--role", "implement", "--fork", "--in-place"]).is_err());
+        assert!(run(&["--role", "deploy"]).is_err());
         assert!(run(&["--role", "review", "--to", "gemini"]).is_err());
         assert!(run(&["--role", "review", "--ungated"]).is_err());
     }

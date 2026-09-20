@@ -24,6 +24,7 @@ use crate::exit::{Exit, Fail, Res};
 use crate::gate::Admission;
 use crate::harness::{Progress, Version};
 use crate::model::{Candidate, HarnessId, Role};
+use crate::placement::Placement;
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -63,7 +64,14 @@ pub struct RunRecord {
     pub role: Role,
     pub caller: Option<HarnessId>,
     pub target: Candidate,
+    /// Where the callee works. For a fork this is the BASE until the
+    /// supervisor has cut the worktree, and the worktree from then on.
     pub cwd: PathBuf,
+    #[serde(default)]
+    pub placement: Placement,
+    /// What a fork was cut from.
+    #[serde(default)]
+    pub base: Option<PathBuf>,
     pub depth: u32,
     pub timeout_secs: u64,
     pub int_grace_secs: u64,

@@ -17,6 +17,7 @@ pub mod install;
 pub mod model;
 pub mod paths;
 pub mod pick;
+pub mod placement;
 pub mod registry;
 pub mod run;
 pub mod spawn;

@@ -105,6 +105,29 @@ impl World {
             .status()
             .unwrap();
         assert!(git.success());
+        // A HEAD to cut worktrees from. Local identity, never signed.
+        for args in [
+            vec!["config", "user.name", "World"],
+            vec!["config", "user.email", "world@example.invalid"],
+            vec!["config", "commit.gpgsign", "false"],
+            vec![
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "chore: a first commit",
+            ],
+        ] {
+            let done = StdCommand::new("git")
+                .args(&args)
+                .current_dir(&world.work)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .status()
+                .unwrap();
+            assert!(done.success(), "git {args:?}");
+        }
         world
     }
 

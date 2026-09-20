@@ -15,6 +15,12 @@ pub struct Claude;
 /// which could otherwise write on the callee's behalf.
 const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
 
+/// A writer's tool set: it may edit files, and Claude Code itself confines
+/// Edit/Write to the working directory. Still NO Bash — without a sandbox a
+/// shell could write anywhere, so a Claude writer cannot run the tests it
+/// breaks; the caller does that. (Codex writers run inside its sandbox.)
+const WRITER_TOOLS: &str = "Read,Grep,Glob,Edit,Write";
+
 impl Harness for Claude {
     fn id(&self) -> HarnessId {
         HarnessId::Claude
@@ -51,19 +57,24 @@ impl Harness for Claude {
         if let Some(session) = &spec.session_id {
             argv.extend(["--session-id".to_string(), session.clone()]);
         }
-        if spec.role.is_read_only() {
-            argv.extend(
-                [
-                    "--tools",
-                    READ_ONLY_TOOLS,
-                    "--strict-mcp-config",
-                    // Anything that would need a permission is denied, not asked.
-                    "--permission-mode",
-                    "dontAsk",
-                ]
-                .map(String::from),
-            );
-        }
+        let (tools, mode) = if spec.role.is_read_only() {
+            // Anything that would need a permission is denied, not asked.
+            (READ_ONLY_TOOLS, "dontAsk")
+        } else {
+            // Edits inside the working directory are accepted; anything else
+            // that would need a permission is denied.
+            (WRITER_TOOLS, "acceptEdits")
+        };
+        argv.extend(
+            [
+                "--tools",
+                tools,
+                "--strict-mcp-config",
+                "--permission-mode",
+                mode,
+            ]
+            .map(String::from),
+        );
         argv
     }
 
@@ -80,26 +91,24 @@ impl Harness for Claude {
         {
             return Err(format!("{arg} is not a flag cahoots emits"));
         }
-        if let Some(mode) = value_of(argv, "--permission-mode")
-            && mode != "dontAsk"
-            && mode != "plan"
-        {
+        // The fence is the PAIR (tool set, permission mode), and each role has
+        // exactly one. Anything else — a missing flag, Bash in the tools, a
+        // writer's mode on a reader — is refused.
+        let (tools, mode) = if role.is_read_only() {
+            (READ_ONLY_TOOLS, "dontAsk")
+        } else {
+            (WRITER_TOOLS, "acceptEdits")
+        };
+        if value_of(argv, "--tools") != Some(tools) {
+            return Err(format!("the {role} role must run with --tools {tools}"));
+        }
+        if value_of(argv, "--permission-mode") != Some(mode) {
             return Err(format!(
-                "permission mode {mode} lets the callee act unasked"
+                "the {role} role must run with --permission-mode {mode}"
             ));
         }
-        if role.is_read_only() {
-            if value_of(argv, "--tools") != Some(READ_ONLY_TOOLS) {
-                return Err(format!(
-                    "a read-only role must run with --tools {READ_ONLY_TOOLS}"
-                ));
-            }
-            if !argv.iter().any(|arg| arg == "--strict-mcp-config") {
-                return Err("a read-only role must run with --strict-mcp-config".to_string());
-            }
-            if value_of(argv, "--permission-mode").is_none() {
-                return Err("a read-only role must set a permission mode".to_string());
-            }
+        if !argv.iter().any(|arg| arg == "--strict-mcp-config") {
+            return Err("every role must run with --strict-mcp-config".to_string());
         }
         Ok(())
     }

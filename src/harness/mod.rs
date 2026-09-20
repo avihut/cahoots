@@ -216,31 +216,67 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_role_without_its_read_only_proof_is_refused() {
+    fn a_role_without_its_fence_is_refused() {
         for id in HarnessId::ALL {
-            let good = command_line(&spec(id, Role::Explore)).unwrap();
-            // Drop each argument in turn; any result that lost the fence must fail.
-            let proofs: &[&str] = match id {
-                HarnessId::Claude => &[
-                    "--tools",
-                    "Read,Grep,Glob",
-                    "--strict-mcp-config",
-                    "dontAsk",
-                ],
-                HarnessId::Codex => &[
-                    "--sandbox",
-                    "read-only",
-                    "--ignore-rules",
-                    "approval_policy=\"never\"",
-                ],
-            };
-            for proof in proofs {
-                let argv: Vec<String> = good.iter().filter(|a| a != proof).cloned().collect();
-                assert!(
-                    validate(harness(id), Role::Explore, &argv).is_err(),
-                    "{id}: dropping {proof} went unnoticed"
-                );
+            for role in Role::ALL {
+                let good = command_line(&spec(id, role)).unwrap();
+                // Drop each argument of the fence in turn; every result must fail.
+                let fence: &[&str] = match (id, role.is_read_only()) {
+                    (HarnessId::Claude, true) => &[
+                        "--tools",
+                        "Read,Grep,Glob",
+                        "--strict-mcp-config",
+                        "dontAsk",
+                    ],
+                    (HarnessId::Claude, false) => &[
+                        "--tools",
+                        "Read,Grep,Glob,Edit,Write",
+                        "--strict-mcp-config",
+                        "acceptEdits",
+                    ],
+                    (HarnessId::Codex, true) => &[
+                        "--sandbox",
+                        "read-only",
+                        "--ignore-rules",
+                        "approval_policy=\"never\"",
+                    ],
+                    (HarnessId::Codex, false) => &[
+                        "--sandbox",
+                        "workspace-write",
+                        "--ignore-rules",
+                        "approval_policy=\"never\"",
+                    ],
+                };
+                for part in fence {
+                    let argv: Vec<String> = good.iter().filter(|a| a != part).cloned().collect();
+                    assert!(
+                        validate(harness(id), role, &argv).is_err(),
+                        "{id} {role}: dropping {part} went unnoticed"
+                    );
+                }
             }
+        }
+    }
+
+    /// A reader never gets a writer's command line, whatever a builder does:
+    /// the validator is told the ROLE, and holds the argv to that role's fence.
+    #[test]
+    fn a_writers_command_is_refused_for_a_reader_and_the_reverse() {
+        for id in HarnessId::ALL {
+            let writer = command_line(&spec(id, Role::Implement)).unwrap();
+            let reader = command_line(&spec(id, Role::Review)).unwrap();
+            assert!(
+                validate(harness(id), Role::Review, &writer).is_err(),
+                "{id}"
+            );
+            assert!(
+                validate(harness(id), Role::Implement, &reader).is_err(),
+                "{id}"
+            );
+            assert!(
+                !writer.iter().any(|arg| arg.contains("Bash")),
+                "{id}: a writer got a shell outside a sandbox"
+            );
         }
     }
 

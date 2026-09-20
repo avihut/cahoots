@@ -17,6 +17,7 @@ use nix::sys::signal::Signal;
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::harness::{self, RunSpec};
+use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{RunDir, RunRecord, State, now, try_lock_file, write_private};
 use crate::spawn::{self, Callee};
@@ -86,6 +87,15 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
                 ),
             )
         })?;
+
+    // A writer's worktree is cut HERE, detached from the caller: in a daft
+    // repository that runs the repo's setup hooks, which can outlast a
+    // caller's tool call.
+    if record.placement == Placement::Fork {
+        let base = record.base.clone().unwrap_or_else(|| record.cwd.clone());
+        record.cwd = placement::cut(dirs, &base, &record.id)?;
+        dir.save(record)?;
+    }
 
     let spec = RunSpec {
         role: record.role,

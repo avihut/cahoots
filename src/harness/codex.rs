@@ -56,6 +56,12 @@ impl Harness for Codex {
             // No repo check for a run that cannot write: advice about a plain
             // directory is a fine thing to ask for.
             argv.extend(["--sandbox", "read-only", "--skip-git-repo-check"].map(String::from));
+        } else {
+            // A writer runs inside Codex's own sandbox: it may write under its
+            // working directory (a worktree of its own) and the temp
+            // directories, nowhere else, and it has no network. Codex's
+            // repository check stays ON.
+            argv.extend(["--sandbox", "workspace-write"].map(String::from));
         }
         argv.extend([
             "-m".to_string(),
@@ -100,8 +106,16 @@ impl Harness for Codex {
         if !argv.iter().any(|arg| arg == NO_USER_RULES) {
             return Err(format!("every Codex run must carry {NO_USER_RULES}"));
         }
-        if role.is_read_only() && value_of(argv, "--sandbox") != Some("read-only") {
-            return Err("a read-only role must run with --sandbox read-only".to_string());
+        let sandbox = if role.is_read_only() {
+            "read-only"
+        } else {
+            "workspace-write"
+        };
+        if value_of(argv, "--sandbox") != Some(sandbox) {
+            return Err(format!("the {role} role must run with --sandbox {sandbox}"));
+        }
+        if !role.is_read_only() && argv.iter().any(|arg| arg == "--skip-git-repo-check") {
+            return Err("a writer must not skip Codex's repository check".to_string());
         }
         Ok(())
     }
