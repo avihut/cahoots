@@ -40,6 +40,10 @@ pub struct HarnessConfig {
     pub cap: Option<u8>,
     pub max_concurrent: Option<u32>,
     pub billing: Option<Billing>,
+    /// Percent of the plan at which a run that is ALREADY going is stopped.
+    /// Above `cap`, which only decides whether a run may start. Default:
+    /// cap + 10.
+    pub abort_at: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +101,8 @@ pub struct LimitsConfig {
     /// Let a writer work in the caller's own working tree (`--in-place`)
     /// instead of a worktree of its own. Off unless a person turns it on.
     pub allow_in_place: Option<bool>,
+    /// How often a running job's target is re-checked against `abort_at`.
+    pub watchdog_secs: Option<u64>,
 }
 
 impl UserConfig {
@@ -143,6 +149,14 @@ impl UserConfig {
                 return Err(Fail::config(format!(
                     "harness.{id}.cap = {cap}: must be 1–100"
                 )));
+            }
+            if let Some(abort_at) = harness.abort_at {
+                let cap = harness.cap.unwrap_or(crate::registry::DEFAULT_CAP);
+                if abort_at <= cap || abort_at > 100 {
+                    return Err(Fail::config(format!(
+                        "harness.{id}.abort_at = {abort_at}: must be above the cap ({cap}) and at most 100"
+                    )));
+                }
             }
             if let Some(n) = harness.max_concurrent
                 && !(1..=8).contains(&n)
@@ -193,6 +207,7 @@ impl UserConfig {
         in_range("wait_secs", limits.wait_secs, 0..=540)?;
         in_range("int_grace_secs", limits.int_grace_secs, 1..=60)?;
         in_range("term_grace_secs", limits.term_grace_secs, 1..=60)?;
+        in_range("watchdog_secs", limits.watchdog_secs, 1..=3600)?;
         Ok(())
     }
 }
@@ -258,6 +273,8 @@ mod tests {
             "schema = 1\n[roles.advise]\ncandidates = []",
             "schema = 1\n[roles.advise]\ncandidates = [{ harness = \"codex\", model = \"--oss\", effort = \"high\" }]",
             "schema = 1\n[limits]\ntimeout_secs = 5",
+            "schema = 1\n[harness.codex]\ncap = 80\nabort_at = 80",
+            "schema = 1\n[harness.codex]\nabort_at = 60",
         ] {
             assert!(UserConfig::parse(text).is_err(), "{text:?}");
         }

@@ -86,6 +86,7 @@ Caps and the usage meter go in `~/.config/cahoots/config.toml`:
 ```toml
 schema = 1
 harness.codex.cap = 80      # delegate to Codex while it is under 80% of its plan
+harness.codex.abort_at = 92 # …and stop a run in flight if it crosses 92% (default: cap + 10)
 harness.claude.cap = 50
 
 [meter.agent-usage]         # optional; without it only the built-in ledger gates

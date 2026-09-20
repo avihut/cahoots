@@ -74,8 +74,17 @@ admitting the run that crosses the line.
   `pick` skips a busy target, an explicit `--to` returns *busy*. A global
   `max_active_runs`. `CAHOOTS_DEPTH` is exported on every spawn, but an agent
   can scrub it — the slots are the real bound on recursion.
-- A run stops at its wall-clock timeout or the callee's own budget flag. A
-  mid-run meter watchdog comes in M4, and acts only on fresh readings.
+- A run stops at its wall-clock timeout, at the callee's own budget flag, or
+  at the **watchdog** (M4): while a run is going, the supervisor re-asks the
+  tracker every `limits.watchdog_secs` (default 120) whether the target has
+  crossed `harness.<id>.abort_at` — a threshold of its own, always above the
+  cap (default cap + 10), because stopping work in flight is a higher bar than
+  refusing to start it. It takes two over-threshold readings in a row, and
+  only FRESH ones count: a stale, missing or unintelligible reading is "no
+  reading", resets the count, and never stops anything. The run ends as
+  `budget` (exit 43) with what it had said so far, and can be resumed after
+  the limit resets. Without a tracker there is no watchdog: cahoots' own
+  ledger cannot move during a run.
 
 ## Registry and command construction (M1)
 
