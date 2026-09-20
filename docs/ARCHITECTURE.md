@@ -78,9 +78,11 @@ admitting the run that crosses the line.
 Commands are built **in code**. A `Harness` trait turns a typed `RunSpec` into
 an argv array; a final `validate(role, argv)` requires the read-only proof for
 read-only roles and rejects the flags that widen authority
-(`--dangerously-*`, `--config`, `--add-dir`, `--settings`, …). The one `-c`
-cahoots emits — Codex's `model_reasoning_effort=<level>` — is held to exactly
-that shape. The caller hands the brief over as a FILE (`--brief <path>`: a
+(`--dangerously-*`, `--config`, `--add-dir`, `--settings`, …). Codex gets
+exactly two `-c` overrides, each held to its exact shape:
+`model_reasoning_effort=<level>`, and `approval_policy="never"` — which, with
+`--ignore-rules`, is as much a part of Codex's fence as the sandbox flag
+(docs/SPIKE.md S7). The caller hands the brief over as a FILE (`--brief <path>`: a
 heredoc or a pipe defeats Codex's rule matching); cahoots hands it to the
 callee on stdin, never in argv.
 

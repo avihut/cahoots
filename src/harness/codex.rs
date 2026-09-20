@@ -7,9 +7,26 @@ use crate::model::{Effort, HarnessId, Role};
 
 pub struct Codex;
 
-/// Codex takes the effort only as a config override. This is the ONE `-c` key
-/// cahoots ever emits, and `check_argv` holds `-c` to exactly this shape.
+/// Codex takes the effort only as a config override.
 const EFFORT_KEY: &str = "model_reasoning_effort=";
+
+/// A callee NEVER escalates out of its sandbox. A callee inherits the user's
+/// Codex configuration, and that configuration can hand approvals to an
+/// automated reviewer (`approvals_reviewer = "auto_review"`): a blocked write
+/// then becomes an approval request that is GRANTED, and a `--sandbox
+/// read-only` run writes wherever it likes. Found against the real CLI on
+/// 2026-09-20 (docs/SPIKE.md S7) — the sandbox flag alone is not a fence.
+///
+/// These are the only two `-c` overrides cahoots ever emits, and `check_argv`
+/// holds `-c` to exactly these two shapes.
+const NEVER_ESCALATE: &str = "approval_policy=\"never\"";
+
+/// The user's exec-policy rules do not apply to a callee either: a rule with
+/// `decision="allow"` runs its command OUTSIDE the sandbox (that is how a
+/// Codex CALLER reaches cahoots at all), so a callee that inherited them
+/// would hold exactly the authority the user granted their own sessions —
+/// not the role's.
+const NO_USER_RULES: &str = "--ignore-rules";
 
 impl Harness for Codex {
     fn id(&self) -> HarnessId {
@@ -32,7 +49,9 @@ impl Harness for Codex {
     }
 
     fn build_argv(&self, spec: &RunSpec) -> Vec<String> {
-        let mut argv: Vec<String> = ["exec", "--json"].map(String::from).to_vec();
+        let mut argv: Vec<String> = ["exec", "--json", NO_USER_RULES, "-c", NEVER_ESCALATE]
+            .map(String::from)
+            .to_vec();
         if spec.role.is_read_only() {
             // No repo check for a run that cannot write: advice about a plain
             // directory is a fine thing to ask for.
@@ -59,9 +78,9 @@ impl Harness for Codex {
                 let effort_ok = value
                     .strip_prefix(EFFORT_KEY)
                     .is_some_and(|level| level.parse::<Effort>().is_ok());
-                if !effort_ok {
+                if !effort_ok && value != NEVER_ESCALATE {
                     return Err(format!(
-                        "-c {value} is not the one config override cahoots emits"
+                        "-c {value} is not one of the two config overrides cahoots emits"
                     ));
                 }
             }
@@ -69,6 +88,17 @@ impl Harness for Codex {
             {
                 return Err(format!("{arg} is not a flag cahoots emits"));
             }
+        }
+        // The fence has three parts, and every role needs all of them: the
+        // sandbox, no escalation out of it, and none of the user's allow-rules.
+        if !argv
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == NEVER_ESCALATE)
+        {
+            return Err(format!("every Codex run must carry -c {NEVER_ESCALATE}"));
+        }
+        if !argv.iter().any(|arg| arg == NO_USER_RULES) {
+            return Err(format!("every Codex run must carry {NO_USER_RULES}"));
         }
         if role.is_read_only() && value_of(argv, "--sandbox") != Some("read-only") {
             return Err("a read-only role must run with --sandbox read-only".to_string());
@@ -178,9 +208,20 @@ mod tests {
     #[test]
     fn only_the_effort_override_may_follow_dash_c() {
         let argv = |value: &str| -> Vec<String> {
-            ["exec", "--json", "--sandbox", "read-only", "-c", value, "-"]
-                .map(String::from)
-                .to_vec()
+            [
+                "exec",
+                "--json",
+                "--ignore-rules",
+                "-c",
+                "approval_policy=\"never\"",
+                "--sandbox",
+                "read-only",
+                "-c",
+                value,
+                "-",
+            ]
+            .map(String::from)
+            .to_vec()
         };
         assert!(
             Codex
@@ -188,6 +229,9 @@ mod tests {
                 .is_ok()
         );
         for bad in [
+            "approval_policy=\"on-request\"",
+            "approval_policy=\"on-failure\"",
+            "approvals_reviewer=\"auto_review\"",
             "model_reasoning_effort=ultra",
             "sandbox_mode=\"danger-full-access\"",
             "model_reasoning_effort=high\nsandbox_mode=x",
