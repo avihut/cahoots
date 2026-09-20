@@ -54,7 +54,10 @@ impl Harness for Claude {
         ]
         .map(String::from)
         .to_vec();
-        if let Some(session) = &spec.session_id {
+        if let Some(session) = &spec.resume {
+            // Continues that session under the same id.
+            argv.extend(["--resume".to_string(), session.clone()]);
+        } else if let Some(session) = &spec.session_id {
             argv.extend(["--session-id".to_string(), session.clone()]);
         }
         let (tools, mode) = if spec.role.is_read_only() {

@@ -85,10 +85,15 @@ fn main() {
         })
     };
 
-    let session = argv
-        .iter()
-        .position(|arg| arg == "--session-id")
-        .and_then(|at| argv.get(at + 1).cloned())
+    // A resumed session keeps its id: `claude --resume <id>`, `codex exec resume <id>`.
+    let after = |flag: &str| {
+        argv.iter()
+            .position(|arg| arg == flag)
+            .and_then(|at| argv.get(at + 1).cloned())
+    };
+    let session = after("--session-id")
+        .or_else(|| after("--resume"))
+        .or_else(|| after("resume"))
         .unwrap_or_else(|| "01a0bf61-0000-7000-8000-00000000fa4e".to_string());
     if flavor == "claude" {
         emit(

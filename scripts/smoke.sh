@@ -10,7 +10,8 @@
 #   1. the command line cahoots builds is one the real CLI accepts, and its
 #      real output parses — the run comes back with its answer;
 #   2. a READER cannot write: asked to create a file in its working directory
-#      and one in your home, it creates neither;
+#      and one in your home, it creates neither — and neither does the same
+#      session when it is RESUMED and asked again;
 #   3. a WRITER writes in its own worktree — not in the caller's tree — and,
 #      asked to create a file in your home, does not.
 #
@@ -83,6 +84,21 @@ for caller in claude codex; do
     if [ -e "$outside" ]; then
         fail "A READER WROTE OUTSIDE ITS WORKING DIRECTORY — $outside (caller $caller)"
         rm -f "$outside"
+    fi
+
+    # The same conversation, resumed, asked the same thing: a resumed session
+    # must be fenced by what cahoots says NOW, not by what the session was.
+    run_id=$(printf '%s' "$out" | sed -n 's/.*"run":"\([^"]*\)".*/\1/p')
+    echo "── the same reader, resumed"
+    set +e
+    out=$(cahoots resume "$run_id" --caller "$caller" --brief "$brief" --wait 300)
+    code=$?
+    set -e
+    echo "$out"
+    [ "$code" -eq 0 ] || fail "the resumed run for caller $caller failed (exit $code)"
+    if [ -e "$inside" ] || [ -e "$outside" ]; then
+        fail "A RESUMED READER WROTE A FILE (caller $caller)"
+        rm -f "$inside" "$outside"
     fi
 done
 rm -f "$brief"

@@ -31,8 +31,8 @@ directory permissions are already broken.
 
 ## The boundary
 
-**Two tiers of verbs.** Agent verbs — `pick run wait status result cancel
-outcome notes review` — are the only ones the printed rules name. Human verbs
+**Two tiers of verbs.** Agent verbs — `pick run resume wait status result
+cancel outcome notes review` — are the only ones the printed rules name. Human verbs
 (`install`, `uninstall`, `enable`, `learn`, `registry`) change what cahoots may
 do, and refuse to run without a terminal on stdin. A test pins the agent tier
 by name: growing it is a change to this document.
@@ -41,6 +41,16 @@ by name: growing it is a change to this document.
 only by configuration, which is a human's file. `--in-place` works only if
 configuration allows it. Read-only roles are forced read-only by
 `validate_argv`, after every other decision.
+
+**Resuming is not a side door.** `resume` continues a harness's own session,
+and is a new run in every other respect: gated, slotted, depth-checked,
+recorded. It carries the ROLE's fence again rather than trusting what the
+session had — `codex exec resume` has no `--sandbox` flag and a resumed
+session inherits its old sandbox, so the mode is restated as an exactly-shaped
+`-c sandbox_mode="…"` that `validate` requires. The session id it puts on the
+command line came out of a callee's output stream, so it is held to the shape
+of an id first. A run is resumed only from the workspace it was started in,
+and never by the harness that was its target.
 
 **Paths.** A brief is stdin, or a regular UTF-8 file, size-capped, under the
 working directory, the git toplevel or a system temp dir — so `cahoots run

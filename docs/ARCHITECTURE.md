@@ -42,10 +42,14 @@ supervisor, and there is no second, foreground path to keep honest.
   process's start time and command still match.
 - Synchronous: `std::process`, reader threads feeding one `mpsc` channel
   (`recv_timeout` + `try_wait`, never an undeadlined `join`).
-- **Resume** (M4) is a new, gated run. Claude's session id is preset with
-  `--session-id`; Codex's is persisted at its first `thread.started` event.
-  Never `--ephemeral` — it also suppresses the rollout file that carries
-  Codex's rate-limit snapshot, which is what the gate reads.
+- **Resume** (M4): `cahoots resume <run> --brief <file>` is a new, gated run
+  on the same harness, model, role and place, with the harness's own session
+  picked up (`claude --resume <id>`; `codex exec resume <id>`). Claude's
+  session id is preset with `--session-id`; Codex's is persisted at its first
+  `thread.started` event — so a cancelled or timed-out run is resumable. A
+  resumed writer goes back into the worktree it already has. Never
+  `--ephemeral`: it also suppresses the rollout file that carries Codex's
+  rate-limit snapshot, which is what the gate reads.
 
 ## The gate (M1)
 

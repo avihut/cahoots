@@ -6,8 +6,8 @@ use crate::model::HarnessId;
 
 /// The verbs a harness is told to allow. Exactly the agent tier
 /// (`cli::tier_of`); a test holds the two together.
-pub const AGENT_VERBS: [&str; 9] = [
-    "pick", "run", "wait", "status", "result", "cancel", "outcome", "notes", "review",
+pub const AGENT_VERBS: [&str; 10] = [
+    "pick", "run", "resume", "wait", "status", "result", "cancel", "outcome", "notes", "review",
 ];
 
 /// Where the rule goes, for a person reading the message.

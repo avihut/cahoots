@@ -157,6 +157,25 @@ in the user's `config.toml` for a repository it is run in with a writer
 sandbox. That is Codex's own bookkeeping, not cahoots', but a cahoots run can
 cause it.
 
+## S8 — Resuming a Codex session (before building `resume`)
+
+`codex exec resume <thread>` accepts `--json`, `-m`, `-c`, `--ignore-rules`
+and `--skip-git-repo-check` — but **not `--sandbox`**. Probed against the real
+CLI, with `approval_policy="never"` and `--ignore-rules` throughout:
+
+| Session started as | Resumed with | Wrote in its directory | Wrote in `$HOME` |
+|---|---|---|---|
+| `--sandbox read-only` | nothing about the sandbox | no | — |
+| `--sandbox read-only` | `-c sandbox_mode="read-only"` | no | — |
+| `--sandbox workspace-write` | nothing about the sandbox | **yes** | — |
+| `--sandbox workspace-write` | `-c sandbox_mode="workspace-write"` | yes | no |
+
+A resumed session inherits the sandbox it was started with. cahoots does not
+rely on that: a resume restates the role's mode as `-c sandbox_mode="…"`, the
+third and last `-c` shape `validate` allows. Both resumed sessions remembered
+their first brief. (`claude --resume <id>` needs no such care: its fence is the
+`--tools` whitelist, stated on every command line.)
+
 ## What changes in M1 because of this
 
 1. `run` takes `--brief <path>`; the skill never uses a heredoc or a pipe.
