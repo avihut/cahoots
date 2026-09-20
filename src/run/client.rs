@@ -418,6 +418,39 @@ pub fn cancel(id: &str) -> Res<Envelope> {
     Ok(report(&dir, &record, false))
 }
 
+/// `outcome`: what became of a run's result. The caller says so right after
+/// it used (or dropped) the answer — it is the only ground truth the learning
+/// has, which is why a missing outcome stays "unknown" and is never guessed.
+pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
+    refuse_inside_a_sandbox("outcome")?;
+    let dirs = Dirs::resolve()?;
+    reconcile(&dirs);
+    record::validate_id(id)?;
+    let finished = crate::history::stories(&crate::history::read(&dirs))
+        .iter()
+        .any(|story| story.run == id);
+    if !finished {
+        // Still going, or never existed: the run directory tells which.
+        let record = RunDir::open(&dirs, id)?.load()?;
+        return Err(Fail::new(
+            Exit::NotFinished,
+            format!(
+                "run {} has not finished — there is no result to have an outcome yet",
+                record.id
+            ),
+        ));
+    }
+    crate::history::append(
+        &dirs,
+        &crate::history::Event::Outcome {
+            t: now(),
+            run: id.to_string(),
+            outcome,
+        },
+    )?;
+    Ok(Envelope::new(Exit::Ok, None).with_data(json!({ "run": id, "outcome": outcome })))
+}
+
 fn summary(record: &RunRecord) -> Value {
     json!({
         "run": record.id,

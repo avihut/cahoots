@@ -72,6 +72,19 @@ pub fn supervise(dirs: &Dirs, id: &str) -> Res<()> {
         record.finish(State::Failed, fail.exit, Some(fail.message.clone()));
     }
     dir.save(&record)?;
+    // The long memory: the run's content ages out in days, this line does not.
+    // The sample rate is the rate of THIS moment, and the bit never changes.
+    let sample_rate = Registry::load(dirs).map_or(0.0, |registry| {
+        if registry.review.enabled {
+            registry.review.sample_rate
+        } else {
+            0.0
+        }
+    });
+    if let Err(fail) = crate::history::append(dirs, &crate::history::finished(&record, sample_rate))
+    {
+        eprintln!("[supervisor] {}", fail.message);
+    }
     outcome
 }
 

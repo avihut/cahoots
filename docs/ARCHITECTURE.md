@@ -170,12 +170,31 @@ fixes it for its own harness.
 
 ## Review and local learning (M5, opt-in)
 
-- **Ground truth is `outcome`** — `accepted | reworked | discarded`, recorded by
-  the caller right after it uses a result. Missing means unknown.
-- A `sampled` bit is fixed at completion (a hash of the run id against the
-  sample rate), so changing the rate never re-selects history.
-- The delegating harness reviews; a harness that never does simply learns
-  nothing.
+**What exists: the long memory.** A run's content (brief, answer) is kept for
+days; what it WAS is kept in `<state>/history.jsonl`, one short line per
+event, for as long as statistics need it — ids, enums, counts and the working
+directory, never content. It is append-only with several writers (a
+supervisor finishing, a caller recording an outcome), each event one line
+written with `O_APPEND`, and a run's story is the fold of its events. So the
+file is its own rebuildable index: there is no database to fall out of step
+with it. (The plan named SQLite; at hundreds of records a JSONL event log does
+the same job with no native dependency.)
+
+- **Ground truth is `outcome`** — `cahoots outcome <run>
+  accepted|reworked|discarded`, recorded by the caller once it knows. The last
+  word wins. Missing means unknown, and `report` keeps "unknown" as a column of
+  its own: it is never folded into "accepted".
+- A **`sampled` bit is fixed when a run ends**, from a hash of the run id
+  against the sample rate of that moment — and only if review is on. Changing
+  the rate later never re-selects history, and nobody picks which runs get
+  reviewed.
+- `cahoots report [--days N]`: per role and target — runs, how they ended,
+  what became of them, tokens, median duration.
+
+**What is designed, not built:**
+
+- The delegating harness reviews a sampled run; a harness that never does
+  simply learns nothing.
 - **Notes are structured**, because they are a persistent prompt-injection
   channel (callee output → review → text every future session reads): a closed
   `kind` enum plus a short, filtered detail line, rendered from fixed
