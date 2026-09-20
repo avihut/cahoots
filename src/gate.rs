@@ -131,6 +131,53 @@ fn agent_usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admis
     Err(Fail::new(verdict, why))
 }
 
+/// What the meter says about a run that is already going.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Watch {
+    Under,
+    Over {
+        percent: Option<f64>,
+    },
+    /// Stale, missing, or not an answer. A watchdog that acted on this would
+    /// kill runs because the tracker hiccuped; it does nothing instead.
+    Unknown,
+}
+
+/// Asks the tracker whether `harness` has crossed its `abort_at`. `None` when
+/// no tracker is configured — the built-in ledger cannot move during a run.
+///
+/// Unlike admission this never falls back to a stale reading: stopping work
+/// in flight needs a FRESH number, so anything else is `Unknown`.
+pub fn watch(registry: &Registry, harness: HarnessId) -> Option<Watch> {
+    let meter = registry.meters.agent_usage.as_ref()?;
+    let Ok(binary) = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[]) else {
+        return Some(Watch::Unknown);
+    };
+    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
+    let args = [
+        "headroom".to_string(),
+        "--provider".to_string(),
+        harness.as_str().to_string(),
+        "--cap".to_string(),
+        registry.harness(harness).abort_at.to_string(),
+        "--max-data-age".to_string(),
+        format!("{}m", max_age.div_ceil(60)),
+        "--json".to_string(),
+    ];
+    let Ok(output) = spawn::run_helper(&binary, &args, None, Duration::from_secs(10)) else {
+        return Some(Watch::Unknown);
+    };
+    Some(match output.status {
+        Some(0) => Watch::Under,
+        Some(24) => Watch::Over {
+            percent: serde_json::from_str::<Value>(output.stdout.trim())
+                .ok()
+                .and_then(|reading| reading["percent"].as_f64()),
+        },
+        _ => Watch::Unknown,
+    })
+}
+
 fn ledger(dirs: &Dirs, registry: &Registry, target: &Candidate) -> Res<()> {
     let runs: Vec<_> = record::all(dirs)
         .into_iter()

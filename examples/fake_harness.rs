@@ -30,18 +30,39 @@ fn emit(value: serde_json::Value) {
 /// binary) says, and logs each call to `usage-cli.calls`.
 fn fake_meter(exe: &std::path::Path, argv: &[String]) {
     let calls = exe.with_file_name("usage-cli.calls");
+    let is_watch = |line: &str| line.contains("--max-data-age") && !line.contains("--forecast");
+    // How many watchdog calls came before this one — for "watch_sequence".
+    let earlier_watches = std::fs::read_to_string(&calls)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| is_watch(line))
+        .count();
     let mut log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(calls)
+        .open(&calls)
         .expect("calls");
     let _ = writeln!(log, "{}", argv[1..].join(" "));
     let plan: serde_json::Value = std::fs::read_to_string(exe.with_file_name("usage-cli.plan"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
+    // Three kinds of call: admission (guarded by data age, asks the forecast),
+    // admission's stale re-ask (unguarded), and the mid-run watchdog (guarded,
+    // no forecast) — answered by "watch", or by "watch_sequence" in turn, or
+    // "under" when the plan says nothing about it.
     let guarded = argv.iter().any(|arg| arg == "--max-data-age");
-    let answer = &plan[if guarded { "guarded" } else { "unguarded" }];
+    let forecast = argv.iter().any(|arg| arg == "--forecast");
+    let under = json!({"code": 0, "percent": 1});
+    let answer = match (guarded, forecast) {
+        (true, true) => &plan["guarded"],
+        (false, _) => &plan["unguarded"],
+        (true, false) => match plan["watch_sequence"].as_array() {
+            Some(sequence) if !sequence.is_empty() => &sequence[earlier_watches % sequence.len()],
+            _ if plan["watch"].is_object() => &plan["watch"],
+            _ => &under,
+        },
+    };
     if let Some(percent) = answer["percent"].as_f64() {
         println!(
             "{}",

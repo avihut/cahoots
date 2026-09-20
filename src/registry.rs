@@ -30,6 +30,8 @@ pub struct HarnessEntry {
     pub enabled: bool,
     pub binary: Option<PathBuf>,
     pub cap: u8,
+    /// Where a run that is already going gets stopped. Always above `cap`.
+    pub abort_at: u8,
     pub max_concurrent: u32,
     pub billing: Billing,
     pub origin: BTreeMap<&'static str, Origin>,
@@ -50,6 +52,7 @@ pub struct Limits {
     pub int_grace_secs: u64,
     pub term_grace_secs: u64,
     pub allow_in_place: bool,
+    pub watchdog_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +72,15 @@ pub struct Registry {
 
 pub const DEFAULT_CAP: u8 = 75;
 pub const DEFAULT_MAX_DATA_AGE_SECS: u64 = 900;
+
+/// Ten points above the cap, never at 100 if it can be helped (a plan that is
+/// fully used has already cut the user off), and always above the cap.
+fn default_abort_at(cap: u8) -> u8 {
+    cap.saturating_add(10)
+        .min(99)
+        .max(cap.saturating_add(1))
+        .min(100)
+}
 
 fn candidate(harness: HarnessId, model: &str, effort: Effort) -> Candidate {
     Candidate {
@@ -177,12 +189,17 @@ impl Registry {
                 user.is_some_and(|u| u.max_concurrent.is_some()),
             );
             pick("billing", user.is_some_and(|u| u.billing.is_some()));
+            pick("abort_at", user.is_some_and(|u| u.abort_at.is_some()));
+            let cap = user.and_then(|u| u.cap).unwrap_or(DEFAULT_CAP);
             harnesses.insert(
                 id,
                 HarnessEntry {
                     enabled: enabled.contains(&id),
                     binary: user.and_then(|u| u.binary.clone()),
-                    cap: user.and_then(|u| u.cap).unwrap_or(DEFAULT_CAP),
+                    cap,
+                    abort_at: user
+                        .and_then(|u| u.abort_at)
+                        .unwrap_or_else(|| default_abort_at(cap)),
                     max_concurrent: user.and_then(|u| u.max_concurrent).unwrap_or(1),
                     billing: user.and_then(|u| u.billing).unwrap_or_default(),
                     origin,
@@ -217,6 +234,7 @@ impl Registry {
                 int_grace_secs: config.limits.int_grace_secs.unwrap_or(10),
                 term_grace_secs: config.limits.term_grace_secs.unwrap_or(5),
                 allow_in_place: config.limits.allow_in_place.unwrap_or(false),
+                watchdog_secs: config.limits.watchdog_secs.unwrap_or(120),
             },
             meters: Meters {
                 agent_usage: config.meter.agent_usage.clone(),
@@ -272,6 +290,20 @@ mod tests {
     }
 
     #[test]
+    fn the_default_abort_threshold_sits_above_the_cap() {
+        for (cap, abort_at) in [
+            (50, 60),
+            (75, 85),
+            (89, 99),
+            (95, 99),
+            (99, 100),
+            (100, 100),
+        ] {
+            assert_eq!(default_abort_at(cap), abort_at, "cap {cap}");
+        }
+    }
+
+    #[test]
     fn nothing_is_enabled_until_a_human_says_so() {
         let registry = Registry::effective(&UserConfig::default(), &[]);
         assert!(registry.harnesses.values().all(|h| !h.enabled));
@@ -308,6 +340,11 @@ mod tests {
         assert_eq!((codex.cap, codex.origin["cap"]), (80, Origin::User));
         assert_eq!(codex.origin["billing"], Origin::Default);
         assert_eq!(registry.harness(HarnessId::Claude).cap, DEFAULT_CAP);
+        // Stopping a run in flight is always a higher bar than refusing to start one.
+        assert_eq!(codex.abort_at, 90);
+        for entry in registry.harnesses.values() {
+            assert!(entry.abort_at > entry.cap && entry.abort_at <= 100);
+        }
         assert_eq!(registry.roles[&Role::Explore].origin, Origin::User);
         assert_eq!(registry.roles[&Role::Explore].candidates.len(), 1);
         assert_eq!(registry.roles[&Role::Advise].origin, Origin::Default);

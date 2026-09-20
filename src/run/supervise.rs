@@ -16,6 +16,7 @@ use nix::sys::signal::Signal;
 
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
+use crate::gate::{self, Watch};
 use crate::harness::{self, RunSpec};
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
@@ -32,12 +33,22 @@ const DRAIN: Duration = Duration::from_secs(5);
 enum Line {
     Out(String),
     Err(String),
+    /// A reader reached the end of its pipe. Counted, because the watchdog
+    /// holds a sender too and the channel would otherwise never disconnect.
+    Eof,
+    Reading(Watch),
 }
 
 enum Stop {
     Cancelled,
     TimedOut,
+    /// The target crossed its `abort_at` while the run was going.
+    OverBudget(Option<f64>),
 }
+
+/// Consecutive over-threshold readings it takes to stop a run. One could be a
+/// blip — or another session of the user's, about to be over.
+const OVER_READINGS_TO_STOP: u32 = 2;
 
 pub fn supervise(dirs: &Dirs, id: &str) -> Res<()> {
     // Out of the caller's session first: a harness that kills a timed-out
@@ -123,7 +134,11 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     record.callee_started = spawn::process_started(pid);
     dir.save(record)?;
 
-    let (stop, stderr_tail) = attend(dir, record, &mut child, pid)?;
+    let watchdog = Watchdog {
+        registry: registry.clone(),
+        every: Duration::from_secs(registry.limits.watchdog_secs),
+    };
+    let (stop, stderr_tail) = attend(dir, record, &mut child, pid, watchdog)?;
 
     let text = record.progress.final_text.clone().unwrap_or_default();
     write_private(&dir.final_path(), text.as_bytes())?;
@@ -135,6 +150,17 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
             State::TimedOut,
             Exit::TimedOut,
             Some(format!("stopped after {}s", record.timeout_secs)),
+        ),
+        Some(Stop::OverBudget(percent)) => (
+            State::Budget,
+            Exit::Budget,
+            Some(format!(
+                "stopped: {} crossed {}% of its plan{} while this run was going — what it \
+                 had said so far is kept, and the run can be resumed after the limit resets",
+                record.target.harness,
+                entry.abort_at,
+                percent.map_or(String::new(), |p| format!(" ({p:.0}% used)")),
+            )),
         ),
         None if record.progress.budget_stop => (State::Budget, Exit::Budget, failure),
         None if record.callee_exit == Some(0) && failure.is_none() => (State::Done, Exit::Ok, None),
@@ -151,14 +177,23 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
 
 /// Reads the callee until it exits, stopping it if asked to or if it runs out
 /// of time. Returns why it was stopped (if it was) and the tail of its stderr.
+/// Re-checks the target's usage while a run is going. Only with a tracker
+/// configured: cahoots' own ledger cannot move during a run.
+struct Watchdog {
+    registry: Registry,
+    every: Duration,
+}
+
 fn attend(
     dir: &RunDir,
     record: &mut RunRecord,
     child: &mut Child,
     pid: i32,
+    watchdog: Watchdog,
 ) -> Res<(Option<Stop>, String)> {
     let harness = harness::harness(record.target.harness);
     let (sender, lines) = mpsc::channel();
+    let mut open_streams = 0u32;
     let readers = [
         child
             .stdout
@@ -169,7 +204,24 @@ fn attend(
             .take()
             .map(|pipe| read_lines(pipe, sender.clone(), Line::Err)),
     ];
+    open_streams += readers.iter().flatten().count() as u32;
+    if watchdog.registry.meters.agent_usage.is_some() {
+        let (sender, target) = (sender.clone(), record.target.harness);
+        // Ends by itself: once the run is over nobody receives, and `send` fails.
+        thread::spawn(move || {
+            loop {
+                thread::sleep(watchdog.every);
+                let Some(reading) = gate::watch(&watchdog.registry, target) else {
+                    break;
+                };
+                if sender.send(Line::Reading(reading)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     drop(sender);
+    let mut over_readings = 0u32;
 
     let mut events = File::options()
         .create(true)
@@ -185,7 +237,7 @@ fn attend(
     let mut ladder: Option<Ladder> = None;
     let mut exited = false;
     let mut exited_at: Option<Instant> = None;
-    let mut streams_open = true;
+    let mut streams_open = open_streams > 0;
 
     while !exited || streams_open {
         match lines.recv_timeout(TICK) {
@@ -214,6 +266,21 @@ fn attend(
                     stderr_tail.drain(..cut);
                 }
             }
+            Ok(Line::Eof) => {
+                open_streams = open_streams.saturating_sub(1);
+                streams_open = open_streams > 0;
+            }
+            Ok(Line::Reading(Watch::Over { percent })) => {
+                over_readings += 1;
+                eprintln!("[watchdog] over the abort threshold ({over_readings} in a row)");
+                if over_readings >= OVER_READINGS_TO_STOP && stop.is_none() && !exited {
+                    stop = Some(Stop::OverBudget(percent));
+                    ladder = Some(Ladder::start(pid, record));
+                }
+            }
+            // "In a row" means what it says: a reading that is under, or that
+            // is no reading at all, starts the count again.
+            Ok(Line::Reading(Watch::Under | Watch::Unknown)) => over_readings = 0,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 streams_open = false;
@@ -278,7 +345,10 @@ fn read_lines<R: Read + Send + 'static>(
         loop {
             bytes.clear();
             match reader.read_until(b'\n', &mut bytes) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    let _ = sender.send(Line::Eof);
+                    break;
+                }
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&bytes);
                     let line = line.trim_end_matches(['\n', '\r']).to_string();
