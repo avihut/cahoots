@@ -33,6 +33,13 @@ fails() {
     checks=$((checks + 1))
 }
 
+# `with_stdin <text> <command…>` — for the pre-push check, which reads refs.
+with_stdin() {
+    local input=$1
+    shift
+    printf '%s' "$input" | "$@"
+}
+
 # ── no-warnings.sh ──────────────────────────────────────────────────────────
 passes "$scripts/no-warnings.sh" /bin/sh -c 'echo clean'
 fails "$scripts/no-warnings.sh" /bin/sh -c 'exit 7'
@@ -81,6 +88,7 @@ cp "$root/cog.toml" .
 cp "$root"/.github/workflows/*.yml .github/workflows/
 cp "$root/.github/rulesets/main-pr-gate.json" .github/rulesets/
 set_version 0.1.0
+printf '# generated\nversion = 4\n\n[[package]]\nname = "fixture"\nversion = "0.1.0"\n\n[[package]]\nname = "serde"\nversion = "1.0.0"\n' >Cargo.lock
 printf '[tasks.tool]\nrun = "scripts/tool.sh"\n' >mise.toml
 printf '#!/bin/sh\n' >scripts/tool.sh
 printf 'fn main() {}\n' >src/main.rs
@@ -153,9 +161,43 @@ git add -A
 subject 'fix: a bump smuggled into a fix' && fails "$scripts/commit-msg.sh" "$msg"
 subject 'release: v0.2.0' && passes "$scripts/commit-msg.sh" "$msg"
 git commit -qm 'release: v0.2.0'
+release=$(git rev-parse HEAD)
+
+# ── release-check.sh (pre-push stdin: local ref, sha, remote ref, sha) ──────
+zero=0000000000000000000000000000000000000000
+branch_push="refs/heads/main $release refs/heads/main $base
+"
+fails with_stdin "$branch_push" "$scripts/release-check.sh" # no tag yet
+git tag v0.2.0 "$release"                                   # lightweight
+fails with_stdin "$branch_push" "$scripts/release-check.sh"
+fails with_stdin "refs/tags/v0.2.0 $release refs/tags/v0.2.0 $zero
+" "$scripts/release-check.sh"
+git tag -d v0.2.0 >/dev/null
+git tag -a v0.2.0 -m 'notes' "$base" # annotated, wrong commit
+fails with_stdin "$branch_push" "$scripts/release-check.sh"
+git tag -d v0.2.0 >/dev/null
+git tag -a v0.2.0 -m 'notes' "$release"
+passes with_stdin "$branch_push" "$scripts/release-check.sh"
+passes with_stdin "${branch_push}refs/tags/v0.2.0 $(git rev-parse v0.2.0) refs/tags/v0.2.0 $zero
+" "$scripts/release-check.sh"
+passes with_stdin "(delete) $zero refs/heads/gone $base
+" "$scripts/release-check.sh"
+passes with_stdin "" "$scripts/release-check.sh"
+git tag -a v0.9.0 -m 'notes' "$release" # a tag whose version the tree doesn't hold
+fails with_stdin "refs/tags/v0.9.0 $(git rev-parse v0.9.0) refs/tags/v0.9.0 $zero
+" "$scripts/release-check.sh"
+git tag -d v0.9.0 >/dev/null
+
+# ── release-reminder.sh ─────────────────────────────────────────────────────
+passes "$scripts/release-reminder.sh" # HEAD is the tagged release
+git commit -q --allow-empty -m 'docs: not a release-worthy change'
+passes "$scripts/release-reminder.sh"
+git commit -q --allow-empty -m 'fix(gate): something users would notice'
+fails "$scripts/release-reminder.sh"
+git checkout -q -b topic
+passes "$scripts/release-reminder.sh" # releases are cut from main only
 
 # ── merge-commits.sh ────────────────────────────────────────────────────────
-git checkout -q -b topic
 fails env -u DAFT_MERGE_TARGET_BRANCH "$scripts/merge-commits.sh"
 git commit -q --allow-empty -m 'test: a conventional incoming commit'
 passes env DAFT_MERGE_TARGET_BRANCH=main "$scripts/merge-commits.sh"
@@ -170,6 +212,69 @@ passes env DAFT_MERGE_RESULT=success DAFT_MERGE_SOURCE_SHAS="$head" GIT_DIR="$ro
 fails env DAFT_MERGE_RESULT=success DAFT_MERGE_SOURCE_SHAS="$base" "$scripts/landed-check.sh"
 passes env DAFT_MERGE_RESULT=conflict DAFT_MERGE_SOURCE_SHAS="$base" "$scripts/landed-check.sh"
 fails env -u DAFT_MERGE_SOURCE_SHAS "$scripts/landed-check.sh"
+
+# ── release.sh ──────────────────────────────────────────────────────────────
+# The fixture's main holds a fix since v0.2.0.
+passes "$scripts/release.sh" # on topic: releases are cut from main, so: nothing
+passes test "$(git log -1 --format=%s)" = 'written with --no-verify'
+git checkout -q main
+printf 'stray\n' >stray.txt
+fails "$scripts/release.sh" # nothing gets built on a dirty tree
+rm stray.txt
+
+passes "$scripts/release.sh" --dry-run
+cp "$out" "$tmp/dry-run.log" # `passes` truncates $out before its own command reads it
+passes grep -q '0.2.0 → 0.2.1' "$tmp/dry-run.log"
+passes test "$(git log -1 --format=%s)" = 'fix(gate): something users would notice'
+passes test -z "$(git status --porcelain)" # a dry run writes nothing
+
+passes "$scripts/release.sh"
+passes test "$(git log -1 --format=%s)" = 'release: v0.2.1'
+passes test "$(git cat-file -t v0.2.1)" = tag
+passes test -n "$(git tag --points-at HEAD --list v0.2.1)"
+# The version moved in BOTH files, and only for this package.
+passes grep -q '^version = "0.2.1"$' Cargo.toml
+passes sh -c "grep -A1 '^name = \"fixture\"$' Cargo.lock | grep -q '^version = \"0.2.1\"$'"
+passes sh -c "grep -A1 '^name = \"serde\"$' Cargo.lock | grep -q '^version = \"1.0.0\"$'"
+passes grep -q '^## v0.2.1 — ' CHANGELOG.md
+passes grep -q 'fix(gate): something users would notice' CHANGELOG.md
+# And the commit it made passes the checks a push would put it through.
+passes with_stdin "refs/heads/main $(git rev-parse HEAD) refs/heads/main $release
+" "$scripts/release-check.sh"
+landed=$(git rev-parse HEAD)
+
+# Idempotent: a second run releases nothing and writes no commit.
+passes "$scripts/release.sh"
+passes test "$(git rev-parse HEAD)" = "$landed"
+
+# A tip that is ALREADY a release commit only gets its missing tag.
+git tag -d v0.2.1 >/dev/null
+passes "$scripts/release.sh"
+passes test "$(git cat-file -t v0.2.1)" = tag
+passes test "$(git rev-parse HEAD)" = "$landed"
+
+# The notes fragment is the annotation, and the release commit spends it.
+mkdir -p .release-notes
+# Written UNDER the template comment, as a real fragment is: the comment is
+# scaffolding and must not reach the annotation.
+printf '<!-- What shipped, in prose.\n     Second comment line. -->\n\nA short title\n\nProse the fragment carried.\n' >.release-notes/next.md
+git add -A
+git commit -qm 'feat(gate): something worth a minor'
+passes "$scripts/release.sh"
+passes test "$(git log -1 --format=%s)" = 'release: v0.3.0'
+passes sh -c "git tag -l --format='%(contents)' v0.3.0 | grep -q 'Prose the fragment carried'"
+passes test "$(git tag -l --format='%(contents:subject)' v0.3.0)" = 'A short title'
+passes sh -c "! git tag -l --format='%(contents)' v0.3.0 | grep -q -e '<!--' -e 'comment line'"
+passes sh -c "! grep -q 'Prose the fragment carried' .release-notes/next.md"
+# The changelog grows at the top and keeps what was there.
+passes sh -c "grep -n '^## v' CHANGELOG.md | head -1 | grep -q 'v0.3.0'"
+passes grep -q '^## v0.2.1 — ' CHANGELOG.md
+passes test "$(grep -c '^# Changelog$' CHANGELOG.md)" = 1
+
+# A breaking change before 1.0 is a minor bump, never an automatic 1.0.0.
+git commit -q --allow-empty -m 'feat(cli)!: a verb changed its meaning'
+passes "$scripts/release.sh"
+passes test "$(git log -1 --format=%s)" = 'release: v0.4.0'
 
 cd "$root"
 echo "test-hooks: $checks checks passed"

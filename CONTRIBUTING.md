@@ -54,7 +54,9 @@ reasonable thing to allow, and a PR that bends one needs to say so up front
   `fix(gate): …`, `feat(codex): …` (never `codex: …`). CI checks it.
   Commits inside the PR are yours to shape; they're squashed away.
 - **Don't touch the version.** No bump in `Cargo.toml`, no `release:` commit,
-  no tag — the release is cut on `main` after the merge.
+  no tag — the release is cut on `main` after the merge (`RELEASING.md`).
+- Optional but appreciated: describe a user-visible change in
+  `.release-notes/next.md` (prose; it becomes the release notes).
 - Commits must be signed (the ruleset requires it).
 - Behavior gets a test. Parsing a harness's output gets a fixture test, and
   malformed input must degrade, not crash.

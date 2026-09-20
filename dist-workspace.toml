@@ -1,0 +1,35 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (https://axodotdev.github.io/cargo-dist). What a pushed
+# `v*` tag builds and publishes; RELEASING.md is the human side of it.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.30.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# Unix only, on purpose — see README → Platforms.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+# On a pull request, only check that a release COULD be built (no artifacts)
+pr-run-mode = "plan"
+# Publish jobs to run in CI
+publish-jobs = ["homebrew"]
+# A GitHub repo to push Homebrew formulas to (needs the HOMEBREW_TAP_TOKEN secret)
+tap = "avihut/homebrew-tap"
+# release.yml is hand-maintained after generation: every action is pinned to a
+# full commit SHA (scripts/pin-actions.sh; scripts/guard.sh rule 7 holds it),
+# which `dist generate` would otherwise flag as drift.
+allow-dirty = ["ci"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# No self-updater: cahoots has no network code, and that includes its installer's
+install-updater = false
+
+# Current runners; a native ARM runner for Linux aarch64 (no cross-compiling)
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+x86_64-apple-darwin = "macos-15"
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
