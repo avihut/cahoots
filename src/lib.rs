@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod calibrate;
 pub mod cli;
 pub mod config;
 pub mod dirs;

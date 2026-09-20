@@ -178,9 +178,13 @@ So **nothing a reviewer writes is ever shown to another agent.**
 - `learn reset` is a person's verb. It appends a "forget" event; the record
   itself is never rewritten.
 
-Routing never moves on a review's say-so — only on outcome statistics — and
-learned state deserialises into a struct with no field for a cap, a reserve, a
-sandbox mode, a flag or a command.
+Routing never moves on a review's say-so — only on outcome statistics
+(`calibrate.rs`): one adjacent swap per role, from at least eight rated runs
+on each side, shown but not used until a person turns it on. What learning
+may change is a struct with one field, `role → index`; there is nothing in it
+for a cap, a reserve, a sandbox mode, a model, a flag or a command, and an
+order a person wrote is left alone. The worst a poisoned history can do is
+make a role try its second choice first.
 
 ## What cahoots never does
 

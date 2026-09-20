@@ -35,10 +35,13 @@ agy    ──┘   pick · gate · run   └── agy -p …
 - **Run.** The target's first-party headless CLI runs under a detached
   supervisor with a scrubbed environment, a timeout and a cancel path. The
   caller gets a run id, and the result when it's done.
-- **Learn, locally (opt-in).** The harness that delegated a run can review a
-  random sample of its own delegations. What it learns — briefing notes,
-  small routing adjustments — stays on your machine, because what works for
-  you is not what works for someone else.
+- **Learn, locally (opt-in).** The harness that delegated a run reviews a
+  random sample of its own delegations, from a closed vocabulary of findings.
+  What reviews agree on becomes a few fixed notes that later sessions read
+  before writing a brief, and what you did with results (`cahoots outcome`)
+  tunes which agent a role tries first — by one place, in shadow mode until
+  you turn it on. All of it stays on your machine, because what works for you
+  is not what works for someone else.
 
 Every exit is a documented code plus one line of JSON, so an agent never
 parses prose: `cahoots exit-codes`.
@@ -91,6 +94,10 @@ harness.claude.cap = 50
 
 [meter.agent-usage]         # optional; without it only the built-in ledger gates
 binary = "/Applications/AgentUsage.app/Contents/MacOS/usage-cli"
+
+[review]                    # optional, off by default
+enabled = true              # a sample of your delegations waits for your harness's review
+apply_routing = false       # false: `cahoots report --suggest` only SHOWS what it would reorder
 ```
 
 ## Where this stands with the vendors' terms
@@ -121,12 +128,12 @@ macOS and Linux. No Windows.
 
 | | |
 |---|---|
-| **M0** | Repository, gates, CI; a spike against the real CLIs (`docs/SPIKE.md`) |
-| **M1** | The broker: Claude Code ⇄ Codex, read-only roles, gate, run records |
-| **M2** | `cahoots install` — the skill and agent definitions, per harness |
-| **M3** | v0.1: binaries, Homebrew, crates.io |
-| **M4** | Writer roles in a private worktree, resume, a mid-run usage watchdog |
-| **M5** | Review and local learning |
+| **M0** ✓ | Repository, gates, CI; a spike against the real CLIs (`docs/SPIKE.md`) |
+| **M1** ✓ | The broker: Claude Code ⇄ Codex, read-only roles, gate, run records |
+| **M2** ✓ | `cahoots install` — the skills and agent definitions, per harness |
+| **M3** | v0.1: the release machinery is in (`RELEASING.md`); the release itself is not cut yet |
+| **M4** ✓ | A writer role in a worktree of its own, `resume`, a mid-run usage watchdog |
+| **M5** ✓ | Outcomes, review, notes, and routing calibration (shadow mode by default) |
 | **M6** | Antigravity CLI — **on hold**: Google's terms, not a technical reason (`docs/VENDOR-TERMS.md`) |
 
 ## Contributing

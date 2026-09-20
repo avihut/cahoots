@@ -209,11 +209,29 @@ the same job with no native dependency.)
 - `learn list` (what was learned, from how much, and what reviewers wrote) and
   `learn reset` are a person's verbs.
 
-**What is designed, not built:**
+**Routing calibration — statistics, never opinions.** Which candidate a role
+tries first is tuned by what callers did with results (`outcome`) and whether
+runs failed by themselves; a reviewer's findings feed the notes and nothing
+else. `calibrate::suggest` is a PURE FUNCTION of the history and the current
+candidate list, recomputed whenever it is needed — so there is no learned
+state to go stale or to tamper with, a changed list is simply re-evaluated,
+and evidence that ages out of the 90-day window decays the adjustment back to
+the default by itself.
 
-- **Routing moves on statistics, not opinions:** outcome and failure rates over
-  all runs, a minimum sample, at most one position or one effort notch from
-  the default, a cooldown, decay — one release in shadow mode before it
-  applies anything.
-- **Bounds are compile-time:** learned state deserialises into a struct that
-  only has adjustable fields.
+- A candidate moves up ONE place past its neighbour when both have at least 8
+  rated-or-failed runs in the window and it scored at least 0.15 better
+  (accepted = 1, reworked = ½, discarded or failed = 0). One swap per role.
+  Unknown outcomes are not evidence; a run that was cancelled or stopped for
+  budget is not held against its candidate.
+- **Bounds are compile-time.** `LearnedAdjustments` holds `role → index` and
+  nothing else: there is no field in it for a cap, a reserve, a model, an
+  effort, a flag or a command, and a test shows that applying it only ever
+  reorders.
+- **Shadow mode is the default.** `cahoots report --suggest` shows the
+  evidence per candidate and the swap it supports; nothing is used until a
+  person sets `review.apply_routing = true`. An order a person WROTE is left
+  alone unless they add `calibrate = true` to that role.
+- `learn reset` starts the evidence over, as it does for notes.
+
+**Designed, not built:** tuning the effort level (the plan allowed one notch),
+and a `learn revert` finer than `learn reset`.

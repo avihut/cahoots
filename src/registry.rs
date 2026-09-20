@@ -41,6 +41,11 @@ pub struct HarnessEntry {
 pub struct RoleEntry {
     pub candidates: Vec<Candidate>,
     pub origin: Origin,
+    /// Whether learning may reorder this list: the defaults, yes; a list a
+    /// person wrote, only if they said `calibrate = true`.
+    pub calibrate: bool,
+    /// The one swap learning made here, if any — so `registry` can show it.
+    pub learned_swap: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +71,8 @@ pub struct Meters {
 pub struct Review {
     pub enabled: bool,
     pub sample_rate: f64,
+    /// False is shadow mode: the adjustment is computed and shown, not used.
+    pub apply_routing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,7 +178,45 @@ impl Registry {
     pub fn load(dirs: &Dirs) -> Res<Registry> {
         let config = UserConfig::load(&dirs.config_file())?;
         let enabled = EnabledFile::load(dirs)?;
-        Ok(Registry::effective(&config, &enabled.enabled))
+        let mut registry = Registry::effective(&config, &enabled.enabled);
+        if registry.review.enabled && registry.review.apply_routing {
+            let learned = registry.learned(dirs);
+            for (role, entry) in &mut registry.roles {
+                if learned.apply(*role, &mut entry.candidates) {
+                    entry.learned_swap = learned.swaps.get(role).copied();
+                }
+            }
+        }
+        Ok(registry)
+    }
+
+    /// What the history supports changing, for the roles learning may touch.
+    /// Computed against THIS registry's lists, so it can never refer to a
+    /// candidate that is not there.
+    pub fn learned(&self, dirs: &Dirs) -> crate::calibrate::LearnedAdjustments {
+        use crate::calibrate::{WINDOW_DAYS, suggest};
+        let events = crate::history::read(dirs);
+        let forgotten_at = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::history::Event::Forget { t } => Some(*t),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let since = crate::run::record::now()
+            .saturating_sub(WINDOW_DAYS * 24 * 3600)
+            .max(forgotten_at);
+        let stories = crate::history::stories(&events);
+        let swaps = self
+            .roles
+            .iter()
+            .filter(|(_, entry)| entry.calibrate && entry.learned_swap.is_none())
+            .filter_map(|(role, entry)| {
+                suggest(&stories, *role, &entry.candidates, since).map(|at| (*role, at))
+            })
+            .collect();
+        crate::calibrate::LearnedAdjustments { swaps }
     }
 
     pub fn effective(config: &UserConfig, enabled: &[HarnessId]) -> Registry {
@@ -220,10 +265,14 @@ impl Registry {
                     Some(user) => RoleEntry {
                         candidates: user.candidates.clone(),
                         origin: Origin::User,
+                        calibrate: user.calibrate.unwrap_or(false),
+                        learned_swap: None,
                     },
                     None => RoleEntry {
                         candidates: default_candidates(role),
                         origin: Origin::Default,
+                        calibrate: true,
+                        learned_swap: None,
                     },
                 };
                 (role, entry)
@@ -246,6 +295,7 @@ impl Registry {
             review: Review {
                 enabled: config.review.enabled.unwrap_or(false),
                 sample_rate: config.review.sample_rate.unwrap_or(0.2),
+                apply_routing: config.review.apply_routing.unwrap_or(false),
             },
             meters: Meters {
                 agent_usage: config.meter.agent_usage.clone(),

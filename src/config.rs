@@ -64,6 +64,9 @@ pub struct RoleConfig {
     /// Replaces the default candidate order for the role (arrays replace,
     /// they do not merge).
     pub candidates: Vec<Candidate>,
+    /// A list a person wrote is theirs: learning leaves its order alone
+    /// unless they say otherwise here.
+    pub calibrate: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,6 +101,10 @@ pub struct ReviewConfig {
     pub enabled: Option<bool>,
     /// The share of finished runs offered for review. 0.0–1.0, default 0.2.
     pub sample_rate: Option<f64>,
+    /// Let outcome statistics reorder a role's candidates — by one position,
+    /// never more. Off by default: until it is on, cahoots only SAYS what it
+    /// would do (`report --suggest`).
+    pub apply_routing: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
