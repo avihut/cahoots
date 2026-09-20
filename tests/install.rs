@@ -64,12 +64,15 @@ fn every_file(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-const ALL: [&str; 5] = [
+const ALL: [&str; 8] = [
     ".agents/skills/cahoots/SKILL.md",
     ".claude/skills/cahoots/SKILL.md",
     ".claude/agents/cahoots-delegate.md",
     ".codex/skills/cahoots/SKILL.md",
     ".codex/agents/cahoots-delegate.toml",
+    ".agents/skills/cahoots-review/SKILL.md",
+    ".claude/skills/cahoots-review/SKILL.md",
+    ".codex/skills/cahoots-review/SKILL.md",
 ];
 
 #[test]
@@ -176,8 +179,8 @@ fn one_harness_can_be_installed_alone() {
     let paths: Vec<&Path> = reports.iter().map(|r| r.path.as_path()).collect();
     assert_eq!(
         paths.len(),
-        3,
-        "the shared skill plus Codex's two files: {paths:?}"
+        5,
+        "the two shared skills plus Codex's three files: {paths:?}"
     );
     assert!(!home.dirs.home.join(".claude/agents").exists());
 }

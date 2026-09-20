@@ -113,10 +113,22 @@ pub enum Verb {
         run: String,
         outcome: crate::history::Outcome,
     },
-    /// Show the locally learned briefing notes for a target
-    Notes,
-    /// Review a sampled run (opt-in)
-    Review,
+    /// Show what past reviews on this machine suggest, before you write a brief
+    Notes {
+        #[arg(long)]
+        role: Role,
+        /// Only for this target
+        #[arg(long)]
+        to: Option<HarnessId>,
+        /// The harness that is asking (it has no notes about itself)
+        #[arg(long)]
+        caller: Option<HarnessId>,
+    },
+    /// Review a run you delegated (opt-in: `[review] enabled = true`)
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Install (or update) the skill and agent definitions for the harnesses on this machine
     Install {
         /// Only this harness (the shared skill is always written)
@@ -140,8 +152,11 @@ pub enum Verb {
         #[arg(long)]
         off: bool,
     },
-    /// List, show, revert or reset what was learned locally
-    Learn,
+    /// See or forget what was learned on this machine
+    Learn {
+        #[command(subcommand)]
+        action: LearnAction,
+    },
     /// Show the effective registry of harnesses, models and roles
     Registry,
     /// Check the installation, the harness versions and the permission rules
@@ -160,6 +175,32 @@ pub enum Verb {
     /// The detached supervisor of one run. Started by `run`, never by hand.
     #[command(name = "__supervise", hide = true)]
     Supervise { run: String },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum ReviewAction {
+    /// The next run waiting for your review: its brief, its answer, the rubric
+    Next {
+        #[arg(long)]
+        caller: Option<HarnessId>,
+    },
+    /// Record what you found (no --finding at all means: nothing to note)
+    Submit {
+        run: String,
+        #[arg(long)]
+        caller: Option<HarnessId>,
+        /// `<finding>` or `<finding>:<one plain sentence>`; repeatable
+        #[arg(long)]
+        finding: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum LearnAction {
+    /// What has been learned, and from how much
+    List,
+    /// Forget what reviews have said so far (the record itself is kept)
+    Reset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,13 +239,13 @@ impl Verb {
             Verb::Result { .. } => "result",
             Verb::Cancel { .. } => "cancel",
             Verb::Outcome { .. } => "outcome",
-            Verb::Notes => "notes",
-            Verb::Review => "review",
+            Verb::Notes { .. } => "notes",
+            Verb::Review { .. } => "review",
             Verb::Install { .. } => "install",
             Verb::Uninstall { .. } => "uninstall",
             Verb::Skill => "skill",
             Verb::Enable { .. } => "enable",
-            Verb::Learn => "learn",
+            Verb::Learn { .. } => "learn",
             Verb::Registry => "registry",
             Verb::Doctor => "doctor",
             Verb::Report { .. } => "report",
@@ -283,6 +324,24 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             ok(serde_json::json!({ "enabled": enabled }))
         }
         Verb::Doctor => crate::doctor::doctor(),
+        Verb::Notes { role, to, caller } => crate::learn::notes(role, to, caller),
+        Verb::Review {
+            action: ReviewAction::Next { caller },
+        } => crate::learn::review_next(caller),
+        Verb::Review {
+            action:
+                ReviewAction::Submit {
+                    run,
+                    caller,
+                    finding,
+                },
+        } => crate::learn::review_submit(&run, caller, &finding),
+        Verb::Learn {
+            action: LearnAction::List,
+        } => crate::learn::learn_list(),
+        Verb::Learn {
+            action: LearnAction::Reset,
+        } => crate::learn::learn_reset(),
         Verb::Outcome { run, outcome } => client::outcome(&run, outcome),
         Verb::Report { days } => crate::report::report(days),
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
@@ -339,9 +398,6 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             supervise::supervise(&Dirs::resolve()?, &run)?;
             Ok(Envelope::new(Exit::Ok, None))
         }
-        _ => Err(Fail::internal(
-            "not implemented yet — this build does not carry this verb",
-        )),
     }
 }
 

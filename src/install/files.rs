@@ -18,6 +18,7 @@ use crate::model::HarnessId;
 use crate::run::record::write_private;
 
 const SKILL: &str = include_str!("assets/SKILL.md");
+const REVIEW_SKILL: &str = include_str!("assets/REVIEW-SKILL.md");
 const CLAUDE_AGENT: &str = include_str!("assets/claude-agent.md");
 const CODEX_AGENT: &str = include_str!("assets/codex-agent.toml");
 const STAMP: &str = "cahoots_version";
@@ -42,12 +43,30 @@ struct Item {
 
 /// Everything cahoots installs. The skill goes to the shared skills location
 /// and to each harness's own; the agent definitions are per harness.
-const ITEMS: [Item; 5] = [
+const ITEMS: [Item; 8] = [
     Item {
         path: ".agents/skills/cahoots/SKILL.md",
         needs: ".agents/skills",
         harness: None,
         template: SKILL,
+    },
+    Item {
+        path: ".agents/skills/cahoots-review/SKILL.md",
+        needs: ".agents/skills",
+        harness: None,
+        template: REVIEW_SKILL,
+    },
+    Item {
+        path: ".claude/skills/cahoots-review/SKILL.md",
+        needs: ".claude",
+        harness: Some(HarnessId::Claude),
+        template: REVIEW_SKILL,
+    },
+    Item {
+        path: ".codex/skills/cahoots-review/SKILL.md",
+        needs: ".codex",
+        harness: Some(HarnessId::Codex),
+        template: REVIEW_SKILL,
     },
     Item {
         path: ".claude/skills/cahoots/SKILL.md",
@@ -237,7 +256,9 @@ pub fn uninstall(dirs: &Dirs, dry_run: bool) -> Res<Vec<Report>> {
                         Fail::internal(format!("cannot remove {}: {error}", path.display()))
                     })?;
                     if let Some(parent) = path.parent()
-                        && parent.file_name().is_some_and(|name| name == "cahoots")
+                        && parent
+                            .file_name()
+                            .is_some_and(|name| name == "cahoots" || name == "cahoots-review")
                     {
                         let _ = fs::remove_dir(parent); // only succeeds when empty
                     }
@@ -288,7 +309,7 @@ mod tests {
     /// command to run.
     #[test]
     fn the_embedded_texts_only_teach_agent_verbs() {
-        for text in [SKILL, CLAUDE_AGENT, CODEX_AGENT] {
+        for text in [SKILL, REVIEW_SKILL, CLAUDE_AGENT, CODEX_AGENT] {
             for (at, _) in text.match_indices("cahoots ") {
                 let verb: String = text[at + 8..]
                     .chars()
@@ -310,7 +331,7 @@ mod tests {
 
     #[test]
     fn every_template_is_stamped_and_the_toml_parses() {
-        for template in [SKILL, CLAUDE_AGENT, CODEX_AGENT] {
+        for template in [SKILL, REVIEW_SKILL, CLAUDE_AGENT, CODEX_AGENT] {
             assert_eq!(
                 stamp_of(&render(template)).as_deref(),
                 Some(env!("CARGO_PKG_VERSION"))

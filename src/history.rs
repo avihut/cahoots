@@ -68,6 +68,16 @@ pub enum Event {
         run: String,
         outcome: Outcome,
     },
+    /// What the delegating harness found when it reviewed a run. A closed
+    /// vocabulary plus a filtered line of detail — see `review.rs`.
+    Review {
+        t: u64,
+        run: String,
+        reviewer: HarnessId,
+        findings: Vec<crate::review::Finding>,
+    },
+    /// A person's `learn reset`: reviews before this moment no longer count.
+    Forget { t: u64 },
 }
 
 fn path(dirs: &Dirs) -> PathBuf {
@@ -189,6 +199,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                     story.outcome = Some(*outcome);
                 }
             }
+            Event::Review { .. } | Event::Forget { .. } => {}
         }
     }
     let mut stories: Vec<Story> = by_run.into_values().collect();

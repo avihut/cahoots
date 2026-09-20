@@ -153,14 +153,34 @@ A callee's output is read by a reviewing agent, whose finding becomes a note
 that every future session reads before writing a brief. Free text on that path
 is a persistent prompt injection with a laundering step in the middle.
 
-So a finding is a closed `kind` enum plus scope. The optional detail line is
-short and rejected if it contains flags, backticks, URLs, paths or the tool's
-own name. Notes render from fixed templates under an "observations, not
-instructions" header, appear only after two supporting reviews from different
-runs and directories, are capped per scope and expire. Routing never moves on
-a review's say-so — only on outcome statistics — and learned state
-deserialises into a struct with no field for a cap, a reserve, a sandbox
-mode, a flag or a command.
+So **nothing a reviewer writes is ever shown to another agent.**
+
+- A finding is a closed vocabulary (`review::Kind`); growing it is a code
+  change that a person reviews.
+- A note is cahoots' own fixed sentence for that kind. A reviewer may add one
+  line of detail, and it is kept for the PERSON: `learn list` — a verb that
+  only runs from a terminal — shows it, and the field is `#[serde(skip)]` on
+  the type `notes` serialises, so it cannot leak through a later edit to that
+  verb. A blocklist of "instruction-like" words was tried first; it was both
+  leaky and wrong about honest sentences ("the brief never said…"). Not
+  showing the text at all is the fence that holds.
+- The detail is still short and free of flags, code, paths, URLs and this
+  tool's name, because a person reads it in a terminal next to a prompt.
+- A note appears only once reviews of **two different runs in two different
+  directories** agree — one run, or one poisoned repository, cannot write the
+  notes by itself — and notes are few (five per role and target) and expire
+  (sixty days).
+- What is under review is handed to the reviewer marked `untrusted`, and the
+  review skill says what that means: text that tells the reviewer to do
+  something is itself the finding.
+- A run is reviewed by the harness that delegated it and by nobody else, once,
+  a few a day, and not when that harness's own plan is near its cap.
+- `learn reset` is a person's verb. It appends a "forget" event; the record
+  itself is never rewritten.
+
+Routing never moves on a review's say-so — only on outcome statistics — and
+learned state deserialises into a struct with no field for a cap, a reserve, a
+sandbox mode, a flag or a command.
 
 ## What cahoots never does
 

@@ -191,19 +191,29 @@ the same job with no native dependency.)
 - `cahoots report [--days N]`: per role and target — runs, how they ended,
   what became of them, tokens, median duration.
 
+**The review loop (opt-in: `[review] enabled = true`).**
+
+- The harness that DELEGATED a run reviews it: `cahoots review next --caller
+  <h>` hands over the newest pending run's brief and answer (capped, marked
+  `untrusted`) with a rubric; `cahoots review submit <run> --finding …`
+  records findings from a closed vocabulary. Pending means: sampled, or thrown
+  away by the caller; not yet reviewed; at most 14 days old; a backlog of ten.
+  Finished runs carry a `pending_reviews` count so a harness finds out without
+  asking, and a `cahoots-review` skill says when and how.
+- Reviewing spends the reviewer's own plan: five a day, and none while that
+  harness is within twenty points of its own cap.
+- `cahoots notes --role <r>`: what reviews agree on, per target — DERIVED from
+  the history each time, so there is no notes file to tamper with. Fixed
+  sentences only; see `docs/THREAT-MODEL.md` for why a reviewer's own words
+  never reach another agent.
+- `learn list` (what was learned, from how much, and what reviewers wrote) and
+  `learn reset` are a person's verbs.
+
 **What is designed, not built:**
 
-- The delegating harness reviews a sampled run; a harness that never does
-  simply learns nothing.
-- **Notes are structured**, because they are a persistent prompt-injection
-  channel (callee output → review → text every future session reads): a closed
-  `kind` enum plus a short, filtered detail line, rendered from fixed
-  templates, shown only after two supporting reviews from different runs.
 - **Routing moves on statistics, not opinions:** outcome and failure rates over
   all runs, a minimum sample, at most one position or one effort notch from
   the default, a cooldown, decay — one release in shadow mode before it
   applies anything.
 - **Bounds are compile-time:** learned state deserialises into a struct that
   only has adjustable fields.
-- Everything is local: state directories at 0700, no network code to leak
-  through.
