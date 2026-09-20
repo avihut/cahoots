@@ -23,7 +23,7 @@ fn version_names_the_crate_version() {
 
 #[test]
 fn an_unknown_verb_is_a_usage_error() {
-    cahoots().arg("conspire").assert().code(2);
+    cahoots().arg("conspire").assert().code(3);
 }
 
 #[test]
