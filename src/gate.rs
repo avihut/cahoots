@@ -131,6 +131,42 @@ fn agent_usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admis
     Err(Fail::new(verdict, why))
 }
 
+/// Reviewing spends the REVIEWER's own plan, so it is held to a stricter bar
+/// than delegating: twenty points under that harness's cap, on fresh data.
+/// With no tracker there is nothing to ask, and the daily review budget is
+/// the only limit.
+pub fn reviewer_may_spend(registry: &Registry, reviewer: HarnessId) -> Result<(), String> {
+    let Some(meter) = &registry.meters.agent_usage else {
+        return Ok(());
+    };
+    let refuse = || {
+        Err(format!(
+            "not now — reviewing spends {reviewer}'s own plan, and it is too close to its cap for that"
+        ))
+    };
+    let Ok(binary) = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[]) else {
+        return refuse();
+    };
+    let cap = registry.harness(reviewer).cap.saturating_sub(20).max(1);
+    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
+    let args = [
+        "headroom".to_string(),
+        "--provider".to_string(),
+        reviewer.as_str().to_string(),
+        "--cap".to_string(),
+        cap.to_string(),
+        "--max-data-age".to_string(),
+        format!("{}m", max_age.div_ceil(60)),
+        "--forecast".to_string(),
+        "red".to_string(),
+        "--json".to_string(),
+    ];
+    match spawn::run_helper(&binary, &args, None, Duration::from_secs(10)) {
+        Ok(output) if output.status == Some(0) => Ok(()),
+        _ => refuse(),
+    }
+}
+
 /// What the meter says about a run that is already going.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Watch {

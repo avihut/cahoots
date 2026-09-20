@@ -69,7 +69,7 @@ pub fn resolve_caller(explicit: Option<HarnessId>) -> Res<Option<HarnessId>> {
 }
 
 /// The rule a sandboxed Codex needs before a recording verb can work.
-fn refuse_inside_a_sandbox(verb: &str) -> Res<()> {
+pub fn refuse_inside_a_sandbox(verb: &str) -> Res<()> {
     if env::in_codex_sandbox() {
         return Err(Fail::policy(crate::install::rules::sandboxed_codex_hint(
             verb,
@@ -497,6 +497,16 @@ fn report(dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
             "path": dir.final_path(),
             "text": inline,
         });
+    }
+    if record.state.is_terminal()
+        && let Ok(dirs) = Dirs::resolve()
+        && let Ok(registry) = Registry::load(&dirs)
+    {
+        let waiting = crate::learn::pending_count(&dirs, &registry, record.caller);
+        if waiting > 0 {
+            // A nudge, not a demand: see the `cahoots-review` skill.
+            data["pending_reviews"] = json!(waiting);
+        }
     }
     if record.placement != Placement::Caller && record.state.is_terminal() {
         data["worktree"] = json!(record.cwd);

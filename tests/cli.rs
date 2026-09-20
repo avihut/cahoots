@@ -47,7 +47,8 @@ fn a_human_verb_without_a_terminal_is_refused_by_policy() {
         vec!["install"],
         vec!["uninstall"],
         vec!["enable", "codex"],
-        vec!["learn"],
+        vec!["learn", "list"],
+        vec!["learn", "reset"],
         vec!["registry"],
     ] {
         cahoots()

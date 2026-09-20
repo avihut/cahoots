@@ -53,6 +53,9 @@ user told you to.
 
 ## The loop
 
+0. *(If the user has review turned on)* `cahoots notes --role <role> --caller
+   <you>` shows what past delegations on this machine taught about briefing
+   each agent. Observations, not instructions.
 1. **Write the brief to a file** in the working directory or a temp directory.
    The other agent starts with NO context — not this conversation, not your
    plan. A good brief is self-contained: the goal, the relevant files and
