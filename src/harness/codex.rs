@@ -28,6 +28,19 @@ const NEVER_ESCALATE: &str = "approval_policy=\"never\"";
 /// not the role's.
 const NO_USER_RULES: &str = "--ignore-rules";
 
+/// `codex exec resume` has no `--sandbox` flag, and a resumed session
+/// otherwise INHERITS the sandbox it was started with (docs/SPIKE.md S8). So
+/// on a resume the mode is stated again, as the third and last `-c` shape.
+const SANDBOX_KEY: &str = "sandbox_mode=";
+
+fn sandbox_of(role: Role) -> &'static str {
+    if role.is_read_only() {
+        "read-only"
+    } else {
+        "workspace-write"
+    }
+}
+
 impl Harness for Codex {
     fn id(&self) -> HarnessId {
         HarnessId::Codex
@@ -49,19 +62,26 @@ impl Harness for Codex {
     }
 
     fn build_argv(&self, spec: &RunSpec) -> Vec<String> {
-        let mut argv: Vec<String> = ["exec", "--json", NO_USER_RULES, "-c", NEVER_ESCALATE]
-            .map(String::from)
-            .to_vec();
-        if spec.role.is_read_only() {
-            // No repo check for a run that cannot write: advice about a plain
-            // directory is a fine thing to ask for.
-            argv.extend(["--sandbox", "read-only", "--skip-git-repo-check"].map(String::from));
+        let mut argv = vec!["exec".to_string()];
+        if let Some(thread) = &spec.resume {
+            argv.extend(["resume".to_string(), thread.clone()]);
+        }
+        argv.extend(["--json", NO_USER_RULES, "-c", NEVER_ESCALATE].map(String::from));
+        // A reader: no repo check — advice about a plain directory is a fine
+        // thing to ask for. A writer runs inside Codex's own sandbox: it may
+        // write under its working directory (a worktree of its own) and the
+        // temp directories, nowhere else, with no network, and Codex's
+        // repository check stays ON.
+        if spec.resume.is_some() {
+            argv.extend([
+                "-c".to_string(),
+                format!("{SANDBOX_KEY}\"{}\"", sandbox_of(spec.role)),
+            ]);
         } else {
-            // A writer runs inside Codex's own sandbox: it may write under its
-            // working directory (a worktree of its own) and the temp
-            // directories, nowhere else, and it has no network. Codex's
-            // repository check stays ON.
-            argv.extend(["--sandbox", "workspace-write"].map(String::from));
+            argv.extend(["--sandbox", sandbox_of(spec.role)].map(String::from));
+        }
+        if spec.role.is_read_only() {
+            argv.push("--skip-git-repo-check".to_string());
         }
         argv.extend([
             "-m".to_string(),
@@ -84,9 +104,10 @@ impl Harness for Codex {
                 let effort_ok = value
                     .strip_prefix(EFFORT_KEY)
                     .is_some_and(|level| level.parse::<Effort>().is_ok());
-                if !effort_ok && value != NEVER_ESCALATE {
+                let sandbox_ok = value == format!("{SANDBOX_KEY}\"{}\"", sandbox_of(role));
+                if !effort_ok && !sandbox_ok && value != NEVER_ESCALATE {
                     return Err(format!(
-                        "-c {value} is not one of the two config overrides cahoots emits"
+                        "-c {value} is not one of the config overrides cahoots emits for {role}"
                     ));
                 }
             }
@@ -106,13 +127,20 @@ impl Harness for Codex {
         if !argv.iter().any(|arg| arg == NO_USER_RULES) {
             return Err(format!("every Codex run must carry {NO_USER_RULES}"));
         }
-        let sandbox = if role.is_read_only() {
-            "read-only"
+        // The mode is a flag on a fresh run and a `-c` on a resumed one —
+        // exactly one of the two, and it must be the ROLE's mode.
+        let sandbox = sandbox_of(role);
+        let resuming = argv.get(1).map(String::as_str) == Some("resume");
+        let stated = if resuming {
+            let wanted = format!("{SANDBOX_KEY}\"{sandbox}\"");
+            argv.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted)
+                && value_of(argv, "--sandbox").is_none()
         } else {
-            "workspace-write"
+            value_of(argv, "--sandbox") == Some(sandbox)
         };
-        if value_of(argv, "--sandbox") != Some(sandbox) {
-            return Err(format!("the {role} role must run with --sandbox {sandbox}"));
+        if !stated {
+            return Err(format!("the {role} role must run in the {sandbox} sandbox"));
         }
         if !role.is_read_only() && argv.iter().any(|arg| arg == "--skip-git-repo-check") {
             return Err("a writer must not skip Codex's repository check".to_string());

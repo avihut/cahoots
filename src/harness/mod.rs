@@ -24,6 +24,19 @@ pub struct RunSpec {
     /// Preset by cahoots for harnesses that accept one (Claude), so a run is
     /// resumable even if it is killed before it prints anything.
     pub session_id: Option<String>,
+    /// Continue THIS session of the harness instead of starting one. The id
+    /// was read from a callee's output stream, so it is data — and it is about
+    /// to become an argument. `command_line` holds it to a shape that cannot
+    /// be a flag, a path or anything a parser would interpret.
+    pub resume: Option<String>,
+}
+
+/// The shape of a session id that may appear on a command line: what both
+/// harnesses actually issue (UUIDs), and nothing else.
+pub fn is_safe_session_id(id: &str) -> bool {
+    (8..=64).contains(&id.len())
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// What has been learned from a callee's output stream so far.
@@ -101,6 +114,14 @@ pub fn harness(id: HarnessId) -> &'static dyn Harness {
 
 /// The one way to obtain a command line: build, then validate.
 pub fn command_line(spec: &RunSpec) -> Res<Vec<String>> {
+    for id in [&spec.session_id, &spec.resume].into_iter().flatten() {
+        if !is_safe_session_id(id) {
+            return Err(Fail::new(
+                Exit::RunFailed,
+                "the recorded session id is not one a harness would issue — refusing to put it on a command line",
+            ));
+        }
+    }
     let harness = harness(spec.target.harness);
     let argv = harness.build_argv(spec);
     validate(harness, spec.role, &argv)?;
@@ -172,6 +193,67 @@ mod tests {
                 effort: Effort::High,
             },
             session_id: Some("4cb89a87-0000-4000-8000-000000000001".to_string()),
+            resume: None,
+        }
+    }
+
+    fn resuming(harness: HarnessId, role: Role) -> RunSpec {
+        RunSpec {
+            session_id: None,
+            resume: Some("01a0bf61-0000-7000-8000-000000000001".to_string()),
+            ..spec(harness, role)
+        }
+    }
+
+    #[test]
+    fn a_resumed_run_keeps_its_roles_fence() {
+        for id in HarnessId::ALL {
+            for role in Role::ALL {
+                let argv = command_line(&resuming(id, role)).unwrap();
+                let line = argv.join(" ");
+                assert!(
+                    line.contains("01a0bf61-0000-7000-8000-000000000001"),
+                    "{id}: {line}"
+                );
+                match (id, role.is_read_only()) {
+                    (HarnessId::Codex, true) => {
+                        assert!(line.contains(r#"sandbox_mode="read-only""#))
+                    }
+                    (HarnessId::Codex, false) => {
+                        assert!(line.contains(r#"sandbox_mode="workspace-write""#))
+                    }
+                    (HarnessId::Claude, true) => assert!(line.contains("--tools Read,Grep,Glob ")),
+                    (HarnessId::Claude, false) => assert!(line.contains("acceptEdits")),
+                }
+                // A reader's resume line is refused for a writer, and the reverse.
+                let other = if role.is_read_only() {
+                    Role::Implement
+                } else {
+                    Role::Review
+                };
+                assert!(validate(harness(id), other, &argv).is_err(), "{id} {role}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_an_id_never_reaches_a_command_line() {
+        for bad in [
+            "",
+            "--last",
+            "-c",
+            "../x",
+            "a b",
+            "id;rm",
+            "x",
+            "$(id)",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ] {
+            for id in HarnessId::ALL {
+                let mut spec = resuming(id, Role::Review);
+                spec.resume = Some(bad.to_string());
+                assert!(command_line(&spec).is_err(), "{id}: {bad:?} was accepted");
+            }
         }
     }
 
@@ -284,14 +366,25 @@ mod tests {
     /// captured at the tested version (tests/fixtures/help).
     #[test]
     fn every_emitted_flag_exists_in_the_captured_help() {
-        let help = |id| match id {
-            HarnessId::Claude => include_str!("../../tests/fixtures/help/claude-2.1.278.txt"),
-            HarnessId::Codex => include_str!("../../tests/fixtures/help/codex-exec-0.155.1.txt"),
+        let help = |id, resume| match (id, resume) {
+            (HarnessId::Claude, _) => include_str!("../../tests/fixtures/help/claude-2.1.278.txt"),
+            (HarnessId::Codex, false) => {
+                include_str!("../../tests/fixtures/help/codex-exec-0.155.1.txt")
+            }
+            // `codex exec resume` is its own subcommand with its own flags —
+            // it has no `--sandbox`, which is why the mode travels as `-c`.
+            (HarnessId::Codex, true) => {
+                include_str!("../../tests/fixtures/help/codex-exec-resume-0.155.1.txt")
+            }
         };
         for id in HarnessId::ALL {
-            for arg in command_line(&spec(id, Role::Advise)).unwrap() {
-                if arg.starts_with('-') && arg != "-" {
-                    assert!(help(id).contains(&arg), "{id} help has no {arg}");
+            for role in Role::ALL {
+                for (resume, spec) in [(false, spec(id, role)), (true, resuming(id, role))] {
+                    for arg in command_line(&spec).unwrap() {
+                        if arg.starts_with("--") || (arg.starts_with('-') && arg.len() == 2) {
+                            assert!(help(id, resume).contains(&arg), "{id} help has no {arg}");
+                        }
+                    }
                 }
             }
         }

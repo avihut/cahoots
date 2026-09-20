@@ -140,8 +140,53 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
     let choice = pick::choose(&dirs, &registry, args.role, caller, args.to, &roots)?;
     let target = choice.target;
 
+    launch(
+        &dirs,
+        &registry,
+        Launch {
+            role: args.role,
+            caller,
+            target,
+            placement,
+            base: (placement == Placement::Fork).then(|| run_dir.clone()),
+            cwd: run_dir,
+            depth,
+            timeout_secs: args.timeout_secs,
+            wait_secs: args.wait_secs,
+            binary: choice.binary,
+            version: choice.version,
+            admission: choice.admission,
+            resumed_from: None,
+            resume_session: None,
+            brief,
+        },
+    )
+}
+
+/// Everything decided; what is left is to write the record and start the
+/// supervisor. Shared by `run` and `resume`, so a resumed run is recorded,
+/// supervised, stopped and reported exactly like any other.
+struct Launch {
+    role: Role,
+    caller: Option<HarnessId>,
+    target: crate::model::Candidate,
+    placement: Placement,
+    base: Option<PathBuf>,
+    cwd: PathBuf,
+    depth: u32,
+    timeout_secs: Option<u64>,
+    wait_secs: Option<u64>,
+    binary: PathBuf,
+    version: crate::harness::Version,
+    admission: crate::gate::Admission,
+    resumed_from: Option<String>,
+    resume_session: Option<String>,
+    brief: String,
+}
+
+fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
     let mut progress = Progress::default();
-    if target.harness == HarnessId::Claude {
+    if launch.target.harness == HarnessId::Claude && launch.resume_session.is_none() {
         // Preset, so the run is resumable even if it dies before printing.
         progress.session_id = Some(uuid::Uuid::now_v7().to_string());
     }
@@ -152,21 +197,21 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         state: State::Starting,
         exit_code: None,
         message: None,
-        role: args.role,
-        caller,
-        target,
-        base: (placement == Placement::Fork).then(|| run_dir.clone()),
-        cwd: run_dir,
-        placement,
-        depth,
-        timeout_secs: args
+        role: launch.role,
+        caller: launch.caller,
+        target: launch.target,
+        base: launch.base,
+        cwd: launch.cwd,
+        placement: launch.placement,
+        depth: launch.depth,
+        timeout_secs: launch
             .timeout_secs
             .map_or(limit, |asked| asked.clamp(1, limit)),
         int_grace_secs: registry.limits.int_grace_secs,
         term_grace_secs: registry.limits.term_grace_secs,
-        binary: choice.binary,
-        harness_version: Some(choice.version),
-        admission: choice.admission,
+        binary: launch.binary,
+        harness_version: Some(launch.version),
+        admission: launch.admission,
         created_at: now(),
         started_at: None,
         finished_at: None,
@@ -174,14 +219,137 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         callee_pid: None,
         callee_started: None,
         callee_exit: None,
+        resumed_from: launch.resumed_from,
+        resume_session: launch.resume_session,
         progress,
     };
-    let dir = RunDir::create(&dirs, &record, &brief)?;
+    let dir = RunDir::create(dirs, &record, &launch.brief)?;
     spawn::spawn_supervisor(&record.id, &dir.log_path())?;
 
-    let wait = args.wait_secs.unwrap_or(registry.limits.wait_secs);
+    let wait = launch.wait_secs.unwrap_or(registry.limits.wait_secs);
     let record = wait_for(&dir, Duration::from_secs(wait))?;
     Ok(report(&dir, &record, true))
+}
+
+pub struct ResumeArgs {
+    pub run: String,
+    pub brief: PathBuf,
+    pub caller: Option<HarnessId>,
+    pub wait_secs: Option<u64>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// Continues a finished run's conversation with a new brief: the same
+/// harness, model, role and place, the harness's own session picked up where
+/// it stopped. It is a NEW run in every other respect — gated, slotted,
+/// depth-checked and recorded like one — so resuming is never a way around
+/// anything a fresh run would be refused for.
+pub fn resume(args: ResumeArgs) -> Res<Envelope> {
+    refuse_inside_a_sandbox("resume")?;
+    let dirs = Dirs::resolve()?;
+    let registry = Registry::load(&dirs)?;
+    let caller = resolve_caller(args.caller)?;
+    let depth = env::depth();
+    if depth >= registry.limits.max_depth {
+        return Err(Fail::policy(format!(
+            "this is already a delegated run (depth {depth}); delegating further is not allowed"
+        )));
+    }
+    let cwd = std::env::current_dir()
+        .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
+    let workspace = Workspace::around(&cwd)?;
+
+    reconcile(&dirs);
+    let old = RunDir::open(&dirs, &args.run)?.load()?;
+    if !old.state.is_terminal() {
+        return Err(Fail::new(
+            Exit::NotFinished,
+            format!(
+                "run {} is still going — `cahoots wait` or `cahoots cancel` it first",
+                old.id
+            ),
+        ));
+    }
+    let Some(session) = old.progress.session_id.clone() else {
+        return Err(Fail::new(
+            Exit::Usage,
+            format!(
+                "run {} ended before its harness started a session, so there is nothing to resume",
+                old.id
+            ),
+        ));
+    };
+    // A run is resumed from where it was started: the same directory, or the
+    // same repository. Knowing a run id is not a pass to another workspace.
+    let anchor = old.base.clone().unwrap_or_else(|| old.cwd.clone());
+    paths::run_dir(Some(&anchor), &workspace).map_err(|_| {
+        Fail::policy(format!(
+            "run {} belongs to another workspace ({})",
+            old.id,
+            anchor.display()
+        ))
+    })?;
+    if !old.cwd.is_dir() {
+        return Err(Fail::new(
+            Exit::Usage,
+            format!(
+                "the place run {} worked in is gone ({})",
+                old.id,
+                old.cwd.display()
+            ),
+        ));
+    }
+    let mut roots = workspace.roots();
+    roots.push(&old.cwd);
+    dirs.refuse_inside(&roots)?;
+    let brief = paths::read_brief(&args.brief, &workspace)?;
+
+    if Some(old.target.harness) == caller {
+        return Err(Fail::policy(format!(
+            "{} is the caller; a harness does not delegate to itself",
+            old.target.harness
+        )));
+    }
+    if !registry.harness(old.target.harness).enabled {
+        return Err(Fail::new(
+            Exit::TargetUnavailable,
+            format!("{} is not enabled as a target any more", old.target.harness),
+        ));
+    }
+    let live = record::all(&dirs)
+        .iter()
+        .filter(|(_, r)| !r.state.is_terminal())
+        .count();
+    if live as u32 >= registry.limits.max_active_runs {
+        return Err(Fail::new(
+            Exit::Busy,
+            format!("{live} runs are already active"),
+        ));
+    }
+    let (binary, version, admission) =
+        pick::eligible(&dirs, &registry, &old.target, old.role, &roots)?;
+
+    launch(
+        &dirs,
+        &registry,
+        Launch {
+            role: old.role,
+            caller,
+            target: old.target,
+            placement: old.placement,
+            base: old.base,
+            cwd: old.cwd,
+            depth,
+            timeout_secs: args.timeout_secs,
+            wait_secs: args.wait_secs,
+            binary,
+            version,
+            admission,
+            resumed_from: Some(old.id),
+            resume_session: Some(session),
+            brief,
+        },
+    )
 }
 
 fn wait_for(dir: &RunDir, patience: Duration) -> Res<RunRecord> {
@@ -267,6 +435,7 @@ fn summary(record: &RunRecord) -> Value {
             "output": record.progress.tokens_output,
         },
         "resumable": record.progress.session_id.is_some(),
+        "resumed_from": record.resumed_from,
         "notes": record.progress.notes,
         "gate_notes": record.admission.notes,
     })

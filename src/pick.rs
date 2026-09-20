@@ -110,6 +110,30 @@ pub fn locate(registry: &Registry, id: HarnessId, workspace: &[&Path]) -> Res<(P
     Ok((binary, version))
 }
 
+/// Whether ONE candidate can take a run right now: a free slot, a real binary,
+/// and the gate. `resume` uses this directly — a session belongs to the
+/// harness and model that started it, so there is nobody to fall through to.
+pub fn eligible(
+    dirs: &Dirs,
+    registry: &Registry,
+    candidate: &Candidate,
+    role: Role,
+    workspace: &[&Path],
+) -> Res<(PathBuf, Version, Admission)> {
+    if !slot_free(dirs, registry, candidate.harness) {
+        return Err(Fail::new(
+            Exit::Busy,
+            format!(
+                "{} is already running as many jobs as it may",
+                candidate.harness
+            ),
+        ));
+    }
+    let (binary, version) = locate(registry, candidate.harness, workspace)?;
+    let admission = gate::admit(dirs, registry, candidate, role)?;
+    Ok((binary, version, admission))
+}
+
 pub fn choose(
     dirs: &Dirs,
     registry: &Registry,
@@ -120,20 +144,7 @@ pub fn choose(
 ) -> Res<Choice> {
     let mut skipped: Vec<(Candidate, Fail)> = Vec::new();
     for candidate in candidates(registry, role, caller, to)? {
-        let attempt = (|| {
-            if !slot_free(dirs, registry, candidate.harness) {
-                return Err(Fail::new(
-                    Exit::Busy,
-                    format!(
-                        "{} is already running as many jobs as it may",
-                        candidate.harness
-                    ),
-                ));
-            }
-            let (binary, version) = locate(registry, candidate.harness, workspace)?;
-            let admission = gate::admit(dirs, registry, &candidate, role)?;
-            Ok((binary, version, admission))
-        })();
+        let attempt = eligible(dirs, registry, &candidate, role, workspace);
         match attempt {
             Ok((binary, version, admission)) => {
                 return Ok(Choice {

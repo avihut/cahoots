@@ -87,6 +87,11 @@ pub struct RunRecord {
     /// before it signals a pid that may have been recycled.
     pub callee_started: Option<String>,
     pub callee_exit: Option<i32>,
+    /// The run this one continues, and the harness session it picks up.
+    #[serde(default)]
+    pub resumed_from: Option<String>,
+    #[serde(default)]
+    pub resume_session: Option<String>,
     pub progress: Progress,
     /// Why the gate let this run in.
     #[serde(default)]

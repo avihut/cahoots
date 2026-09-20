@@ -16,7 +16,7 @@ use crate::dirs::Dirs;
 use crate::exit::{self, Envelope, Exit, Fail, Res};
 use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
-use crate::run::client::{self, RunArgs};
+use crate::run::client::{self, ResumeArgs, RunArgs};
 use crate::run::supervise;
 
 pub const VERSION: &str = if cfg!(cahoots_dev_build) {
@@ -79,6 +79,20 @@ pub enum Verb {
         #[arg(long)]
         wait: Option<u64>,
         /// Seconds the run may take (never more than the configured limit)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+    /// Continue a finished run's conversation with a new brief (a new, gated run)
+    Resume {
+        run: String,
+        /// The follow-up, as a file
+        #[arg(long)]
+        brief: PathBuf,
+        /// The harness that is asking
+        #[arg(long)]
+        caller: Option<HarnessId>,
+        #[arg(long)]
+        wait: Option<u64>,
         #[arg(long)]
         timeout: Option<u64>,
     },
@@ -157,8 +171,8 @@ pub enum Tier {
 /// reads it, and a test walks clap's tree to prove no verb is missing from it.
 pub fn tier_of(name: &str) -> Option<Tier> {
     Some(match name {
-        "pick" | "run" | "wait" | "status" | "result" | "cancel" | "outcome" | "notes"
-        | "review" => Tier::Agent,
+        "pick" | "run" | "resume" | "wait" | "status" | "result" | "cancel" | "outcome"
+        | "notes" | "review" => Tier::Agent,
         "install" | "uninstall" | "enable" | "learn" | "registry" => Tier::Human,
         "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
         "__supervise" => Tier::Internal,
@@ -171,6 +185,7 @@ impl Verb {
         match self {
             Verb::Pick { .. } => "pick",
             Verb::Run { .. } => "run",
+            Verb::Resume { .. } => "resume",
             Verb::Wait { .. } => "wait",
             Verb::Status { .. } => "status",
             Verb::Result { .. } => "result",
@@ -294,6 +309,19 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             let files = crate::install::files::uninstall(&Dirs::resolve()?, dry_run)?;
             ok(serde_json::json!({ "dry_run": dry_run, "files": files }))
         }
+        Verb::Resume {
+            run,
+            brief,
+            caller,
+            wait,
+            timeout,
+        } => client::resume(ResumeArgs {
+            run,
+            brief,
+            caller,
+            wait_secs: wait,
+            timeout_secs: timeout,
+        }),
         Verb::Wait { run, timeout } => client::wait(&run, timeout),
         Verb::Status { run } => client::status(run.as_deref()),
         Verb::Result { run } => client::result(&run),
@@ -343,7 +371,8 @@ mod tests {
     #[test]
     fn the_agent_tier_is_exactly_the_documented_verbs() {
         let expected = [
-            "pick", "run", "wait", "status", "result", "cancel", "outcome", "notes", "review",
+            "pick", "run", "resume", "wait", "status", "result", "cancel", "outcome", "notes",
+            "review",
         ];
         let mut agent = Vec::new();
         for sub in Cli::command().get_subcommands() {

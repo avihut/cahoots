@@ -56,8 +56,8 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
 10. **`#![forbid(unsafe_code)]`**, synchronous code (`std::process`, threads,
     one channel — no async runtime), Unix only.
 
-The agent tier of verbs (`pick run wait status result cancel outcome notes
-review`) is what harnesses are told to allow. Adding a verb or a flag to that
+The agent tier of verbs (`pick run resume wait status result cancel outcome
+notes review`) is what harnesses are told to allow. Adding a verb or a flag to that
 tier is a threat-model change: update `docs/THREAT-MODEL.md` in the same PR.
 
 Exit codes are API (`src/exit.rs`, `cahoots exit-codes`). Codes 11–26 belong

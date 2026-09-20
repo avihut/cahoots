@@ -91,7 +91,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     // A writer's worktree is cut HERE, detached from the caller: in a daft
     // repository that runs the repo's setup hooks, which can outlast a
     // caller's tool call.
-    if record.placement == Placement::Fork {
+    if record.placement == Placement::Fork && record.resumed_from.is_none() {
         let base = record.base.clone().unwrap_or_else(|| record.cwd.clone());
         record.cwd = placement::cut(dirs, &base, &record.id)?;
         dir.save(record)?;
@@ -101,6 +101,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         role: record.role,
         target: record.target.clone(),
         session_id: record.progress.session_id.clone(),
+        resume: record.resume_session.clone(),
     };
     let argv = harness::command_line(&spec)?;
     let mut child = spawn::spawn_callee(&Callee {
