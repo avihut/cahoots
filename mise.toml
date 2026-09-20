@@ -1,0 +1,109 @@
+[settings]
+# Refuse tool versions younger than 7 days (supply-chain cooldown). Pinned
+# versions below bypass the gate; it is what holds an unpinned resolve.
+minimum_release_age = "7d"
+
+# Entering a worktree, or changing one of setup's inputs, converges it:
+# pinned tools, crates, git hooks. Cached by the task's sources/outputs, so
+# the common case is a no-op.
+[hooks]
+enter = "mise run setup"
+
+[[watch_files]]
+patterns = ["mise.toml", "lefthook.yml", "Cargo.toml", "Cargo.lock"]
+run = "mise run setup"
+
+[env]
+# Builds made through mise are DEV builds: build.rs turns this into
+# cfg(cahoots_dev_build), which is what lets the test suite point cahoots at
+# throwaway directories. Nothing a person installs is built with it, and
+# `release-build` below builds without it. `cahoots --version` says which
+# kind a binary is.
+CAHOOTS_DEV_BUILD = "1"
+
+[tools]
+# cargo-binstall first (prebuilt, via aqua), so the `cargo:` tool below
+# installs from a release binary instead of compiling for minutes — which
+# would blow the worktree-post-create hook's timeout on a cold machine.
+"aqua:cargo-bins/cargo-binstall" = "1.23.0"
+# clippy + rustfmt named, not assumed: a fresh toolchain (CI's runner, a new
+# contributor's clone) is the bare profile and `clippy` would have no clippy.
+rust = { version = "1.95", components = "clippy,rustfmt" }
+# Hook tooling — pinned, so every clone lints and verifies with the same rules.
+lefthook = "2.1.12"
+cocogitto = "7.0.0"
+shellcheck = "0.11.0"
+"cargo:cargo-deny" = "0.20.2"
+
+[tasks.build]
+description = "Build a dev binary (CAHOOTS_*_DIR overrides honoured)"
+run = "cargo build --locked"
+
+[tasks.test]
+description = "The whole suite — no real harness is ever called, no network is touched"
+# GIT_DIR and friends are unset: git exports them to hooks, and a test that
+# spawns git under them would operate on THIS repository.
+run = "scripts/no-warnings.sh env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
+
+# ── Quality gates ───────────────────────────────────────────────────────────
+# One task per check. lefthook.yml (commit / push), daft.yml (merge) and
+# .github/workflows/ci.yml all call these, so a check has exactly one
+# definition; `gate` is all of them.
+
+[tasks.setup]
+description = "Install the pinned tools, fetch the crates, install the git hooks (cached until an input changes)"
+sources = ["mise.toml", "lefthook.yml", "Cargo.toml", "Cargo.lock", "scripts/setup.sh"]
+outputs = [".cache/setup.stamp"]
+run = "scripts/setup.sh"
+
+[tasks.gate]
+description = "Every check the hooks and CI enforce, in one go (the merge gate, minus its deep ring)"
+depends = ["guard", "lint-shell", "fmt-check", "check-config", "test-hooks", "clippy", "test", "deny"]
+
+[tasks.clippy]
+description = "Clippy over every target, warnings denied, Cargo.lock honored"
+run = "scripts/no-warnings.sh cargo clippy --all-targets --locked -- -D warnings"
+
+[tasks.deny]
+description = "cargo-deny: advisories, licenses, sources — and the ban on every network crate (hard rule 1)"
+run = "cargo deny --locked check"
+
+[tasks.release-build]
+description = "Build what a person would install: release profile, NOT a dev build (the merge gate's deep ring)"
+run = "scripts/no-warnings.sh env -u CAHOOTS_DEV_BUILD cargo build --release --locked"
+
+[tasks.lint-shell]
+description = "shellcheck for the bash scripts (args: files, default scripts/*.sh)"
+run = "scripts/lint-shell.sh"
+
+[tasks.fmt]
+description = "Apply cargo fmt"
+run = "cargo fmt"
+
+[tasks.fmt-check]
+description = "Formatting, check only — nothing is rewritten"
+run = "cargo fmt --check"
+
+[tasks.guard]
+description = "Hard-rule tripwires: tokens, network, spawns, agent homes, dependencies, action pins, check names, script↔task pairing (arg: --staged for the index)"
+run = "scripts/guard.sh"
+
+[tasks.commit-msg]
+description = "Verify a commit message file: conventional subject, release subject ↔ Cargo.toml version (arg: path)"
+run = "scripts/commit-msg.sh"
+
+[tasks.landed-check]
+description = "post-merge tripwire: the landed tree is the tree the merge gate tested (daft's post-merge hook only)"
+run = "scripts/landed-check.sh"
+
+[tasks.check-config]
+description = "The gate's own configuration parses: lefthook.yml, daft.yml, mise.toml"
+run = "scripts/check-config.sh"
+
+[tasks.merge-commits]
+description = "pre-merge: every incoming commit has a conventional subject (catches --no-verify commits)"
+run = "scripts/merge-commits.sh"
+
+[tasks.test-hooks]
+description = "Exercise every hook script's pass AND failure paths in a throwaway repository"
+run = "scripts/test-hooks.sh"

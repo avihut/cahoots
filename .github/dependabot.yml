@@ -1,0 +1,32 @@
+# Version bumps arrive as PRs through the same gate as any other change, and
+# the safe ones merge themselves once it is green
+# (.github/workflows/dependabot-auto-merge.yml says which, and why).
+# The cooldown mirrors mise.toml's minimum_release_age: nothing younger than
+# a week. scripts/guard.sh still holds Cargo.toml to its closed dependency
+# list, and deny.toml the transitive graph — this only ever moves versions.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for the week's compatible bumps. Majors stay one PR each: they
+      # wait for a human, and a group is only as mergeable as its worst member.
+      # (The auto-merge workflow fails closed on a group it cannot read a
+      # previous version from: a grouped minor bump waits for a human too.)
+      cargo-compatible:
+        update-types: [minor, patch]

@@ -1,0 +1,39 @@
+[package]
+name = "cahoots"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A broker that lets coding-agent harnesses delegate to each other — usage-gated, model-aware, local-only"
+authors = ["avihu <avihu@users.noreply.github.com>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/avihut/cahoots"
+repository = "https://github.com/avihut/cahoots"
+readme = "README.md"
+keywords = ["cli", "agents", "claude-code", "codex", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+
+# build.rs sets this cfg ONLY when CAHOOTS_DEV_BUILD=1 is in the build's
+# environment (mise.toml, CI's test job). Fail-closed: a `cargo install` of
+# any kind never honours CAHOOTS_*_DIR overrides. See docs/THREAT-MODEL.md.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(cahoots_dev_build)"]
+
+# The dependency list is a hard rule: scripts/guard.sh holds it to an
+# allowlist, and deny.toml bans every network crate. A new crate is an
+# AGENTS.md question before it is a Cargo.toml change.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = "fat"          # Full link-time optimization
+codegen-units = 1    # Single codegen unit for better optimization
+strip = true         # Strip debug symbols
+panic = "abort"      # Abort on panic (smaller binary)

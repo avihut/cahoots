@@ -1,0 +1,77 @@
+# cargo-deny policy. See https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally: `mise run deny` (part of `mise run gate`, and of CI).
+#
+# Exceptions require a `# why:` comment with a rationale and, ideally, an
+# expiration condition. Entries here weaken the policy and should be
+# temporary unless the why explains otherwise.
+
+[graph]
+# Check every release target, not just the host. cahoots is Unix only.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# Fail on any RustSec advisory not explicitly ignored.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses standard in the Rust ecosystem. Any license not on this
+# list fails the check; add via `exceptions` with a why.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+# The list is the POLICY, not an inventory of today's graph: a license that
+# no current crate carries is not a finding.
+unused-allowed-license = "allow"
+exceptions = []
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Hard rule 1: cahoots has no network code — no telemetry, no update check, no
+# fetch. It talks to the world only by running a harness CLI the user already
+# trusts. Banning the crates holds the whole transitive graph to that, which a
+# grep over src/ cannot. A crate that needs one of these is the wrong crate.
+deny = [
+    { crate = "reqwest", reason = "hard rule 1: no network code" },
+    { crate = "ureq", reason = "hard rule 1: no network code" },
+    { crate = "hyper", reason = "hard rule 1: no network code" },
+    { crate = "h2", reason = "hard rule 1: no network code" },
+    { crate = "isahc", reason = "hard rule 1: no network code" },
+    { crate = "curl", reason = "hard rule 1: no network code" },
+    { crate = "curl-sys", reason = "hard rule 1: no network code" },
+    { crate = "attohttpc", reason = "hard rule 1: no network code" },
+    { crate = "surf", reason = "hard rule 1: no network code" },
+    { crate = "tungstenite", reason = "hard rule 1: no network code" },
+    { crate = "rustls", reason = "hard rule 1: no network code" },
+    { crate = "native-tls", reason = "hard rule 1: no network code" },
+    { crate = "openssl", reason = "hard rule 1: no network code" },
+    { crate = "openssl-sys", reason = "hard rule 1: no network code" },
+    { crate = "tokio", reason = "cahoots is synchronous: std::process, threads and one channel" },
+    { crate = "async-std", reason = "cahoots is synchronous: std::process, threads and one channel" },
+    { crate = "socket2", reason = "hard rule 1: no network code" },
+]
+
+[sources]
+# crates.io only. Catches accidental private-registry deps and forks.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

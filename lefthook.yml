@@ -1,0 +1,56 @@
+# Git hooks. Every check is a mise task (`mise tasks`), so a hook, the merge
+# gate in daft.yml, CI, and a person at a prompt all run the same definition —
+# `mise run gate` is the whole set in one go.
+#
+# Installed by `mise run setup` (daft's post-create and mise's enter hook both
+# call it) — into the bare repo's shared hooks directory, so once per clone
+# covers every worktree; each worktree runs its OWN lefthook.yml.
+
+# The hook launcher resolves lefthook through mise's pin, so hooks work from a
+# shell (or a GUI git client) that never activated mise — and say so loudly
+# rather than skip when lefthook can't be found.
+min_version: "2.1.12"
+lefthook: mise exec -- lefthook
+assert_lefthook_installed: true
+
+# Staged files only, each well under a second. Sequential on purpose: the
+# formatter rewrites the files the checks read next.
+pre-commit:
+  jobs:
+    - name: fmt
+      glob: "*.rs"
+      run: mise run fmt
+      stage_fixed: true
+    - name: whitespace
+      # Conflict markers and whitespace errors in what is staged — after the
+      # formatter, which re-stages what it fixes.
+      run: git diff --cached --check
+    - name: lint-shell
+      glob: "scripts/*.sh"
+      run: mise run lint-shell -- {staged_files}
+    - name: check-config
+      glob: "{lefthook.yml,daft.yml,mise.toml}"
+      run: mise run check-config
+    - name: guard
+      run: mise run guard -- --staged
+
+commit-msg:
+  jobs:
+    - name: message
+      run: mise run commit-msg -- "{1}"
+
+# Unconditional, like the daft repo's: a rebase over main can break the build
+# with no local diff in the files a glob would watch. Warm, the set is seconds.
+pre-push:
+  parallel: true
+  jobs:
+    - name: clippy
+      run: mise run clippy
+    - name: test
+      run: mise run test
+    - name: deny
+      run: mise run deny
+    - name: test-hooks
+      run: mise run test-hooks
+    - name: check-config
+      run: mise run check-config
