@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 cargo build --locked --quiet
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/config" "$tmp/state" .cache
+mkdir -p "$tmp/config" "$tmp/state" "$tmp/home" .cache
 
 cat >"$tmp/config/config.toml" <<'TOML'
 schema = 1
@@ -33,7 +33,7 @@ for caller in claude codex; do
     echo "── caller: $caller"
     set +e
     out=$(env -u CLAUDECODE -u CODEX_THREAD_ID -u CODEX_SANDBOX -u CAHOOTS_DEPTH \
-        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" \
+        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_HOME_DIR="$tmp/home" \
         target/debug/cahoots run --role explore --caller "$caller" --brief "$brief" --wait 300)
     code=$?
     set -e

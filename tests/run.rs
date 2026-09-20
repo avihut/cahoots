@@ -20,6 +20,25 @@ fn the_suite_never_touches_the_real_directories() {
     assert_eq!(dirs.data()["overridden"], true);
     assert_eq!(dirs.data()["state"], world.state.to_str().unwrap());
     assert_eq!(dirs.data()["config"], world.config.to_str().unwrap());
+    assert_eq!(dirs.data()["home"], world.home.to_str().unwrap());
+}
+
+#[test]
+fn a_dev_build_refuses_the_real_directories() {
+    let world = World::new();
+    // One override missing is enough: a dev build gets ALL of config, state
+    // and home from somewhere throwaway, or it does not start.
+    for missing in [
+        "CAHOOTS_CONFIG_DIR",
+        "CAHOOTS_STATE_DIR",
+        "CAHOOTS_HOME_DIR",
+    ] {
+        let mut command = world.cahoots();
+        command.args(["status"]).env_remove(missing);
+        let answer = common::answer(&mut command);
+        assert_eq!(answer.code, 34, "without {missing}: {}", answer.json);
+        assert!(answer.message().contains("DEV build"));
+    }
 }
 
 #[test]

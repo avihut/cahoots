@@ -43,7 +43,11 @@ run = "cargo build --locked"
 description = "The whole suite — no real harness is ever called, no network is touched"
 # GIT_DIR and friends are unset: git exports them to hooks, and a test that
 # spawns git under them would operate on THIS repository.
-run = "scripts/no-warnings.sh env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
+#
+# Wrapped in the real-state tripwire: the suite fails if it changed anything a
+# person actually has — their cahoots config/state, or what `install` puts in
+# their agent homes.
+run = "scripts/no-warnings.sh scripts/real-state.sh guard env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
 
 [tasks.smoke]
 description = "LOCAL ONLY: one tiny REAL run in each direction (costs a little of both plans) — never part of the gate"

@@ -114,12 +114,33 @@ return the same code for the same run.
 
 ## Install (M2)
 
-The skill is written once to the shared skills location and linked where a
-harness wants its own path; agent definitions are rendered per harness from
-embedded templates, stamped with the version. Install *is* update, the
-manifest records every file written, and `uninstall` removes only files that
-still carry cahoots' name. **Permission rules are printed, never applied** —
-`doctor` verifies them read-only.
+`cahoots install` writes five plain files, each only if that harness's home
+already exists (it never invents one):
+
+| File | For |
+|---|---|
+| `~/.agents/skills/cahoots/SKILL.md` | the shared skills location |
+| `~/.claude/skills/cahoots/SKILL.md`, `~/.claude/agents/cahoots-delegate.md` | Claude Code |
+| `~/.codex/skills/cahoots/SKILL.md`, `~/.codex/agents/cahoots-delegate.toml` | Codex |
+
+The texts are embedded in the binary (`src/install/assets/` — those files ARE
+the reviewable source; the only substitution is the version). The skill is the
+same everywhere and tells an agent to pass `--caller`; each agent definition
+fixes it for its own harness.
+
+- **Install is update.** Every file carries a `cahoots_version` stamp, and the
+  stamp is the only thing that makes a file cahoots' to touch: `installed`,
+  `updated {from}`, `refreshed`, `up_to_date` — or `skipped`, for a file of
+  the same name that a person wrote.
+- **`uninstall` removes exactly what `install` wrote:** files the manifest
+  lists (`<state>/install-manifest.json`) that still carry the stamp, then the
+  `cahoots` directories it emptied. A file someone adopted (stamp gone) stays.
+- **Writes are confined to the home directory**, judged by where the path
+  resolves and *before* anything is created — an agent home that is a symlink
+  out of `$HOME` does not even get a directory made through it.
+- **Permission rules are printed, never applied.** `install` ends by listing
+  the rules still missing and the file each belongs in; `doctor` checks them —
+  and the installed copies' freshness — read-only.
 
 ## Review and local learning (M5, opt-in)
 

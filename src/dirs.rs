@@ -34,13 +34,39 @@ pub fn passwd_home() -> Res<PathBuf> {
 
 impl Dirs {
     pub fn resolve() -> Res<Dirs> {
-        let home = passwd_home()?;
-        let config_override = env::dev_dir_override(DirKind::Config);
-        let state_override = env::dev_dir_override(DirKind::State);
-        let overridden = config_override.is_some() || state_override.is_some();
+        let overrides = [DirKind::Config, DirKind::State, DirKind::Home].map(env::dev_dir_override);
+        let overridden = overrides.iter().any(Option::is_some);
+        let all_overridden = overrides.iter().all(Option::is_some);
+
+        // Real state is for real builds. A unit test never gets the real
+        // directories, and a dev build only gets them when its developer asks
+        // — otherwise ALL of config, state and home must point somewhere
+        // throwaway. (2026-09-20: a unit test reached `install` through
+        // `dispatch` and wrote into a real ~/.claude and ~/.codex.)
+        let real_dirs_refused = if cfg!(test) {
+            Some("a unit test reached for the real directories — build a `Dirs` by hand instead")
+        } else if env::dev_overrides_honoured() && !all_overridden && !env::dev_real_dirs_allowed()
+        {
+            Some(
+                "this is a DEV build, which only works on throwaway directories: set \
+                 CAHOOTS_CONFIG_DIR, CAHOOTS_STATE_DIR and CAHOOTS_HOME_DIR — or \
+                 CAHOOTS_DEV_REAL_DIRS=1 to use your real ones on purpose",
+            )
+        } else {
+            None
+        };
+        if let Some(why) = real_dirs_refused {
+            return Err(Fail::config(why));
+        }
+
+        let [config, state, home_override] = overrides;
+        let home = match home_override {
+            Some(home) => home,
+            None => passwd_home()?,
+        };
         Ok(Dirs {
-            config: config_override.unwrap_or_else(|| home.join(".config/cahoots")),
-            state: state_override.unwrap_or_else(|| home.join(".local/state/cahoots")),
+            config: config.unwrap_or_else(|| home.join(".config/cahoots")),
+            state: state.unwrap_or_else(|| home.join(".local/state/cahoots")),
             home,
             overridden,
         })
@@ -102,6 +128,11 @@ pub fn ensure_private_dir(path: &Path) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unit_test_cannot_reach_the_real_directories() {
+        assert_eq!(Dirs::resolve().unwrap_err().exit, crate::exit::Exit::Config);
+    }
 
     #[test]
     fn home_comes_from_passwd_and_is_absolute() {

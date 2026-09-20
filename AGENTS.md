@@ -41,9 +41,16 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
    deserialises into a struct that simply has no such fields.
 7. **Everything learned stays on this machine.** No sharing, no sync, no
    upload. Shipped defaults change only through human PRs.
-8. **Tests never call a real harness and never touch the network.** A fake
-   harness binary stands in. A local-only smoke task (it arrives with the
-   broker) is the one exception, and says what it costs.
+8. **Tests never call a real harness, never touch the network, and never
+   touch a person's real state** — their cahoots config and state, or what
+   `install` puts in their agent homes. A fake harness binary stands in, and
+   every test works in throwaway directories. This is held four ways: a unit
+   test cannot resolve the real directories at all; a dev build refuses them
+   unless `CAHOOTS_DEV_REAL_DIRS=1`; policy is tested through pure functions
+   (`cli::refusal`), never by running a verb; and `scripts/real-state.sh`
+   fingerprints the real paths around the whole suite and fails on any
+   change. `mise run smoke` is the one exception to "no real harness", is
+   local only, and says what it costs.
 9. **The dependency list is closed** (`Cargo.toml`, held by `guard.sh`). A new
    crate is a change to this file first.
 10. **`#![forbid(unsafe_code)]`**, synchronous code (`std::process`, threads,

@@ -56,7 +56,10 @@ toplevel, `--dir` or a temp dir. The `CAHOOTS_*_DIR` overrides the tests need
 exist only in builds made with `CAHOOTS_DEV_BUILD=1`; the check is opt-in by
 an explicit build-time variable, never inferred from "this looks like a
 checkout", which a `cargo install --git` would satisfy. `cahoots --version`
-says which kind of build it is.
+says which kind of build it is. The reverse holds too: a dev build refuses to
+touch the real directories — config, state, and the home `install` writes
+into — unless its developer sets `CAHOOTS_DEV_REAL_DIRS=1`, so a half-finished
+build or a test run cannot damage a working setup.
 
 **The callee's environment** is cleared and rebuilt from an allowlist. Vendor
 API keys are stripped unless that harness is configured for API billing: an
