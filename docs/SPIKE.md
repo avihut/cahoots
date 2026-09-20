@@ -113,6 +113,50 @@ and there was no network. So a sandboxed `status` or `result` could work, but
 anything that records — `run`, `cancel`, `outcome` — needs the rule. cahoots
 reports that as exit 33 with the rule, not as an I/O error.
 
+## S7 — The fence, under a real user's configuration (found after M1)
+
+The spike tested the harnesses' sandboxes with the flags alone. That was not
+enough: **a callee inherits the user's configuration of the harness**, and the
+configuration can undo the flag.
+
+On the development machine, `~/.codex/config.toml` sets `approvals_reviewer =
+"auto_review"`. With it, `codex exec --sandbox read-only` — the whole of
+cahoots' read-only fence for Codex at the time — behaved like this when asked
+to create two files:
+
+| Flags | File in the working directory | File in `$HOME` |
+|---|---|---|
+| `--sandbox read-only` | **created** | **created** |
+| `--sandbox workspace-write` | created | **created** |
+| … plus `-c approval_policy="never"` | refused (reader) / created (writer) | refused |
+| … plus `--ignore-rules` as well | the same | refused |
+
+The sandbox did block the write. Codex's patch tool then asked for approval to
+escalate, and the automated reviewer granted it. Nothing in the run's output
+marks this as unusual. The same configuration also carries `prefix_rule(…,
+decision="allow")` entries — which is how a Codex *caller* reaches cahoots at
+all (S1) — and those run their commands outside the sandbox for a callee too.
+
+So the Codex fence has three parts, all required for every role by
+`validate`: the sandbox mode, `-c approval_policy="never"` (no escalation out
+of it, whatever the user's approval settings say), and `--ignore-rules` (none
+of the user's allow-rules). `--ignore-user-config` also closes the hole but
+throws away everything else the user configured, so it is not used.
+
+Claude Code's fence did not have this problem, because it is a whitelist of
+tools (`--tools`) rather than a sandbox with an escalation path: a reader has
+no tool that writes.
+
+**The lesson is about method.** A fence is only tested by a real run, under a
+real configuration, that TRIES to cross it. `mise run smoke` now does exactly
+that in both directions — and it was run against the unfixed code to see it
+fail before it was trusted to pass.
+
+One side effect worth knowing: Codex records a `trust_level = "trusted"` entry
+in the user's `config.toml` for a repository it is run in with a writer
+sandbox. That is Codex's own bookkeeping, not cahoots', but a cahoots run can
+cause it.
+
 ## What changes in M1 because of this
 
 1. `run` takes `--brief <path>`; the skill never uses a heredoc or a pipe.

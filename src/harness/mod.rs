@@ -109,7 +109,7 @@ pub fn command_line(spec: &RunSpec) -> Res<Vec<String>> {
 
 /// Flags no cahoots invocation may ever carry, whatever the harness: they
 /// widen what the callee may touch, or swap its configuration for another.
-const NEVER: [&str; 12] = [
+const NEVER: [&str; 11] = [
     "--add-dir",
     "--settings",
     "--mcp-config",
@@ -119,7 +119,6 @@ const NEVER: [&str; 12] = [
     "--config",
     "--enable",
     "--disable",
-    "--ignore-rules",
     "--approve-for-me",
     "--ephemeral",
 ];
@@ -228,7 +227,12 @@ mod tests {
                     "--strict-mcp-config",
                     "dontAsk",
                 ],
-                HarnessId::Codex => &["--sandbox", "read-only"],
+                HarnessId::Codex => &[
+                    "--sandbox",
+                    "read-only",
+                    "--ignore-rules",
+                    "approval_policy=\"never\"",
+                ],
             };
             for proof in proofs {
                 let argv: Vec<String> = good.iter().filter(|a| a != proof).cloned().collect();

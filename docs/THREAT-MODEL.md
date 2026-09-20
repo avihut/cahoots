@@ -66,6 +66,20 @@ API keys are stripped unless that harness is configured for API billing: an
 inherited key silently moves the callee onto per-token billing that no meter
 sees — a budget bypass, not just a surprise.
 
+**A callee inherits the user's configuration of its harness** — their models
+and login, but also their approval settings and allow-rules, and those can
+undo a sandbox flag (docs/SPIKE.md S7: with approvals handed to an automated
+reviewer, `codex exec --sandbox read-only` wrote anywhere). So each harness's
+fence is built from the parts that decide authority and nothing is left to the
+user's defaults: for Codex the sandbox mode, `-c approval_policy="never"` and
+`--ignore-rules`, every one required by `validate` for every role; for Claude
+Code a whitelist of tools, `--strict-mcp-config` and an explicit permission
+mode. What a user's configuration can still widen is what they chose to widen
+for every session of that harness — extra writable roots, network access in
+the writer sandbox — and cahoots says so rather than pretending otherwise.
+`mise run smoke` tries to cross each fence with the real CLIs, under your
+configuration.
+
 **Binaries** — the harness, the meter, `git`, `daft` — resolve to canonical
 absolute paths; a path inside the workspace, or group- or world-writable, is
 refused.
