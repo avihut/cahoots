@@ -27,8 +27,9 @@ impl HarnessId {
     }
 }
 
-/// What a run is for. Every role here is read-only; writer roles arrive with
-/// their own milestone and their own threat-model section.
+/// What a run is for. `advise`, `review` and `explore` are read-only. The one
+/// writer, `implement`, only ever works in a worktree of its own (or, if the
+/// user's config says so, in place) — docs/THREAT-MODEL.md → Writers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -38,22 +39,26 @@ pub enum Role {
     Review,
     /// Read the codebase and report what is there.
     Explore,
+    /// Make a change. The only role that may write.
+    Implement,
 }
 
 impl Role {
-    pub const ALL: [Role; 3] = [Role::Advise, Role::Review, Role::Explore];
+    pub const ALL: [Role; 4] = [Role::Advise, Role::Review, Role::Explore, Role::Implement];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Role::Advise => "advise",
             Role::Review => "review",
             Role::Explore => "explore",
+            Role::Implement => "implement",
         }
     }
 
     pub const fn is_read_only(self) -> bool {
         match self {
             Role::Advise | Role::Review | Role::Explore => true,
+            Role::Implement => false,
         }
     }
 
@@ -62,6 +67,8 @@ impl Role {
     pub const fn reserve(self) -> u8 {
         match self {
             Role::Advise | Role::Review | Role::Explore => 3,
+            // Writing takes longer and costs more than reading.
+            Role::Implement => 8,
         }
     }
 }
@@ -191,6 +198,8 @@ mod tests {
         }
         assert_eq!("xhigh".parse::<Effort>().unwrap(), Effort::Xhigh);
         assert!("ultra-mega".parse::<Effort>().is_err());
-        assert!("implement".parse::<Role>().is_err());
+        assert!("deploy".parse::<Role>().is_err());
+        assert!(!Role::Implement.is_read_only());
+        assert!(Role::Implement.reserve() > Role::Review.reserve());
     }
 }

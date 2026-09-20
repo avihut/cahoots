@@ -49,6 +49,7 @@ pub struct Limits {
     pub wait_secs: u64,
     pub int_grace_secs: u64,
     pub term_grace_secs: u64,
+    pub allow_in_place: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +96,10 @@ fn default_candidates(role: Role) -> Vec<Candidate> {
         Role::Explore => vec![
             candidate(Codex, "gpt-5.6-terra", Medium),
             candidate(Claude, "sonnet", Medium),
+        ],
+        Role::Implement => vec![
+            candidate(Codex, "gpt-5.6-sol", High),
+            candidate(Claude, "opus", High),
         ],
     }
 }
@@ -211,6 +216,7 @@ impl Registry {
                 wait_secs: config.limits.wait_secs.unwrap_or(90),
                 int_grace_secs: config.limits.int_grace_secs.unwrap_or(10),
                 term_grace_secs: config.limits.term_grace_secs.unwrap_or(5),
+                allow_in_place: config.limits.allow_in_place.unwrap_or(false),
             },
             meters: Meters {
                 agent_usage: config.meter.agent_usage.clone(),

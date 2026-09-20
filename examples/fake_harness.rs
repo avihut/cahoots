@@ -11,6 +11,7 @@
 //! FAKE: fail           report a failed run and exit 1
 //! FAKE: dump           answer with this process's argv, cwd and environment
 //! FAKE: child          leave a long-lived child in its own process group
+//! FAKE: write=<name>   "edit": create <name> in the working directory
 //! ```
 
 use std::io::{Read, Write};
@@ -109,6 +110,9 @@ fn main() {
             .spawn()
             .expect("sleep");
         eprintln!("left child {}", child.id());
+    }
+    if let Some(name) = directive("write") {
+        std::fs::write(&name, "written by the callee\n").expect("write in cwd");
     }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));

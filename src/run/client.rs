@@ -17,6 +17,7 @@ use crate::harness::Progress;
 use crate::model::{HarnessId, Role};
 use crate::paths::{self, Workspace};
 use crate::pick;
+use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{self, RunDir, RunRecord, State, now};
 use crate::spawn;
@@ -35,6 +36,10 @@ pub struct RunArgs {
     pub to: Option<HarnessId>,
     pub caller: Option<HarnessId>,
     pub dir: Option<PathBuf>,
+    /// A writer works in a fresh worktree cut from the caller's HEAD.
+    pub fork: bool,
+    /// A writer works in the caller's own tree (config must allow it).
+    pub in_place: bool,
     pub wait_secs: Option<u64>,
     pub timeout_secs: Option<u64>,
 }
@@ -107,7 +112,14 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
     let cwd = std::env::current_dir()
         .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
     let workspace = Workspace::around(&cwd)?;
-    let run_dir = paths::run_dir(args.dir.as_deref(), &workspace)?;
+    let (placement, run_dir) = placement::decide(
+        args.role,
+        args.fork,
+        args.in_place,
+        args.dir.as_deref(),
+        &workspace,
+        &registry,
+    )?;
     let mut roots = workspace.roots();
     roots.push(&run_dir);
     dirs.refuse_inside(&roots)?;
@@ -143,7 +155,9 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         role: args.role,
         caller,
         target,
+        base: (placement == Placement::Fork).then(|| run_dir.clone()),
         cwd: run_dir,
+        placement,
         depth,
         timeout_secs: args
             .timeout_secs
@@ -244,6 +258,7 @@ fn summary(record: &RunRecord) -> Value {
         "target": record.target,
         "model_reported": record.progress.model_reported,
         "cwd": record.cwd,
+        "placement": record.placement,
         "created_at": record.created_at,
         "finished_at": record.finished_at,
         "tokens": {
@@ -281,6 +296,10 @@ fn report(dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
             "text": inline,
         });
     }
+    if record.placement != Placement::Caller && record.state.is_terminal() {
+        data["worktree"] = json!(record.cwd);
+        data["changes"] = json!(placement::changes(&record.cwd));
+    }
     let exit = Exit::ALL
         .into_iter()
         .find(|exit| exit.code() == record.exit())
@@ -304,6 +323,9 @@ pub fn reconcile(dirs: &Dirs) {
         if record.state.is_terminal() {
             let age = now().saturating_sub(record.finished_at.unwrap_or(record.created_at));
             if age > RETENTION_SECS {
+                if let Some(base) = &record.base {
+                    placement::discard(dirs, base, &record.cwd);
+                }
                 let _ = fs::remove_dir_all(&dir.path);
             }
             continue;

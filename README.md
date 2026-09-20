@@ -21,8 +21,9 @@ agy    ──┘   pick · gate · run   └── agy -p …
 ```
 
 - **Pick.** Each harness and its models are defined once. For a role
-  (`advise`, `review`, `implement`, …) cahoots chooses the target, the model
-  and the effort level — and simply leaves out whoever is asking.
+  (`advise`, `review`, `explore` — read-only — or `implement`, which writes in
+  a worktree of its own) cahoots chooses the target, the model and the effort
+  level — and simply leaves out whoever is asking.
 - **Gate.** Before a run, cahoots asks how much of the target's plan is used
   and refuses above a cap *you* set per harness (say 50% for one, 80% for
   another), keeping a reserve for the run itself. Stale or missing numbers

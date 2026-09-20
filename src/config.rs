@@ -94,6 +94,9 @@ pub struct LimitsConfig {
     /// How long a callee gets to stop after SIGINT, then after SIGTERM.
     pub int_grace_secs: Option<u64>,
     pub term_grace_secs: Option<u64>,
+    /// Let a writer work in the caller's own working tree (`--in-place`)
+    /// instead of a worktree of its own. Off unless a person turns it on.
+    pub allow_in_place: Option<bool>,
 }
 
 impl UserConfig {
@@ -237,7 +240,7 @@ mod tests {
             "schema = 1\n[harness.claude]\nsandbox = \"off\"",
             "schema = 1\nungated = true",
             "schema = 1\n[harness.gemini]\ncap = 50",
-            "schema = 1\n[roles.implement]\ncandidates = []",
+            "schema = 1\n[roles.deploy]\ncandidates = []",
         ] {
             let fail = UserConfig::parse(text).unwrap_err();
             assert_eq!(fail.exit, Exit::Config, "{text}");

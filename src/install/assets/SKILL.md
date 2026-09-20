@@ -18,16 +18,38 @@ the effort for the job, checks that agent's plan has headroom, runs it, and
 hands you its answer. Every call prints ONE line of JSON and exits with a code
 that means something.
 
-## The roles — all read-only
+## The roles
 
-| Role | Ask it for |
-|---|---|
-| `advise` | a second opinion on an approach, a design, a decision |
-| `review` | what is wrong with a change or a piece of code |
-| `explore` | a read of part of the codebase, reported back |
+| Role | Ask it for | It may |
+|---|---|---|
+| `advise` | a second opinion on an approach, a design, a decision | read |
+| `review` | what is wrong with a change or a piece of code | read |
+| `explore` | a read of part of the codebase, reported back | read |
+| `implement` | a change, made for you to review | write — in a worktree of its own |
 
-The other agent can read the repository. It cannot edit, run commands, or reach
-anything outside the working directory.
+A reader can read the repository and nothing else: it cannot edit, run
+commands, or reach outside the working directory.
+
+### `implement` — a change you review, never an edit you inherit
+
+```
+cahoots run --role implement --caller <you> --fork --brief /tmp/brief.md
+```
+
+`--fork` cuts a fresh worktree from your `HEAD` and the other agent works
+THERE. Your own tree is never touched. When it is done the JSON carries
+`data.worktree` (where the change is) and `data.changes` (`git status
+--short` there). Then it is yours to judge:
+
+- read it: `git -C <worktree> diff`, and run the tests there yourself — the
+  other agent may not have been able to;
+- bring over what you accept (commit it there and cherry-pick, or apply the
+  diff), and say what you did not take.
+
+Commit what you want it to see first: the fork is cut from `HEAD`, so your
+uncommitted work is not in it. `--in-place` (the other agent edits your own
+tree) only works if the user's config allows it; do not ask for it unless the
+user told you to.
 
 ## The loop
 
@@ -63,6 +85,7 @@ anything outside the working directory.
   lets you call it only matches a plain command line. Use `--dir <path>` to
   point the run at another worktree of this repository.
 - The brief is always `--brief <file>`.
+- A change another agent made is a proposal. Never bring it over unread.
 - Do not loop on a refusal. The JSON carries a `retry` hint:
 
   | `retry` | Meaning |

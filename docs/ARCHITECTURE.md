@@ -96,6 +96,17 @@ range per harness (`doctor`), checked-in `--help` captures with a test that
 every flag cahoots emits appears in them, and detection by fingerprint — a
 binary named `agy` may be the Antigravity IDE launcher, not the agent CLI.
 
+## Writers (M4)
+
+`cahoots run --role implement --fork` is the only way anything gets written.
+The client decides and checks (`placement::decide`: a writer without `--fork`
+is refused; `--in-place` needs `limits.allow_in_place`); the detached
+supervisor does the cutting (`placement::cut`), because in a daft repository
+a new worktree runs the repo's setup hooks and that can outlast a caller's
+tool call. The run reports `worktree` and `changes`; bringing the change over
+is the caller's job, after reading it. A worktree cahoots cut itself is
+removed when its run ages out; one daft cut is daft's to remove.
+
 ## Exit codes (M0)
 
 `src/exit.rs`; `cahoots exit-codes` prints them. Every exit also prints one

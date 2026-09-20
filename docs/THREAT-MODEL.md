@@ -95,6 +95,48 @@ claim, not as instructions.
 can be scrubbed, so the real bounds are per-target slots (lock files), a global
 active-run ceiling, and the ledger meter's runs-per-hour cap.
 
+## Writers
+
+`implement` is the one role that writes, and the question it raises is: write
+WHERE, and how far?
+
+**Where.** Never the caller's own tree, unless a person set
+`limits.allow_in_place = true`. A writer gets a worktree of its own, cut from
+the caller's `HEAD` — by `daft start --fork` in a repository that opted into
+daft, otherwise a detached `git worktree` under cahoots' state directory,
+outside every workspace. The caller is handed the path and a `git status`
+summary; nothing lands in its tree until it brings it over. A change another
+agent made is a proposal, and the skill says so.
+
+**How far.** Each harness's own fence, proven on the command line and checked
+by `validate` against the ROLE — a reader can never be handed a writer's
+command line, whatever a builder does:
+
+| | Reader | Writer |
+|---|---|---|
+| Codex | `--sandbox read-only` | `--sandbox workspace-write`: writes under its working directory **and the temp directories** (`/tmp`, `$TMPDIR` — Codex's design, which build tools rely on), nowhere else; no network; Codex's repository check stays on |
+| Claude Code | `--tools Read,Grep,Glob` · `dontAsk` | `--tools Read,Grep,Glob,Edit,Write` · `acceptEdits`: Claude Code confines edits to the working directory; **no Bash**, because without a sandbox a shell writes anywhere |
+
+`mise run smoke` checks both fences against the real CLIs: each writer is
+asked to create a file in its worktree (it must) and one in the user's home
+(it must not).
+
+So a Claude writer cannot run the tests it may have broken, and the caller
+does. That is a real cost, accepted until Claude Code's own sandbox can be
+turned on from a command line cahoots is willing to build.
+
+**A side effect to know about.** The first time a Codex *writer* runs in a
+repository, Codex records that repository as `trust_level = "trusted"` in the
+user's Codex config — its own bookkeeping for "this person asked for a writer
+sandbox here", and it shapes how their later interactive Codex sessions start
+in that repository. Readers do not cause it. cahoots neither writes that entry
+nor removes it.
+
+**What a writer can still do:** anything inside its worktree, and in the temp
+directories under Codex. That is why the caller is told to READ a change
+before running anything in it. A writer cannot commit to the caller's branch,
+and cahoots never merges for anyone.
+
 ## Learning is an injection channel
 
 A callee's output is read by a reviewing agent, whose finding becomes a note
