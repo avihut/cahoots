@@ -1,0 +1,5 @@
+{"type":"system","subtype":"hook_started","session_id":"4cb89a87-0000-4000-8000-000000000001","hook_name":"SessionStart"}
+{"type":"system","subtype":"init","cwd":"/work/repo","session_id":"4cb89a87-0000-4000-8000-000000000001","tools":["Glob","Grep","Read"],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"dontAsk","claude_code_version":"2.1.278"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Reading the gate."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":18333,"cache_read_input_tokens":0,"output_tokens":4}},"session_id":"4cb89a87-0000-4000-8000-000000000001"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"4cb89a87-0000-4000-8000-000000000001"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"The gate is sound.","session_id":"4cb89a87-0000-4000-8000-000000000001","total_cost_usd":0.073376,"usage":{"input_tokens":12,"cache_creation_input_tokens":18333,"cache_read_input_tokens":200,"output_tokens":40},"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"ls"}}]}
