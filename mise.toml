@@ -104,6 +104,22 @@ run = "scripts/commit-msg.sh"
 description = "post-merge tripwire: the landed tree is the tree the merge gate tested (daft's post-merge hook only)"
 run = "scripts/landed-check.sh"
 
+[tasks.release]
+description = "Cut the release main has earned — bump, 'release: vX.Y.Z' commit, signed annotated tag. Never pushes (--dry-run for the verdict)"
+run = "scripts/release.sh"
+
+[tasks.release-check]
+description = "pre-push: every release commit/tag on stdin is whole — version, annotated tag, tag on the commit"
+run = "scripts/release-check.sh"
+
+[tasks.release-reminder]
+description = "List unreleased feat/fix commits on main and the steps to release them"
+run = "scripts/release-reminder.sh"
+
+[tasks.pin-actions]
+description = "Pin every workflow action to a full commit SHA (run after `dist generate`; needs the network)"
+run = "scripts/pin-actions.sh"
+
 [tasks.check-config]
 description = "The gate's own configuration parses: lefthook.yml, daft.yml, mise.toml"
 run = "scripts/check-config.sh"

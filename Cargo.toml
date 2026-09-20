@@ -11,6 +11,9 @@ repository = "https://github.com/avihut/cahoots"
 readme = "README.md"
 keywords = ["cli", "agents", "claude-code", "codex", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
+# What `cargo publish` ships: the crate and its licenses, not the repository's
+# gates, CI and design documents.
+include = ["/src", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 # build.rs sets this cfg ONLY when CAHOOTS_DEV_BUILD=1 is in the build's
 # environment (mise.toml, CI's test job). Fail-closed: a `cargo install` of
@@ -41,3 +44,8 @@ lto = "fat"          # Full link-time optimization
 codegen-units = 1    # Single codegen unit for better optimization
 strip = true         # Strip debug symbols
 panic = "abort"      # Abort on panic (smaller binary)
+
+# The profile that 'dist' builds release artifacts with
+[profile.dist]
+inherits = "release"
+lto = "thin"

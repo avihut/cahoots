@@ -112,7 +112,7 @@ hooks:
         tags: [deep]
         run: mise run release-build
 
-  # A tripwire. Warn rather than abort (also the default for post-merge): the
+  # Tripwires. Warn rather than abort (also the default for post-merge): the
   # ref has already moved, so an error exit would report a verdict on work
   # that is done — the useful outcome is a loud notice.
   post-merge:
@@ -121,6 +121,9 @@ hooks:
       - name: landed-matches-gated
         description: The landed tree is the tree the rings tested
         run: mise run landed-check
+      - name: release-reminder
+        description: Unreleased feat/fix on main means a release is owed
+        run: mise run release-reminder
 
 relations:
   - url: git@github.com:avihut/coding-agent-usage-tracker.git

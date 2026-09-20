@@ -33,11 +33,13 @@ harness is invoked or parsed.
 - **commit-msg** — a conventional subject (`cog`, with `release` declared in
   `cog.toml`); a commit that moves `Cargo.toml`'s version must *be*
   `release: vX.Y.Z`.
-- **pre-push** — clippy, the suite, deny, test-hooks, config.
+- **pre-push** — clippy, the suite, deny, test-hooks, config, and
+  `release-check`: a release commit being pushed is whole.
 - **daft pre-merge** — all of the above plus `source-up-to-date` and
   `incoming-commits`, in the source worktree, before `main` moves.
   `daft merge --skip-tag deep` drops only the release build.
-- **daft post-merge** — `landed-check`: the landed tree is the gated tree.
+- **daft post-merge** — `landed-check`: the landed tree is the gated tree;
+  `release-reminder`: unreleased `feat`/`fix` on `main` means a release is owed.
 - **CI** — `mise run gate` on Ubuntu and macOS, aggregated into one check,
   plus `pr-title`.
 
@@ -80,7 +82,10 @@ fails closed if `gate` is ever not a required check.
 
 ## Releases
 
-Cut on `main`, by the maintainer, never on a branch and never by a PR: a
-`release: vX.Y.Z` commit that carries the version bump, and a signed annotated
-tag whose annotation is the release notes. The release tooling lands with
-v0.1 (README → Milestones).
+Cut on `main`, by the maintainer, never on a branch and never by a PR:
+`mise run release` makes a `release: vX.Y.Z` commit that carries the version
+bump, and a signed annotated tag whose annotation is the release notes. It
+never pushes — `git push origin main vX.Y.Z` is a person's step, because a
+pushed `v*` tag can never move and it is what starts the release workflow
+(cargo-dist: binaries, the GitHub release, the Homebrew formula).
+`RELEASING.md` is the whole ritual.
