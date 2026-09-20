@@ -166,6 +166,9 @@ pub enum Verb {
         /// How far back to look
         #[arg(long, default_value_t = 30)]
         days: u64,
+        /// Also show what the outcome statistics say about each role's order
+        #[arg(long)]
+        suggest: bool,
     },
     /// Print every exit code, its class and its retry hint, as JSON
     ExitCodes,
@@ -343,7 +346,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             action: LearnAction::Reset,
         } => crate::learn::learn_reset(),
         Verb::Outcome { run, outcome } => client::outcome(&run, outcome),
-        Verb::Report { days } => crate::report::report(days),
+        Verb::Report { days, suggest } => crate::report::report(days, suggest),
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
         Verb::Install { harness, dry_run } => {
             let dirs = Dirs::resolve()?;
