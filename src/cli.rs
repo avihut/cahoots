@@ -109,7 +109,10 @@ pub enum Verb {
     /// Cancel a run
     Cancel { run: String },
     /// Record what became of a run's result: accepted, reworked or discarded
-    Outcome,
+    Outcome {
+        run: String,
+        outcome: crate::history::Outcome,
+    },
     /// Show the locally learned briefing notes for a target
     Notes,
     /// Review a sampled run (opt-in)
@@ -143,8 +146,12 @@ pub enum Verb {
     Registry,
     /// Check the installation, the harness versions and the permission rules
     Doctor,
-    /// Summarise recorded runs
-    Report,
+    /// Summarise recorded runs: how they ended, what became of them, what they cost
+    Report {
+        /// How far back to look
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
     /// Print every exit code, its class and its retry hint, as JSON
     ExitCodes,
     /// Where this build keeps things, and whether overrides are honoured
@@ -190,7 +197,7 @@ impl Verb {
             Verb::Status { .. } => "status",
             Verb::Result { .. } => "result",
             Verb::Cancel { .. } => "cancel",
-            Verb::Outcome => "outcome",
+            Verb::Outcome { .. } => "outcome",
             Verb::Notes => "notes",
             Verb::Review => "review",
             Verb::Install { .. } => "install",
@@ -200,7 +207,7 @@ impl Verb {
             Verb::Learn => "learn",
             Verb::Registry => "registry",
             Verb::Doctor => "doctor",
-            Verb::Report => "report",
+            Verb::Report { .. } => "report",
             Verb::ExitCodes => "exit-codes",
             Verb::Dirs => "__dirs",
             Verb::Supervise { .. } => "__supervise",
@@ -276,6 +283,8 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             ok(serde_json::json!({ "enabled": enabled }))
         }
         Verb::Doctor => crate::doctor::doctor(),
+        Verb::Outcome { run, outcome } => client::outcome(&run, outcome),
+        Verb::Report { days } => crate::report::report(days),
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
         Verb::Install { harness, dry_run } => {
             let dirs = Dirs::resolve()?;

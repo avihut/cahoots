@@ -63,11 +63,18 @@ pub struct Meters {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Review {
+    pub enabled: bool,
+    pub sample_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Registry {
     pub harnesses: BTreeMap<HarnessId, HarnessEntry>,
     pub roles: BTreeMap<Role, RoleEntry>,
     pub limits: Limits,
     pub meters: Meters,
+    pub review: Review,
 }
 
 pub const DEFAULT_CAP: u8 = 75;
@@ -235,6 +242,10 @@ impl Registry {
                 term_grace_secs: config.limits.term_grace_secs.unwrap_or(5),
                 allow_in_place: config.limits.allow_in_place.unwrap_or(false),
                 watchdog_secs: config.limits.watchdog_secs.unwrap_or(120),
+            },
+            review: Review {
+                enabled: config.review.enabled.unwrap_or(false),
+                sample_rate: config.review.sample_rate.unwrap_or(0.2),
             },
             meters: Meters {
                 agent_usage: config.meter.agent_usage.clone(),

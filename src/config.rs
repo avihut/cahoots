@@ -29,6 +29,8 @@ pub struct UserConfig {
     pub meter: MeterConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub review: ReviewConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -86,6 +88,16 @@ pub struct AgentUsageConfig {
 pub struct LedgerConfig {
     pub max_runs_per_hour: Option<u32>,
     pub max_tokens_per_day: Option<u64>,
+}
+
+/// Review and local learning. OFF unless a person turns it on: it spends the
+/// reviewing harness's own plan, and it changes how cahoots behaves over time.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewConfig {
+    pub enabled: Option<bool>,
+    /// The share of finished runs offered for review. 0.0–1.0, default 0.2.
+    pub sample_rate: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -187,6 +199,13 @@ impl UserConfig {
                 "meter.agent-usage.binary must be an absolute path",
             ));
         }
+        if let Some(rate) = self.review.sample_rate
+            && !(0.0..=1.0).contains(&rate)
+        {
+            return Err(Fail::config(format!(
+                "review.sample_rate = {rate}: must be 0.0–1.0"
+            )));
+        }
         let limits = &self.limits;
         let in_range =
             |name: &str, value: Option<u64>, range: std::ops::RangeInclusive<u64>| match value {
@@ -273,6 +292,8 @@ mod tests {
             "schema = 1\n[roles.advise]\ncandidates = []",
             "schema = 1\n[roles.advise]\ncandidates = [{ harness = \"codex\", model = \"--oss\", effort = \"high\" }]",
             "schema = 1\n[limits]\ntimeout_secs = 5",
+            "schema = 1\n[review]\nsample_rate = 1.5",
+            "schema = 1\n[review]\nauto_apply_everything = true",
             "schema = 1\n[harness.codex]\ncap = 80\nabort_at = 80",
             "schema = 1\n[harness.codex]\nabort_at = 60",
         ] {

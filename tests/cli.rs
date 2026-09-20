@@ -22,8 +22,23 @@ fn version_names_the_crate_version() {
 }
 
 #[test]
-fn an_unknown_verb_is_a_usage_error() {
-    cahoots().arg("conspire").assert().code(2);
+fn a_bad_command_line_is_exit_2_with_an_envelope_like_any_other_exit() {
+    for argv in [
+        vec!["conspire"],
+        vec![],
+        vec!["run", "--role", "deploy", "--brief", "b.md"],
+        vec!["run", "--role", "review", "--brief", "b.md", "--ungated"],
+    ] {
+        let output = cahoots().args(&argv).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{argv:?}");
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{argv:?}: no envelope on stdout ({error})"));
+        assert_eq!(envelope["class"], "usage_error");
+        assert_eq!(envelope["retry"], "never");
+        assert!(!envelope["message"].as_str().unwrap().is_empty());
+    }
+    // …while asking for help or the version is an answer, not an error.
+    cahoots().arg("--help").assert().success();
 }
 
 #[test]
