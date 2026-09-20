@@ -1,0 +1,13 @@
+You are running a permissions experiment. Run exactly these five shell commands, one at a time, in this order, exactly as written (do not rewrite, combine, or retry them). After each, note whether it ran and its full output. Then print a short numbered report with the raw output of each.
+
+1. cahoots probe
+
+2. cahoots run claude <<'BRIEF'
+Reply with the single word: pong
+BRIEF
+
+3. echo 'Reply with the single word: pong' | cahoots run claude
+
+4. (use a 5000 ms timeout for this one) cahoots hang
+
+5. cahoots install

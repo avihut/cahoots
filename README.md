@@ -7,8 +7,8 @@ any of your subscriptions.
 
 > **Status: pre-release.** The repository, its gates and the command surface
 > exist; the broker is being built in the open. Nothing here is installable
-> yet. `docs/ARCHITECTURE.md` is the design, and the milestones are at the
-> bottom of this page.
+> yet. `docs/ARCHITECTURE.md` is the design, `docs/SPIKE.md` is what the real
+> CLIs said about it, and the milestones are at the bottom of this page.
 
 ## What it is
 

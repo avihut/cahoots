@@ -1,0 +1,11 @@
+You are running a permissions experiment. Make exactly these four Bash tool calls, one at a time, in this order, exactly as written (do not rewrite, combine, or retry them). After each, note whether it ran, was denied, or timed out, and its output. Then print a short numbered report.
+
+1. Command: cahoots run codex <<'BRIEF'
+Reply with the single word: pong
+BRIEF
+
+2. Command: echo 'Reply with the single word: pong' | cahoots run codex
+
+3. Command (set the Bash tool's timeout parameter to 5000 ms): cahoots hang
+
+4. Command: cahoots install

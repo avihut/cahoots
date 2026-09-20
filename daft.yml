@@ -121,3 +121,7 @@ hooks:
       - name: landed-matches-gated
         description: The landed tree is the tree the rings tested
         run: mise run landed-check
+
+relations:
+  - url: git@github.com:avihut/coding-agent-usage-tracker.git
+    name: agent-usage
