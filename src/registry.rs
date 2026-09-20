@@ -125,6 +125,24 @@ impl EnabledFile {
     }
 }
 
+/// Turns a target on or off. Only the `enable` verb calls this, and that verb
+/// only runs from a terminal: sending a repository's content to another
+/// vendor is a person's decision.
+pub fn set_enabled(dirs: &Dirs, harness: HarnessId, on: bool) -> Res<Vec<HarnessId>> {
+    let mut file = EnabledFile::load(dirs)?;
+    file.v = 1;
+    file.enabled.retain(|id| *id != harness);
+    if on {
+        file.enabled.push(harness);
+    }
+    file.enabled.sort();
+    crate::dirs::ensure_private_dir(&dirs.config)?;
+    let json = serde_json::to_vec_pretty(&file)
+        .map_err(|error| Fail::internal(format!("cannot encode the enabled list: {error}")))?;
+    crate::run::record::write_private(&dirs.enabled_file(), &json)?;
+    Ok(file.enabled)
+}
+
 impl Registry {
     pub fn load(dirs: &Dirs) -> Res<Registry> {
         let config = UserConfig::load(&dirs.config_file())?;
@@ -210,6 +228,42 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabling_is_idempotent_and_reversible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            home: tmp.path().to_path_buf(),
+            config: tmp.path().join("config"),
+            state: tmp.path().join("state"),
+            overridden: true,
+        };
+        assert_eq!(
+            set_enabled(&dirs, HarnessId::Codex, true).unwrap(),
+            [HarnessId::Codex]
+        );
+        assert_eq!(
+            set_enabled(&dirs, HarnessId::Codex, true).unwrap(),
+            [HarnessId::Codex]
+        );
+        assert!(
+            Registry::load(&dirs)
+                .unwrap()
+                .harness(HarnessId::Codex)
+                .enabled
+        );
+        assert!(
+            set_enabled(&dirs, HarnessId::Codex, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !Registry::load(&dirs)
+                .unwrap()
+                .harness(HarnessId::Codex)
+                .enabled
+        );
+    }
 
     #[test]
     fn nothing_is_enabled_until_a_human_says_so() {

@@ -28,9 +28,15 @@ fn an_unknown_verb_is_a_usage_error() {
 
 #[test]
 fn a_human_verb_without_a_terminal_is_refused_by_policy() {
-    for verb in ["install", "uninstall", "enable", "learn", "registry"] {
+    for verb in [
+        vec!["install"],
+        vec!["uninstall"],
+        vec!["enable", "codex"],
+        vec!["learn"],
+        vec!["registry"],
+    ] {
         cahoots()
-            .arg(verb)
+            .args(verb)
             .assert()
             .code(33)
             .stdout(predicate::str::contains(r#""class":"refused_by_policy""#))

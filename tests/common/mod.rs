@@ -104,16 +104,38 @@ impl World {
         fs::write(self.config.join("enabled.json"), json.to_string()).unwrap();
     }
 
-    /// Writes config.toml: the fake binaries, a fast kill ladder, then `extra`.
-    /// `extra` may add keys to `[limits]` first and open other tables after.
+    /// Writes config.toml: the fake binaries, a fast kill ladder, then `extra` —
+    /// dotted keys (`harness.codex.cap = 80`) first, new tables after.
     pub fn configure(&self, extra: &str) {
         let text = format!(
-            "schema = 1\n[harness.claude]\nbinary = {:?}\n[harness.codex]\nbinary = {:?}\n\
-             [limits]\nint_grace_secs = 1\nterm_grace_secs = 1\n{extra}\n",
+            "schema = 1\nharness.claude.binary = {:?}\nharness.codex.binary = {:?}\n\
+             limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{extra}\n",
             self.bin.join("claude"),
             self.bin.join("codex"),
         );
         fs::write(self.config.join("config.toml"), text).unwrap();
+    }
+
+    /// Installs a fake `usage-cli` and points the config at it. `plan` says how
+    /// it answers: `{"guarded": {"code": 21}, "unguarded": {"code": 0, "percent": 40}}`
+    /// — `guarded` is the call that carries `--max-data-age`.
+    pub fn meter(&self, plan: serde_json::Value, extra: &str) {
+        let path = self.bin.join("usage-cli");
+        fs::copy(fake_harness(), &path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(self.bin.join("usage-cli.plan"), plan.to_string()).unwrap();
+        self.configure(&format!(
+            "{extra}\n[meter.agent-usage]\nbinary = {path:?}\n"
+        ));
+    }
+
+    /// Every command line the fake meter was called with.
+    pub fn meter_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.bin.join("usage-cli.calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     pub fn brief(&self, text: &str) -> PathBuf {

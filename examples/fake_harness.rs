@@ -25,10 +25,39 @@ fn emit(value: serde_json::Value) {
     let _ = out.flush();
 }
 
+/// As `usage-cli`: answers `headroom` the way `usage-cli.plan` (next to the
+/// binary) says, and logs each call to `usage-cli.calls`.
+fn fake_meter(exe: &std::path::Path, argv: &[String]) {
+    let calls = exe.with_file_name("usage-cli.calls");
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(calls)
+        .expect("calls");
+    let _ = writeln!(log, "{}", argv[1..].join(" "));
+    let plan: serde_json::Value = std::fs::read_to_string(exe.with_file_name("usage-cli.plan"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let guarded = argv.iter().any(|arg| arg == "--max-data-age");
+    let answer = &plan[if guarded { "guarded" } else { "unguarded" }];
+    if let Some(percent) = answer["percent"].as_f64() {
+        println!(
+            "{}",
+            json!({"verdict": "from-the-fake", "percent": percent})
+        );
+    }
+    std::process::exit(answer["code"].as_i64().unwrap_or(13) as i32);
+}
+
 fn main() {
     let exe = std::env::current_exe().expect("current_exe");
     let flavor = exe.file_name().unwrap().to_string_lossy().to_string();
     let argv: Vec<String> = std::env::args().collect();
+
+    if flavor == "usage-cli" {
+        return fake_meter(&exe, &argv);
+    }
 
     if argv.iter().any(|arg| arg == "--version") {
         let overridden = std::fs::read_to_string(exe.with_file_name(format!("{flavor}.version")));

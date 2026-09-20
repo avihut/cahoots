@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
+use crate::gate::Admission;
 use crate::harness::{Progress, Version};
 use crate::model::{Candidate, HarnessId, Role};
 
@@ -79,6 +80,9 @@ pub struct RunRecord {
     pub callee_started: Option<String>,
     pub callee_exit: Option<i32>,
     pub progress: Progress,
+    /// Why the gate let this run in.
+    #[serde(default)]
+    pub admission: Admission,
 }
 
 impl RunRecord {

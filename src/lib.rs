@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod config;
 pub mod dirs;
+pub mod doctor;
 pub mod env;
 pub mod exit;
 pub mod gate;
@@ -15,6 +16,7 @@ pub mod harness;
 pub mod install;
 pub mod model;
 pub mod paths;
+pub mod pick;
 pub mod registry;
 pub mod run;
 pub mod spawn;

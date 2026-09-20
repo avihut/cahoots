@@ -21,6 +21,11 @@ whole set by hand:
 
 A script and its mise task land together (`guard` rule 9).
 
+`mise run smoke` is NOT part of the gate and never runs in CI: it makes one
+tiny real run in each direction against the CLIs installed on your machine,
+in a throwaway config and state directory. Run it when you change how a
+harness is invoked or parsed.
+
 ## When each runs
 
 - **pre-commit** — staged files: format, whitespace, shell lint, config,
