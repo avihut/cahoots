@@ -9,11 +9,15 @@
 use clap::{Parser, Subcommand};
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::dirs::Dirs;
 use crate::exit::{self, Envelope, Exit, Fail, Res};
+use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
+use crate::run::client::{self, RunArgs};
+use crate::run::supervise;
 
 pub const VERSION: &str = if cfg!(cahoots_dev_build) {
     concat!(
@@ -35,20 +39,46 @@ pub struct Cli {
     pub verb: Verb,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum Verb {
     /// Choose the target (harness, model, effort) for a role, without running
     Pick,
     /// Delegate a brief to another harness, under the gate
-    Run,
+    Run {
+        /// What the run is for: advise, review or explore
+        #[arg(long)]
+        role: Role,
+        /// The brief, as a file (in the working directory, its repository, or a temp dir)
+        #[arg(long)]
+        brief: PathBuf,
+        /// Only this harness
+        #[arg(long)]
+        to: Option<HarnessId>,
+        /// The harness that is asking (it is never picked)
+        #[arg(long)]
+        caller: Option<HarnessId>,
+        /// Where the callee works: another worktree of this repository
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Seconds to wait for the answer before returning "not finished"
+        #[arg(long)]
+        wait: Option<u64>,
+        /// Seconds the run may take (never more than the configured limit)
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// Wait for a run to finish
-    Wait,
+    Wait {
+        run: String,
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// Show a run, or the runs of the current directory
-    Status,
+    Status { run: Option<String> },
     /// Print a finished run's final message
-    Result,
+    Result { run: String },
     /// Cancel a run
-    Cancel,
+    Cancel { run: String },
     /// Record what became of a run's result: accepted, reworked or discarded
     Outcome,
     /// Show the locally learned briefing notes for a target
@@ -74,6 +104,9 @@ pub enum Verb {
     /// Where this build keeps things, and whether overrides are honoured
     #[command(name = "__dirs", hide = true)]
     Dirs,
+    /// The detached supervisor of one run. Started by `run`, never by hand.
+    #[command(name = "__supervise", hide = true)]
+    Supervise { run: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,31 +117,56 @@ pub enum Tier {
     Human,
     /// Reads and reports. No rule is printed for it, and none is needed.
     Inspect,
+    /// cahoots calling itself.
+    Internal,
+}
+
+/// The tier of a verb, by its command-line name. The ONE table: `Verb::tier`
+/// reads it, and a test walks clap's tree to prove no verb is missing from it.
+pub fn tier_of(name: &str) -> Option<Tier> {
+    Some(match name {
+        "pick" | "run" | "wait" | "status" | "result" | "cancel" | "outcome" | "notes"
+        | "review" => Tier::Agent,
+        "install" | "uninstall" | "enable" | "learn" | "registry" => Tier::Human,
+        "doctor" | "report" | "exit-codes" | "__dirs" => Tier::Inspect,
+        "__supervise" => Tier::Internal,
+        _ => return None,
+    })
 }
 
 impl Verb {
-    pub const fn tier(self) -> Tier {
+    pub fn name(&self) -> &'static str {
         match self {
-            Verb::Pick
-            | Verb::Run
-            | Verb::Wait
-            | Verb::Status
-            | Verb::Result
-            | Verb::Cancel
-            | Verb::Outcome
-            | Verb::Notes
-            | Verb::Review => Tier::Agent,
-            Verb::Install | Verb::Uninstall | Verb::Enable | Verb::Learn | Verb::Registry => {
-                Tier::Human
-            }
-            Verb::Doctor | Verb::Report | Verb::ExitCodes | Verb::Dirs => Tier::Inspect,
+            Verb::Pick => "pick",
+            Verb::Run { .. } => "run",
+            Verb::Wait { .. } => "wait",
+            Verb::Status { .. } => "status",
+            Verb::Result { .. } => "result",
+            Verb::Cancel { .. } => "cancel",
+            Verb::Outcome => "outcome",
+            Verb::Notes => "notes",
+            Verb::Review => "review",
+            Verb::Install => "install",
+            Verb::Uninstall => "uninstall",
+            Verb::Enable => "enable",
+            Verb::Learn => "learn",
+            Verb::Registry => "registry",
+            Verb::Doctor => "doctor",
+            Verb::Report => "report",
+            Verb::ExitCodes => "exit-codes",
+            Verb::Dirs => "__dirs",
+            Verb::Supervise { .. } => "__supervise",
         }
+    }
+
+    pub fn tier(&self) -> Tier {
+        tier_of(self.name()).unwrap_or(Tier::Human)
     }
 }
 
 /// Decides the exit for a parsed command line. `stdin_is_terminal` is passed
 /// in so the policy is testable without a pty.
-pub fn dispatch(cli: &Cli, stdin_is_terminal: bool) -> Envelope {
+pub fn dispatch(cli: Cli, stdin_is_terminal: bool) -> Envelope {
     if cli.verb.tier() == Tier::Human && !stdin_is_terminal {
         return Fail::policy(
             "this verb changes what cahoots may do, so it only runs from a terminal",
@@ -135,6 +193,31 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             let registry = Registry::load(&Dirs::resolve()?)?;
             ok(serde_json::to_value(&registry)
                 .map_err(|error| Fail::internal(format!("cannot encode the registry: {error}")))?)
+        }
+        Verb::Run {
+            role,
+            brief,
+            to,
+            caller,
+            dir,
+            wait,
+            timeout,
+        } => client::run(RunArgs {
+            role,
+            brief,
+            to,
+            caller,
+            dir,
+            wait_secs: wait,
+            timeout_secs: timeout,
+        }),
+        Verb::Wait { run, timeout } => client::wait(&run, timeout),
+        Verb::Status { run } => client::status(run.as_deref()),
+        Verb::Result { run } => client::result(&run),
+        Verb::Cancel { run } => client::cancel(&run),
+        Verb::Supervise { run } => {
+            supervise::supervise(&Dirs::resolve()?, &run)?;
+            Ok(Envelope::new(Exit::Ok, None))
         }
         _ => Err(Fail::internal(
             "not implemented yet — this build does not carry this verb",
@@ -166,20 +249,24 @@ mod tests {
     }
 
     /// The agent tier is what gets allowed outside a sandbox. Growing it is a
-    /// threat-model change, so it is pinned here by name.
+    /// threat-model change, so it is pinned here by name — and every verb clap
+    /// knows must be in the tier table, or it would default to nothing.
     #[test]
     fn the_agent_tier_is_exactly_the_documented_verbs() {
         let expected = [
             "pick", "run", "wait", "status", "result", "cancel", "outcome", "notes", "review",
         ];
-        let mut agent: Vec<String> = Cli::command()
-            .get_subcommands()
-            .map(|sub| sub.get_name().to_string())
-            .filter(|name| {
-                let cli = Cli::try_parse_from(["cahoots", name]).unwrap();
-                cli.verb.tier() == Tier::Agent
-            })
-            .collect();
+        let mut agent = Vec::new();
+        for sub in Cli::command().get_subcommands() {
+            let tier = tier_of(sub.get_name())
+                .unwrap_or_else(|| panic!("`{}` has no tier", sub.get_name()));
+            if tier == Tier::Agent {
+                agent.push(sub.get_name().to_string());
+            }
+            if tier == Tier::Internal {
+                assert!(sub.is_hide_set(), "an internal verb is advertised");
+            }
+        }
         agent.sort();
         let mut expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         expected.sort();
@@ -188,14 +275,21 @@ mod tests {
 
     #[test]
     fn a_human_verb_is_refused_without_a_terminal() {
-        let cli = Cli::try_parse_from(["cahoots", "install"]).unwrap();
-        assert_eq!(dispatch(&cli, false).code, Exit::Policy.code());
-        assert_ne!(dispatch(&cli, true).code, Exit::Policy.code());
+        let parse = || Cli::try_parse_from(["cahoots", "install"]).unwrap();
+        assert_eq!(dispatch(parse(), false).code, Exit::Policy.code());
+        assert_ne!(dispatch(parse(), true).code, Exit::Policy.code());
     }
 
     #[test]
-    fn an_agent_verb_needs_no_terminal() {
-        let cli = Cli::try_parse_from(["cahoots", "status"]).unwrap();
-        assert_ne!(dispatch(&cli, false).code, Exit::Policy.code());
+    fn role_and_harness_arguments_are_closed_vocabularies() {
+        let run = |extra: &[&str]| {
+            let mut argv = vec!["cahoots", "run", "--brief", "b.md"];
+            argv.extend(extra);
+            Cli::try_parse_from(argv)
+        };
+        assert!(run(&["--role", "review"]).is_ok());
+        assert!(run(&["--role", "implement"]).is_err());
+        assert!(run(&["--role", "review", "--to", "gemini"]).is_err());
+        assert!(run(&["--role", "review", "--ungated"]).is_err());
     }
 }

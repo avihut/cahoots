@@ -91,6 +91,9 @@ pub struct LimitsConfig {
     pub max_depth: Option<u32>,
     pub timeout_secs: Option<u64>,
     pub wait_secs: Option<u64>,
+    /// How long a callee gets to stop after SIGINT, then after SIGTERM.
+    pub int_grace_secs: Option<u64>,
+    pub term_grace_secs: Option<u64>,
 }
 
 impl UserConfig {
@@ -185,6 +188,8 @@ impl UserConfig {
         in_range("max_depth", limits.max_depth.map(u64::from), 0..=3)?;
         in_range("timeout_secs", limits.timeout_secs, 30..=14_400)?;
         in_range("wait_secs", limits.wait_secs, 0..=540)?;
+        in_range("int_grace_secs", limits.int_grace_secs, 1..=60)?;
+        in_range("term_grace_secs", limits.term_grace_secs, 1..=60)?;
         Ok(())
     }
 }
