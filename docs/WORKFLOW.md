@@ -22,9 +22,11 @@ whole set by hand:
 A script and its mise task land together (`guard` rule 9).
 
 `mise run smoke` is NOT part of the gate and never runs in CI: it makes one
-tiny real run in each direction against the CLIs installed on your machine,
-in a throwaway config and state directory. Run it when you change how a
-harness is invoked or parsed.
+tiny real run in each direction against the CLIs installed on your machine —
+under YOUR configuration of them — in throwaway cahoots directories, and it
+TRIES TO CROSS each fence: a reader is asked to write, and must fail. Run it
+whenever you change how a harness is invoked or parsed; a command line that
+looks fenced is not evidence that it is (docs/SPIKE.md S7).
 
 ## When each runs
 
