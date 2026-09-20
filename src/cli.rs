@@ -8,7 +8,12 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::exit::{self, Envelope, Exit};
+use std::io::Write;
+use std::process::ExitCode;
+
+use crate::dirs::Dirs;
+use crate::exit::{self, Envelope, Exit, Fail, Res};
+use crate::registry::Registry;
 
 pub const VERSION: &str = if cfg!(cahoots_dev_build) {
     concat!(
@@ -66,6 +71,9 @@ pub enum Verb {
     Report,
     /// Print every exit code, its class and its retry hint, as JSON
     ExitCodes,
+    /// Where this build keeps things, and whether overrides are honoured
+    #[command(name = "__dirs", hide = true)]
+    Dirs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +101,7 @@ impl Verb {
             Verb::Install | Verb::Uninstall | Verb::Enable | Verb::Learn | Verb::Registry => {
                 Tier::Human
             }
-            Verb::Doctor | Verb::Report | Verb::ExitCodes => Tier::Inspect,
+            Verb::Doctor | Verb::Report | Verb::ExitCodes | Verb::Dirs => Tier::Inspect,
         }
     }
 }
@@ -102,18 +110,49 @@ impl Verb {
 /// in so the policy is testable without a pty.
 pub fn dispatch(cli: &Cli, stdin_is_terminal: bool) -> Envelope {
     if cli.verb.tier() == Tier::Human && !stdin_is_terminal {
-        return Envelope::new(
-            Exit::Policy,
-            "this verb changes what cahoots may do, so it only runs from a terminal".to_string(),
-        );
+        return Fail::policy(
+            "this verb changes what cahoots may do, so it only runs from a terminal",
+        )
+        .into();
     }
-    if cli.verb == Verb::ExitCodes {
-        return Envelope::new(Exit::Ok, None).with_data(exit::taxonomy());
+    run_verb(cli.verb).unwrap_or_else(Envelope::from)
+}
+
+fn run_verb(verb: Verb) -> Res<Envelope> {
+    let ok = |data| Ok(Envelope::new(Exit::Ok, None).with_data(data));
+    match verb {
+        Verb::ExitCodes => ok(exit::taxonomy()),
+        Verb::Dirs => {
+            let dirs = Dirs::resolve()?;
+            ok(serde_json::json!({
+                "config": dirs.config,
+                "state": dirs.state,
+                "overridden": dirs.overridden,
+                "dev_overrides_honoured": crate::env::dev_overrides_honoured(),
+            }))
+        }
+        Verb::Registry => {
+            let registry = Registry::load(&Dirs::resolve()?)?;
+            ok(serde_json::to_value(&registry)
+                .map_err(|error| Fail::internal(format!("cannot encode the registry: {error}")))?)
+        }
+        _ => Err(Fail::internal(
+            "not implemented yet — this build does not carry this verb",
+        )),
     }
-    Envelope::new(
-        Exit::Internal,
-        "not implemented yet — this build only carries the command surface".to_string(),
-    )
+}
+
+/// Prints the envelope and turns it into the process's exit status. A closed
+/// pipe is a quiet exit, not a panic (docs/SPIKE.md S5).
+pub fn emit(envelope: &Envelope) -> ExitCode {
+    let line = serde_json::to_string(envelope).unwrap_or_else(|_| {
+        format!(
+            r#"{{"v":1,"code":{},"class":"{}"}}"#,
+            envelope.code, envelope.class
+        )
+    });
+    let _ = writeln!(std::io::stdout(), "{line}");
+    ExitCode::from(envelope.code)
 }
 
 #[cfg(test)]

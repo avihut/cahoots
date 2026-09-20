@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a0bf61-0000-7000-8000-000000000002"}
+{"type":"turn.started"}
+{"type":"error","message":"stream disconnected before completion; retrying 1/5"}
+{"type":"turn.failed","error":{"message":"You've hit your usage limit. Try again later."}}

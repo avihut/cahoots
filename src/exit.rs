@@ -171,6 +171,43 @@ impl Envelope {
     }
 }
 
+/// A refusal or a failure on its way to becoming an exit: the code, and one
+/// sentence a person (or an agent) can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fail {
+    pub exit: Exit,
+    pub message: String,
+}
+
+impl Fail {
+    pub fn new(exit: Exit, message: impl Into<String>) -> Self {
+        Fail {
+            exit,
+            message: message.into(),
+        }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Fail::new(Exit::Internal, message)
+    }
+
+    pub fn config(message: impl Into<String>) -> Self {
+        Fail::new(Exit::Config, message)
+    }
+
+    pub fn policy(message: impl Into<String>) -> Self {
+        Fail::new(Exit::Policy, message)
+    }
+}
+
+impl From<Fail> for Envelope {
+    fn from(fail: Fail) -> Envelope {
+        Envelope::new(fail.exit, fail.message)
+    }
+}
+
+pub type Res<T> = Result<T, Fail>;
+
 /// The whole taxonomy, as data — what `cahoots exit-codes` prints, so a skill
 /// or a script can read the contract from the binary it is about to call.
 pub fn taxonomy() -> serde_json::Value {

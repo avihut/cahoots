@@ -1,0 +1,2 @@
+# Verbatim captures of other tools' output: their whitespace is theirs.
+tests/fixtures/help/* -whitespace
