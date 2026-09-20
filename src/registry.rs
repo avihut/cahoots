@@ -47,6 +47,8 @@ pub struct Limits {
     pub max_depth: u32,
     pub timeout_secs: u64,
     pub wait_secs: u64,
+    pub int_grace_secs: u64,
+    pub term_grace_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +191,8 @@ impl Registry {
                 max_depth: config.limits.max_depth.unwrap_or(1),
                 timeout_secs: config.limits.timeout_secs.unwrap_or(1800),
                 wait_secs: config.limits.wait_secs.unwrap_or(90),
+                int_grace_secs: config.limits.int_grace_secs.unwrap_or(10),
+                term_grace_secs: config.limits.term_grace_secs.unwrap_or(5),
             },
             meters: Meters {
                 agent_usage: config.meter.agent_usage.clone(),

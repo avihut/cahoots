@@ -200,6 +200,14 @@ impl Fail {
     }
 }
 
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Fail {}
+
 impl From<Fail> for Envelope {
     fn from(fail: Fail) -> Envelope {
         Envelope::new(fail.exit, fail.message)
