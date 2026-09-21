@@ -82,6 +82,11 @@ impl Dirs {
         self.config.join("enabled.json")
     }
 
+    /// Which usage meter `install` chose. Its own file for the same reason.
+    pub fn meter_file(&self) -> PathBuf {
+        self.config.join("meter.json")
+    }
+
     pub fn runs(&self) -> PathBuf {
         self.state.join("runs")
     }

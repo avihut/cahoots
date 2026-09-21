@@ -1,29 +1,27 @@
 //! Admission: may this target take one more run right now?
 //!
-//! `used + reserve(role) ≤ cap`, and every configured meter must agree.
+//! `used + reserve(role) ≤ cap`, and both meters must agree:
 //!
-//! - **agent-usage** asks the Agent Usage tracker's `usage-cli headroom`
-//!   (what share of the plan is used, how old that number is, where it is
-//!   heading). Its exit codes are the gate's exit codes, unchanged.
-//! - **ledger** is built in: cahoots' own run records. It works on day one
-//!   without any tracker, and its runs-per-hour ceiling is what bounds an
+//! - **the usage meter** — a usage CLI the person already has (`meter.rs`):
+//!   Agent Usage's `usage-cli headroom`, or ccusage. Its answer maps onto the
+//!   tracker's `headroom` exit codes, which are the gate's.
+//! - **the ledger** is built in: cahoots' own run records. It works on day
+//!   one without any meter, and its runs-per-hour ceiling is what bounds an
 //!   agent stuck in a retry loop.
 //!
 //! Anything the gate does not understand is a refusal. It fails closed.
-
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dirs::Dirs;
 use crate::exit::{Exit, Fail, Res};
+use crate::meter::Ask;
 use crate::model::{Candidate, HarnessId, Role};
-use crate::registry::{DEFAULT_MAX_DATA_AGE_SECS, Registry};
+use crate::registry::Registry;
 use crate::run::record::{self, now};
-use crate::spawn;
 
-/// How much lower the cap is when a snapshot-on-use provider's number is
+/// How much lower the cap is when a reading that only refreshes on use is
 /// stale. A stale reading is a lower bound on usage, so the margin is what
 /// pays for not knowing how much was used since.
 pub const STALE_MARGIN: u8 = 15;
@@ -31,139 +29,80 @@ pub const STALE_MARGIN: u8 = 15;
 /// Why a run was let in — kept on the run record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Admission {
-    /// The tracker's own answer, verbatim, when it was asked.
+    /// The meter's own answer, verbatim when it has one.
     pub reading: Option<Value>,
     pub notes: Vec<String>,
 }
 
 pub fn admit(dirs: &Dirs, registry: &Registry, target: &Candidate, role: Role) -> Res<Admission> {
     ledger(dirs, registry, target)?;
-    agent_usage(registry, target.harness, role)
+    usage(registry, target.harness, role)
 }
 
-/// Providers whose numbers only refresh when the harness itself runs. For
-/// these a strict freshness guard would refuse forever: nothing but a run
-/// would ever make the data fresh again.
-const fn refreshes_on_use(harness: HarnessId) -> bool {
-    match harness {
-        HarnessId::Codex => true,
-        HarnessId::Claude => false,
-    }
-}
-
-fn agent_usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> {
-    let Some(meter) = &registry.meters.agent_usage else {
+fn usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> {
+    let Some(meter) = &registry.meters.usage else {
         return Ok(Admission::default());
     };
-    let binary = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[])
-        .map_err(|fail| Fail::new(Exit::NoDigest, format!("the usage meter: {}", fail.message)))?;
+    if !meter.measures(harness) {
+        return Ok(Admission::default());
+    }
     let cap = registry
         .harness(harness)
         .cap
         .saturating_sub(role.reserve())
         .max(1);
-    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
-
-    let ask = |cap: u8, guard_age: bool| -> Res<(Exit, Option<Value>)> {
-        let mut args = vec![
-            "headroom".to_string(),
-            "--provider".to_string(),
-            harness.as_str().to_string(),
-            "--cap".to_string(),
-            cap.to_string(),
-            "--forecast".to_string(),
-            "red".to_string(),
-            "--json".to_string(),
-        ];
-        if guard_age {
-            args.extend([
-                "--max-data-age".to_string(),
-                format!("{}m", max_age.div_ceil(60)),
-            ]);
-        }
-        let output =
-            spawn::run_helper(&binary, &args, None, Duration::from_secs(10)).map_err(|fail| {
-                Fail::new(Exit::NoDigest, format!("the usage meter: {}", fail.message))
-            })?;
-        let verdict = match output.status {
-            Some(0) => Exit::Ok,
-            Some(21) => Exit::Stale,
-            Some(24) => Exit::OverCap,
-            Some(25) => Exit::Forecast,
-            Some(26) => Exit::NoData,
-            // 13 (no digest), 19 (a usage-cli too old to know `headroom`),
-            // a signal, anything new: not an answer, so not a yes.
-            _ => Exit::NoDigest,
-        };
-        Ok((verdict, serde_json::from_str(output.stdout.trim()).ok()))
+    let ask = Ask {
+        harness,
+        cap,
+        fresh: true,
+        forecast: true,
     };
-
-    let (mut verdict, mut reading) = ask(cap, true)?;
+    let mut answer = meter.ask(&ask);
     let mut notes = Vec::new();
-    if verdict == Exit::Stale && refreshes_on_use(harness) {
+    if answer.verdict == Exit::Stale && meter.refreshes_on_use(harness) {
         let lowered = cap.saturating_sub(STALE_MARGIN).max(1);
-        (verdict, reading) = ask(lowered, false)?;
-        if verdict == Exit::Ok {
+        answer = meter.ask(&Ask {
+            cap: lowered,
+            fresh: false,
+            ..ask
+        });
+        if answer.verdict == Exit::Ok {
             notes.push(format!(
                 "{harness}'s usage data was stale, so it was held to {lowered}% instead of {cap}% — this run refreshes it"
             ));
         }
     }
-    if verdict == Exit::Ok {
-        return Ok(Admission { reading, notes });
+    if answer.verdict == Exit::Ok {
+        return Ok(Admission {
+            reading: answer.reading,
+            notes,
+        });
     }
-    let percent = reading.as_ref().and_then(|r| r["percent"].as_f64());
-    let used = percent.map_or(String::new(), |p| format!(" ({p:.0}% used)"));
-    let why = match verdict {
-        Exit::Stale => format!(
-            "{harness}'s usage data is older than {}m — is the tracker's daemon running?",
-            max_age.div_ceil(60)
-        ),
-        Exit::OverCap => format!("{harness} is over its cap of {cap}%{used}"),
-        Exit::Forecast => {
-            format!("{harness} is on course to run out before its limit resets{used}")
-        }
-        Exit::NoData => format!("the tracker has no usage numbers for {harness}"),
-        _ => format!(
-            "the usage meter gave no answer for {harness} — cahoots needs a usage-cli that has the `headroom` noun, and a running tracker"
-        ),
-    };
-    Err(Fail::new(verdict, why))
+    Err(Fail::new(answer.verdict, meter.refusal(&ask, &answer)))
 }
 
 /// Reviewing spends the REVIEWER's own plan, so it is held to a stricter bar
 /// than delegating: twenty points under that harness's cap, on fresh data.
-/// With no tracker there is nothing to ask, and the daily review budget is
-/// the only limit.
+/// With no meter there is nothing to ask, and the daily review budget is the
+/// only limit.
 pub fn reviewer_may_spend(registry: &Registry, reviewer: HarnessId) -> Result<(), String> {
-    let Some(meter) = &registry.meters.agent_usage else {
+    let Some(meter) = &registry.meters.usage else {
         return Ok(());
     };
-    let refuse = || {
-        Err(format!(
+    if !meter.measures(reviewer) {
+        return Ok(());
+    }
+    let ask = Ask {
+        harness: reviewer,
+        cap: registry.harness(reviewer).cap.saturating_sub(20).max(1),
+        fresh: true,
+        forecast: true,
+    };
+    match meter.ask(&ask).verdict {
+        Exit::Ok => Ok(()),
+        _ => Err(format!(
             "not now — reviewing spends {reviewer}'s own plan, and it is too close to its cap for that"
-        ))
-    };
-    let Ok(binary) = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[]) else {
-        return refuse();
-    };
-    let cap = registry.harness(reviewer).cap.saturating_sub(20).max(1);
-    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
-    let args = [
-        "headroom".to_string(),
-        "--provider".to_string(),
-        reviewer.as_str().to_string(),
-        "--cap".to_string(),
-        cap.to_string(),
-        "--max-data-age".to_string(),
-        format!("{}m", max_age.div_ceil(60)),
-        "--forecast".to_string(),
-        "red".to_string(),
-        "--json".to_string(),
-    ];
-    match spawn::run_helper(&binary, &args, None, Duration::from_secs(10)) {
-        Ok(output) if output.status == Some(0) => Ok(()),
-        _ => refuse(),
+        )),
     }
 }
 
@@ -175,40 +114,41 @@ pub enum Watch {
         percent: Option<f64>,
     },
     /// Stale, missing, or not an answer. A watchdog that acted on this would
-    /// kill runs because the tracker hiccuped; it does nothing instead.
+    /// kill runs because the meter hiccuped; it does nothing instead.
     Unknown,
 }
 
-/// Asks the tracker whether `harness` has crossed its `abort_at`. `None` when
-/// no tracker is configured — the built-in ledger cannot move during a run.
+/// Whether a running job on `harness` can be watched at all: only a meter
+/// with a percentage that moves during the run can say it crossed
+/// `abort_at`. The built-in ledger cannot move during a run.
+pub fn watches(registry: &Registry, harness: HarnessId) -> bool {
+    registry
+        .meters
+        .usage
+        .as_ref()
+        .is_some_and(|meter| meter.watches(harness))
+}
+
+/// Asks the meter whether `harness` has crossed its `abort_at`. `None` when
+/// nothing can watch it (`watches`).
 ///
 /// Unlike admission this never falls back to a stale reading: stopping work
 /// in flight needs a FRESH number, so anything else is `Unknown`.
 pub fn watch(registry: &Registry, harness: HarnessId) -> Option<Watch> {
-    let meter = registry.meters.agent_usage.as_ref()?;
-    let Ok(binary) = spawn::resolve_binary("usage-cli", Some(&meter.binary), &[]) else {
-        return Some(Watch::Unknown);
-    };
-    let max_age = meter.max_data_age_secs.unwrap_or(DEFAULT_MAX_DATA_AGE_SECS);
-    let args = [
-        "headroom".to_string(),
-        "--provider".to_string(),
-        harness.as_str().to_string(),
-        "--cap".to_string(),
-        registry.harness(harness).abort_at.to_string(),
-        "--max-data-age".to_string(),
-        format!("{}m", max_age.div_ceil(60)),
-        "--json".to_string(),
-    ];
-    let Ok(output) = spawn::run_helper(&binary, &args, None, Duration::from_secs(10)) else {
-        return Some(Watch::Unknown);
-    };
-    Some(match output.status {
-        Some(0) => Watch::Under,
-        Some(24) => Watch::Over {
-            percent: serde_json::from_str::<Value>(output.stdout.trim())
-                .ok()
-                .and_then(|reading| reading["percent"].as_f64()),
+    let meter = registry.meters.usage.as_ref()?;
+    if !meter.watches(harness) {
+        return None;
+    }
+    let answer = meter.ask(&Ask {
+        harness,
+        cap: registry.harness(harness).abort_at,
+        fresh: true,
+        forecast: false,
+    });
+    Some(match answer.verdict {
+        Exit::Ok => Watch::Under,
+        Exit::OverCap => Watch::Over {
+            percent: answer.percent,
         },
         _ => Watch::Unknown,
     })

@@ -69,22 +69,43 @@ pub struct RoleConfig {
     pub calibrate: Option<bool>,
 }
 
+/// `[meter.<id>]` turns that usage meter on — one at a time — and holds its
+/// knobs. Without one, the meter `install` chose is on (`meter.rs`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterConfig {
     #[serde(rename = "agent-usage")]
     pub agent_usage: Option<AgentUsageConfig>,
+    pub ccusage: Option<CcusageConfig>,
     pub ledger: Option<LedgerConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentUsageConfig {
-    /// Absolute path to `usage-cli` (it is not on PATH).
-    pub binary: PathBuf,
+    /// Absolute path to `usage-cli` (it is not on PATH). Default: where
+    /// `install` found it.
+    pub binary: Option<PathBuf>,
     /// How old a measurement may be before it counts as stale. Default 900.
     pub max_data_age_secs: Option<u64>,
 }
+
+/// ccusage counts tokens and cannot see a plan's limit, so a percentage —
+/// what `cap` and `abort_at` are — exists only against one declared here.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CcusageConfig {
+    /// Absolute path to `ccusage`. Default: where `install` found it.
+    pub binary: Option<PathBuf>,
+    /// Tokens in one 5-hour block that count as Claude Code's whole limit.
+    pub claude_block_tokens: Option<u64>,
+    /// Tokens in one day that count as Codex's whole limit.
+    pub codex_day_tokens: Option<u64>,
+}
+
+/// A declared limit below this is a unit slip (millions meant), not a plan:
+/// one delegated run can take more than that.
+pub const MIN_TOKEN_LIMIT: u64 = 100_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,12 +220,43 @@ impl UserConfig {
                 )));
             }
         }
-        if let Some(meter) = &self.meter.agent_usage
-            && !meter.binary.is_absolute()
-        {
+        let meter = &self.meter;
+        if meter.agent_usage.is_some() && meter.ccusage.is_some() {
             return Err(Fail::config(
-                "meter.agent-usage.binary must be an absolute path",
+                "[meter.agent-usage] and [meter.ccusage]: one usage meter at a time — keep the one you want",
             ));
+        }
+        let binaries = [
+            (
+                "agent-usage",
+                meter.agent_usage.as_ref().and_then(|m| m.binary.as_ref()),
+            ),
+            (
+                "ccusage",
+                meter.ccusage.as_ref().and_then(|m| m.binary.as_ref()),
+            ),
+        ];
+        for (id, binary) in binaries {
+            if binary.is_some_and(|binary| !binary.is_absolute()) {
+                return Err(Fail::config(format!(
+                    "meter.{id}.binary must be an absolute path"
+                )));
+            }
+        }
+        if let Some(ccusage) = &meter.ccusage {
+            for (name, limit) in [
+                ("claude_block_tokens", ccusage.claude_block_tokens),
+                ("codex_day_tokens", ccusage.codex_day_tokens),
+            ] {
+                if let Some(limit) = limit
+                    && limit < MIN_TOKEN_LIMIT
+                {
+                    return Err(Fail::config(format!(
+                        "meter.ccusage.{name} = {limit}: a limit is at least {MIN_TOKEN_LIMIT} tokens — did you mean {}?",
+                        limit.saturating_mul(1_000_000)
+                    )));
+                }
+            }
         }
         if let Some(rate) = self.review.sample_rate
             && !(0.0..=1.0).contains(&rate)
@@ -303,8 +355,34 @@ mod tests {
             "schema = 1\n[review]\nauto_apply_everything = true",
             "schema = 1\n[harness.codex]\ncap = 80\nabort_at = 80",
             "schema = 1\n[harness.codex]\nabort_at = 60",
+            "schema = 1\n[meter.ccusage]\nbinary = \"ccusage\"",
+            "schema = 1\n[meter.agent-usage]\nbinary = \"usage-cli\"",
+            "schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300",
+            "schema = 1\n[meter.ccusage]\ncodex_tokens = 50_000_000",
+            "schema = 1\n[meter.codexbar]\nbinary = \"/usr/local/bin/codexbar\"",
         ] {
             assert!(UserConfig::parse(text).is_err(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn one_usage_meter_at_a_time() {
+        let config = UserConfig::parse(
+            "schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300_000_000\ncodex_day_tokens = 60_000_000",
+        )
+        .unwrap();
+        let ccusage = config.meter.ccusage.unwrap();
+        assert_eq!(ccusage.claude_block_tokens, Some(300_000_000));
+        assert_eq!(ccusage.binary, None, "install's choice, or PATH");
+        assert!(UserConfig::parse("schema = 1\n[meter.agent-usage]").is_ok());
+        let both = UserConfig::parse(
+            "schema = 1\n[meter.agent-usage]\n[meter.ccusage]\nclaude_block_tokens = 300_000_000",
+        )
+        .unwrap_err();
+        assert!(
+            both.message.contains("one usage meter at a time"),
+            "{}",
+            both.message
+        );
     }
 }

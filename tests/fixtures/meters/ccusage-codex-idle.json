@@ -1,0 +1,12 @@
+{
+  "daily": [],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "costUSD": 0,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "reasoningOutputTokens": 0,
+    "totalTokens": 0
+  }
+}

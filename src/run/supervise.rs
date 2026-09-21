@@ -190,8 +190,9 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
 
 /// Reads the callee until it exits, stopping it if asked to or if it runs out
 /// of time. Returns why it was stopped (if it was) and the tail of its stderr.
-/// Re-checks the target's usage while a run is going. Only with a tracker
-/// configured: cahoots' own ledger cannot move during a run.
+/// Re-checks the target's usage while a run is going. Only with a usage meter
+/// that can watch the target (`gate::watches`): cahoots' own ledger cannot
+/// move during a run.
 struct Watchdog {
     registry: Registry,
     every: Duration,
@@ -218,7 +219,7 @@ fn attend(
             .map(|pipe| read_lines(pipe, sender.clone(), Line::Err)),
     ];
     open_streams += readers.iter().flatten().count() as u32;
-    if watchdog.registry.meters.agent_usage.is_some() {
+    if gate::watches(&watchdog.registry, record.target.harness) {
         let (sender, target) = (sender.clone(), record.target.harness);
         // Ends by itself: once the run is over nobody receives, and `send` fails.
         thread::spawn(move || {

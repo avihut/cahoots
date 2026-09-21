@@ -17,6 +17,7 @@ pub mod harness;
 pub mod history;
 pub mod install;
 pub mod learn;
+pub mod meter;
 pub mod model;
 pub mod paths;
 pub mod pick;
