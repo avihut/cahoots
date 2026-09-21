@@ -1,6 +1,6 @@
 # Git hooks. Every check is a mise task (`mise tasks`), so a hook, the merge
 # gate in daft.yml, CI, and a person at a prompt all run the same definition —
-# `mise run gate` is the whole set in one go.
+# `mise run check-all` is the whole set in one go.
 #
 # Installed by `mise run setup` (daft's post-create and mise's enter hook both
 # call it) — into the bare repo's shared hooks directory, so once per clone

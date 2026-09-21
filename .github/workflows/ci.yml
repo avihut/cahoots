@@ -1,5 +1,5 @@
-# The PR gate: the same `mise run gate` the git hooks and daft's merge gate
-# run, on GitHub's runners — a merge made with GitHub's button never passes
+# The PR gate: the same `mise run check-all` the git hooks and daft's merge
+# gate run, on GitHub's runners — a merge made with GitHub's button never passes
 # through daft's pre-merge rings, so this is what stands in for them.
 #
 # Hardening, deliberately:
@@ -47,8 +47,8 @@ jobs:
 
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
 
-      - name: Gate
-        run: mise run gate
+      - name: Every check
+        run: mise run check-all
 
   # THE required check (`main: PR gate` ruleset; scripts/guard.sh holds the
   # spelling). One aggregate, so the ruleset never has to name a matrix leg —

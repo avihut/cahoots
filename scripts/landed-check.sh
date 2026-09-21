@@ -29,7 +29,7 @@ if [ "$landed" != "$gated" ]; then
     echo "  landed  $(git rev-parse --short HEAD) -> $landed" >&2
     echo "A squash of a branch that already contains the target's tip lands that" >&2
     echo "branch's tree verbatim, so the target moved underneath the merge or the" >&2
-    echo "source-up-to-date ring was skipped. Run: mise run gate" >&2
+    echo "source-up-to-date ring was skipped. Run: mise run check-all" >&2
     exit 1
 fi
 echo "landed-check: the landed tree is the gated tree ($(git rev-parse --short HEAD))"

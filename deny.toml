@@ -1,6 +1,6 @@
 # cargo-deny policy. See https://embarkstudios.github.io/cargo-deny/
 #
-# Run locally: `mise run deny` (part of `mise run gate`, and of CI).
+# Run locally: `mise run deny` (part of `mise run check-all`, and of CI).
 #
 # Exceptions require a `# why:` comment with a rationale and, ideally, an
 # expiration condition. Entries here weaken the policy and should be

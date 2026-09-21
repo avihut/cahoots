@@ -4,8 +4,8 @@
 
 Every check is a mise task (`mise tasks`). The git hooks (`lefthook.yml`),
 daft's merge gate (`daft.yml`) and CI (`.github/workflows/ci.yml`) all call
-those tasks, so a check has exactly one definition and `mise run gate` is the
-whole set by hand:
+those tasks, so a check has exactly one definition and `mise run check-all` is
+the whole set by hand:
 
 | Task | What it holds |
 |---|---|
@@ -21,7 +21,7 @@ whole set by hand:
 
 A script and its mise task land together (`guard` rule 9).
 
-`mise run smoke` is NOT part of the gate and never runs in CI: it makes one
+`mise run smoke` is NOT part of `check-all` and never runs in CI: it makes one
 tiny real run in each direction against the CLIs installed on your machine —
 under YOUR configuration of them — in throwaway cahoots directories, and it
 TRIES TO CROSS each fence: a reader is asked to write, and must fail. Run it
@@ -42,8 +42,8 @@ looks fenced is not evidence that it is (docs/SPIKE.md S7).
   `daft merge --skip-tag deep` drops only the release build.
 - **daft post-merge** — `landed-check`: the landed tree is the gated tree;
   `release-reminder`: unreleased `feat`/`fix` on `main` means a release is owed.
-- **CI** — `mise run gate` on Ubuntu and macOS, aggregated into one check,
-  plus `pr-title`.
+- **CI** — `mise run check-all` on Ubuntu and macOS, aggregated into one
+  check named `gate`, plus `pr-title`.
 
 ## Branches and merges
 
