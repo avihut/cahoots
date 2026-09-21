@@ -50,13 +50,13 @@ description = "The whole suite — no real harness is ever called, no network is
 run = "scripts/no-warnings.sh scripts/real-state.sh guard env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
 
 [tasks.smoke]
-description = "LOCAL ONLY: one tiny REAL run in each direction (costs a little of both plans) — never part of the gate"
+description = "LOCAL ONLY: one tiny REAL run in each direction (costs a little of both plans) — never part of check-all or CI"
 run = "scripts/smoke.sh"
 
 # ── Quality gates ───────────────────────────────────────────────────────────
 # One task per check. lefthook.yml (commit / push), daft.yml (merge) and
 # .github/workflows/ci.yml all call these, so a check has exactly one
-# definition; `gate` is all of them.
+# definition; `check-all` is all of them.
 
 [tasks.setup]
 description = "Install the pinned tools, fetch the crates, install the git hooks (cached until an input changes)"
@@ -64,8 +64,8 @@ sources = ["mise.toml", "lefthook.yml", "Cargo.toml", "Cargo.lock", "scripts/set
 outputs = [".cache/setup.stamp"]
 run = "scripts/setup.sh"
 
-[tasks.gate]
-description = "Every check the hooks and CI enforce, in one go (the merge gate, minus its deep ring)"
+[tasks.check-all]
+description = "Every check the hooks and CI enforce, in one go (all of the merge gate but its deep ring)"
 depends = ["guard", "lint-shell", "fmt-check", "check-config", "test-hooks", "clippy", "test", "deny"]
 
 [tasks.clippy]

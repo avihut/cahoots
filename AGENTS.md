@@ -66,8 +66,8 @@ codes with their meanings and numbers its own from 30. Never renumber.
 
 ## Working here
 
-- `mise run gate` before you show work. It is exactly what the hooks, daft's
-  merge gate and CI run. `mise tasks` is the catalog; **a script and its mise
+- `mise run check-all` before you show work. It is exactly what the hooks,
+  daft's merge gate and CI run. `mise tasks` is the catalog; **a script and its mise
   task land together**.
 - This is a [daft](https://github.com/avihut/daft) repository: `daft start
   <branch>` for new work, `daft go <branch>` for existing, never `git

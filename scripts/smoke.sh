@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LOCAL ONLY — never in CI, never in the gate. A few tiny REAL runs against the
+# LOCAL ONLY — never in CI, never in check-all. A few tiny REAL runs against the
 # harness CLIs installed on this machine, under YOUR configuration of them —
 # which is the point: a fence that holds against a default configuration and
 # not against yours is not a fence. (2026-09-20: `codex exec --sandbox

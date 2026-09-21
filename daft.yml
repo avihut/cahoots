@@ -44,7 +44,7 @@ hooks:
   # the `main: PR gate` ruleset lets the maintainer's `daft merge` + push
   # through, and CI only sees that push afterwards. Every ring is the same
   # `mise run` task the git hooks and CI call, so a check has one definition;
-  # `mise run gate` is the set by hand.
+  # `mise run check-all` is the set by hand.
   #
   # Rings run in the SOURCE worktree (`root`): that is where the branch's code
   # lives and where its caches are warm. The `merge:` policy above is what

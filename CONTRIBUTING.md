@@ -11,7 +11,7 @@ macOS or Linux, and [mise](https://mise.jdx.dev):
 
 ```sh
 mise trust && mise run setup   # pinned tools, the crates, the git hooks
-mise run gate                  # every check CI and the hooks run, in one go
+mise run check-all             # every check CI and the hooks run, in one go
 ```
 
 `mise tasks` is the catalog of everything else. Builds made through mise are

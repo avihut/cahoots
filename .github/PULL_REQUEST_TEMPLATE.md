@@ -6,7 +6,7 @@
 
 ## How it was verified
 
-- [ ] `mise run gate` is green locally
+- [ ] `mise run check-all` is green locally
 - [ ] Anything that changes how a harness is called was tried against the real CLI, not only the fake one
 
 ## Hard rules (AGENTS.md)
