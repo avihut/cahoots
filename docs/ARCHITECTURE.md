@@ -70,11 +70,12 @@ admitting the run that crosses the line.
     for Claude Code's 5-hour block, `codex daily --last 1` for Codex. No
     vendor publishes a plan's limit in tokens, so a percentage exists only
     against one the person declares (`claude_block_tokens`,
-    `codex_day_tokens`); `cap` and `abort_at` are then percentages of it, and
-    a projection past the limit is a forecast refusal. Without one, Claude
-    Code is still refused while its log says it hit its limit, and Codex is
-    not measured. Always `--offline`, so it prices from its own copy instead
-    of fetching one.
+    `codex_day_tokens`); `cap` and `abort_at` are then percentages of it.
+    Without one, Claude Code is still refused while its log says it hit its
+    limit, and Codex is not measured. There is no forecast: ccusage's
+    projection is a straight line through a burn rate that counts cache
+    reads, and it would refuse nearly every run of a busy session. Always
+    `--offline`, ccusage's switch against fetching a price list.
 
   A meter runs from a path a person pinned — never a PATH lookup, which the
   calling agent controls — from `/`, so no repository can hand it a config

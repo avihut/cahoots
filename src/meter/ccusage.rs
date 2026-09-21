@@ -8,10 +8,15 @@
 //! thing its logs do say: that it has hit its limit, and when that resets.
 //! Codex without one is not measured at all, and only the ledger holds it.
 //!
-//! Always `--offline`: prices from the copy ccusage carries, instead of a
-//! price list fetched from the network. Checked with the network and every
-//! write under the home directory denied: the answer is the same, and
-//! nothing was attempted.
+//! There is no forecast. ccusage's projection is a straight line through a
+//! burn rate that counts cache reads, so during any busy session it says the
+//! block is about to be blown — refusing on it would refuse nearly every run.
+//! `cap` decides admission; the watchdog stops a run that passes `abort_at`.
+//!
+//! Always `--offline`: ccusage's own switch against fetching a price list.
+//! Run with the network and every write under the home directory denied, it
+//! gave the same answer, and the kernel's sandbox log — which does record a
+//! denied attempt — showed none.
 
 use std::path::PathBuf;
 
@@ -123,15 +128,11 @@ impl Ccusage {
             "projected_tokens": window.projected,
             "limit_reached_until": window.limit_notice.as_ref().map(|notice| &notice.raw),
         });
+        // `ask.forecast` is not acted on: see the module's note on projections.
         let over = percent.is_some_and(|percent| percent > f64::from(ask.cap));
-        let heading_over = ask.forecast
-            && limit
-                .zip(window.projected)
-                .is_some_and(|(limit, projected)| projected > limit);
         let (verdict, why) = match &window.limit_notice {
             Some(notice) => (Exit::OverCap, Some(limit_reached(notice))),
             None if over => (Exit::OverCap, None),
-            None if heading_over => (Exit::Forecast, None),
             None => (Exit::Ok, None),
         };
         Answer {
@@ -145,32 +146,20 @@ impl Ccusage {
     pub fn refusal(&self, ask: &Ask, answer: &Answer) -> String {
         let harness = ask.harness;
         match (&answer.why, answer.verdict) {
-            (Some(why), Exit::NoDigest) => {
+            (Some(why), Exit::NoDigest | Exit::Config) => {
                 format!("the usage meter gave no answer for {harness}: {why}")
             }
             (Some(why), _) => why.clone(),
-            (None, verdict) => {
+            (None, Exit::OverCap) => {
                 let window = window_name(harness);
                 let limit = self.limit(harness).map(tokens).unwrap_or_default();
                 let percent = answer.percent.unwrap_or_default();
-                match verdict {
-                    Exit::OverCap => format!(
-                        "{harness} is over its cap of {}% ({percent:.0}% of the {limit} tokens you set for a {window})",
-                        ask.cap
-                    ),
-                    Exit::Forecast => {
-                        let projected = answer
-                            .reading
-                            .as_ref()
-                            .and_then(|reading| reading["projected_tokens"].as_u64())
-                            .map_or(String::new(), |p| format!(", {} projected", tokens(p)));
-                        format!(
-                            "{harness} is on course to pass the {limit} tokens you set for a {window} before it ends ({percent:.0}% used so far{projected})"
-                        )
-                    }
-                    _ => format!("the usage meter gave no answer for {harness}"),
-                }
+                format!(
+                    "{harness} is over its cap of {}% ({percent:.0}% of the {limit} tokens you set for a {window})",
+                    ask.cap
+                )
             }
+            (None, _) => format!("the usage meter gave no answer for {harness}"),
         }
     }
 }
@@ -356,20 +345,13 @@ mod tests {
     #[test]
     fn a_declared_limit_makes_a_percentage_and_the_cap_holds() {
         let window = read_blocks(ACTIVE, NOW).unwrap();
-        // 151M of 300M: 50%, under a cap of 72 — but heading for 569M.
+        // 151M of 300M: 50%, under a cap of 72. The block's projection is
+        // 569M — ccusage's straight line through a busy burn rate — and that
+        // refuses nothing: the cap decides, the watchdog stops an overrun.
         let answer = meter(Some(300_000_000), None).judge(&window, &ask(HarnessId::Claude, 72));
-        assert_eq!(answer.verdict, Exit::Forecast);
+        assert_eq!(answer.verdict, Exit::Ok);
         assert!((answer.percent.unwrap() - 50.37).abs() < 0.01);
-        let no_forecast = Ask {
-            forecast: false,
-            ..ask(HarnessId::Claude, 72)
-        };
-        assert_eq!(
-            meter(Some(300_000_000), None)
-                .judge(&window, &no_forecast)
-                .verdict,
-            Exit::Ok
-        );
+        assert_eq!(answer.reading.unwrap()["projected_tokens"], 569_523_452);
         // 151M of 180M: 84%, over a cap of 72.
         let over = meter(Some(180_000_000), None).judge(&window, &ask(HarnessId::Claude, 72));
         assert_eq!(over.verdict, Exit::OverCap);

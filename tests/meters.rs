@@ -46,7 +46,7 @@ fn ccusage_admits_under_a_declared_limit_and_keeps_its_reading() {
 }
 
 #[test]
-fn ccusage_refuses_over_the_cap_and_on_course_to_pass_the_limit() {
+fn ccusage_refuses_over_the_cap_but_not_on_its_projection() {
     // 280M of 300M is 93%, over the cap of 75 less a reader's reserve of 3.
     let world = World::new();
     world.ccusage(
@@ -62,27 +62,21 @@ fn ccusage_refuses_over_the_cap_and_on_course_to_pass_the_limit() {
         "{}",
         over.message()
     );
+    assert!(
+        !world.state.join("runs").exists(),
+        "a refused run left a record"
+    );
 
-    // 100M so far, heading for 400M before the block ends.
+    // 100M so far, and ccusage projects 400M by the end of the block: a
+    // straight line through a busy burn rate, not a forecast to refuse on.
     let world = World::new();
     world.ccusage(
         json!({"claude": [{"tokens": 100_000_000, "projected": 400_000_000}]}),
         "",
         Some(LIMITS),
     );
-    let forecast = world.run("hello", &TO_CLAUDE);
-    assert_eq!(forecast.code, 25, "{}", forecast.json);
-    assert!(
-        forecast
-            .message()
-            .contains("33% used so far, 400M projected"),
-        "{}",
-        forecast.message()
-    );
-    assert!(
-        !world.state.join("runs").exists(),
-        "a refused run left a record"
-    );
+    let admitted = world.run("hello", &TO_CLAUDE);
+    assert_eq!(admitted.code, 0, "{}", admitted.json);
 }
 
 #[test]
@@ -168,7 +162,8 @@ fn a_meter_runs_only_from_a_pinned_path_and_never_on_the_callers_path() {
             .arg("--brief")
             .arg(world.brief("hello")),
     );
-    assert_eq!(unpinned.code, 13, "{}", unpinned.json);
+    assert_eq!(unpinned.code, 34, "{}", unpinned.json);
+    assert_eq!(unpinned.json["retry"], "fix_config");
     assert!(
         unpinned.message().contains("cahoots install"),
         "{}",

@@ -105,9 +105,11 @@ directories, then the system's — never the caller's, which would pick the
 interpreter a script meter runs on), HOME from the passwd database and no other
 variable, so the caller cannot point it at an empty log directory; and it runs
 from `/`, where no repository can leave it a config file. ccusage always gets
-`--offline`: with the network and every write under the home directory denied,
-it answers the same and attempts neither. A meter that fails, times out or
-answers in a shape cahoots does not know refuses the run.
+`--offline`, its own switch against fetching a price list; run with the
+network and every write under the home directory denied, it gave the same
+answer, and the kernel's sandbox log — which does record a denied attempt —
+showed none. A meter that fails, times out or answers in a shape cahoots does
+not know refuses the run.
 
 **Targets are off until enabled.** A run sends repository content to another
 vendor. That is a decision for a human, per harness, once (`cahoots enable`).

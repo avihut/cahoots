@@ -143,13 +143,15 @@ pub struct Ask {
     /// harness's own logs has nothing that can go stale.)
     pub fresh: bool,
     /// Also refuse when usage is on course to pass the limit before it resets.
+    /// A meter with no forecast worth refusing on (ccusage) ignores it.
     pub forecast: bool,
 }
 
 /// A meter's answer, in the gate's terms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
-    /// `Exit::Ok`, or one of the gate's five refusals (13, 21, 24, 25, 26).
+    /// `Exit::Ok`, or one of the gate's five refusals (13, 21, 24, 25, 26) —
+    /// or `Config` (34) when no binary is pinned for the meter at all.
     pub verdict: Exit,
     /// Percent of the limit used, when the meter knows it.
     pub percent: Option<f64>,
@@ -234,7 +236,19 @@ impl UsageMeter {
     pub fn ask(&self, ask: &Ask) -> Answer {
         let exe = match self.resolve() {
             Ok(exe) => exe,
-            Err(fail) => return Answer::no_answer(format!("the usage meter: {}", fail.message)),
+            Err(fail) => {
+                // No binary pinned at all is the person's setup to fix, not a
+                // reason to try another target: `fix_config`, not `other_target`.
+                let verdict = if fail.exit == Exit::Config {
+                    Exit::Config
+                } else {
+                    Exit::NoDigest
+                };
+                return Answer {
+                    verdict,
+                    ..Answer::no_answer(format!("the usage meter: {}", fail.message))
+                };
+            }
         };
         match self {
             UsageMeter::AgentUsage(meter) => meter.ask(&exe, ask),
