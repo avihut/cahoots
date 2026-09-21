@@ -1,145 +1,251 @@
 # cahoots
 
-Lets your coding agents work **in cahoots**: whichever harness you are working
-in — Claude Code or Codex — can hand a task to the other as an advisor, a
-reviewer, an explorer or a worker, the same way in either direction, without
-burning out either subscription.
+[![CI](https://github.com/avihut/cahoots/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/avihut/cahoots/actions/workflows/ci.yml)
+![macOS | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-> **Status: pre-release.** The broker, the usage gate and the installer work,
-> and `mise run smoke` proves them against the real CLIs — but no version has
-> been released yet, so for now it is built from source (below).
-> `docs/ARCHITECTURE.md` is the design, `docs/SPIKE.md` is what the real CLIs
-> said about it, `docs/THREAT-MODEL.md` is what it defends against, and the
-> milestones are at the bottom of this page.
-
-## What it is
-
-A harness never calls another harness's CLI directly. It calls `cahoots`:
+Let your coding agents ask each other for help. From Claude Code, get Codex's
+opinion on a design; from Codex, have Claude Code review a diff. Your agent
+hands the task to `cahoots`, which picks the other agent, the model and the
+effort level, checks the usage limits you set, runs it in the background and
+brings back the answer.
 
 ```
-claude ──┐                       ┌── codex exec …
-codex  ──┼──►  cahoots run  ──►──┼── claude -p …
-agy    ──┘   pick · gate · run   └── agy -p …
+claude ──┐                       ┌──► codex exec …
+         ├──►  cahoots run  ──►──┤
+codex  ──┘   pick · check · run  └──► claude -p …
 ```
 
-- **Pick.** Each harness and its models are defined once. For a role
-  (`advise`, `review`, `explore` — read-only — or `implement`, which writes in
-  a worktree of its own) cahoots chooses the target, the model and the effort
-  level — and simply leaves out whoever is asking.
-- **Gate.** Before a run, cahoots asks how much of the target's plan is used
-  and refuses above a cap *you* set per harness (say 50% for one, 80% for
-  another), keeping a reserve for the run itself. Stale or missing numbers
-  fail closed. Usage comes from
-  [Agent Usage](https://github.com/avihut/coding-agent-usage-tracker)'s
-  `usage-cli`, or from a built-in ledger if you don't run it.
-- **Run.** The target's first-party headless CLI runs under a detached
-  supervisor with a scrubbed environment, a timeout and a cancel path. The
-  caller gets a run id, and the result when it's done.
-- **Learn, locally (opt-in).** The harness that delegated a run reviews a
-  random sample of its own delegations, from a closed vocabulary of findings.
-  What reviews agree on becomes a few fixed notes that later sessions read
-  before writing a brief, and what you did with results (`cahoots outcome`)
-  tunes which agent a role tries first — by one place, in shadow mode until
-  you turn it on. All of it stays on your machine, because what works for you
-  is not what works for someone else.
+> **Pre-release.** It works end to end with Claude Code and Codex, but no
+> version has been released yet, so for now you build it from source.
 
-Every exit is a documented code plus one line of JSON, so an agent never
-parses prose: `cahoots exit-codes`.
+## What you can ask for
 
-## What it is not
+| Role | Ask for | The other agent may |
+|---|---|---|
+| `advise` | a second opinion on an approach, a design or a decision | read |
+| `review` | what is wrong with a change or a piece of code | read |
+| `explore` | a read of part of the codebase, reported back | read |
+| `implement` | a change, for you to review | write, in a worktree of its own |
 
-- **Not a way around anyone's limits.** It drives each vendor's own CLI, signed
-  in as you, under your own plan — and its whole point is to use *less* than
-  the plan allows. It never touches a credential or a token, and it never
-  talks to a vendor's servers.
-- **Not a network service.** cahoots has no network code at all: no telemetry,
-  no update check. `deny.toml` bans the crates.
-- **Not affiliated** with Anthropic, OpenAI or Google. Claude Code, Codex and
-  Antigravity are their owners' trademarks.
+The agent that asks is never the one picked, so the same setup works in both
+directions.
 
-## The safety boundary, stated honestly
+## Install
 
-For a harness to delegate without a prompt on every call, you allow a handful
-of `cahoots` verbs to run outside that harness's sandbox. From then on those
-verbs *are* that harness's unsandboxed capability, and cahoots is built
-around that fact: commands are assembled in code from typed values and
-validated before they run, read-only roles are forced read-only, a target is
-disabled until you enable it (a run sends repository content to another
-vendor), verbs that change what cahoots may do refuse to run without a
-terminal, and `install` never edits a harness's permission files — it prints
-the rule for you to add.
-
-cahoots defends against a sandboxed or permission-gated agent using it as an
-escape hatch. It cannot defend you from an agent you have already given an
-unrestricted shell. `docs/THREAT-MODEL.md` is the long version.
-
-## Trying it (from source, until the first release)
+You need macOS or Linux, git, Claude Code and Codex installed and signed in,
+and Rust 1.95 or newer:
 
 ```sh
-git clone https://github.com/avihut/cahoots && cd cahoots
-cargo install --path . --locked     # a normal build — never a dev build
-cahoots doctor                      # what is there, and what is missing
-cahoots install                     # the skill + agent definitions; prints the
-                                    # permission rules for YOU to add
-cahoots enable codex                # each target is off until you say so
+cargo install --git https://github.com/avihut/cahoots --locked
 ```
 
-Caps and the usage meter go in `~/.config/cahoots/config.toml`:
+If mise manages your Rust, run it through `mise exec` instead:
+
+```sh
+mise exec rust -- cargo install --git https://github.com/avihut/cahoots --locked
+```
+
+Through mise's shims the first form fails with `Config files in
+~/.cargo/git/checkouts/cahoots-…/mise.toml are not trusted`: cargo's copy of
+this repository carries the project's `mise.toml`, and the shims won't build
+under a config you haven't trusted. `mise exec` runs the toolchain directly.
+
+Prebuilt binaries and a Homebrew formula come with the first release.
+
+## Set up
+
+```sh
+cahoots doctor          # what it found, and what is still missing
+cahoots install         # teach Claude Code and Codex to use cahoots
+cahoots enable codex    # let cahoots send work to Codex
+cahoots enable claude   # …and to Claude Code
+```
+
+`install` adds cahoots' skills and a delegate agent to Claude Code and Codex,
+and prints the permission rules that let each of them call cahoots without
+asking you every time. It never edits their settings: add the rules yourself,
+Claude Code's to `~/.claude/settings.json` and Codex's to
+`~/.codex/rules/default.rules`, then run `cahoots doctor` again to check
+them. If you run Claude Code with its sandbox on, also list `cahoots` in
+`sandbox.excludedCommands`, because a run has to reach the other agent's
+vendor.
+
+Every agent starts switched off as a target, because a run sends your code to
+that agent's vendor. Read [where the vendors stand](#your-accounts-and-the-vendors-terms)
+before you enable one. `install`, `enable` and the other commands that change
+what cahoots may do run only from a terminal, so an agent can't run them for
+you.
+
+## Use it
+
+From your agent, just ask: *"get a second opinion from another agent on this
+plan"*, *"have Codex review my last commit"*, *"ask Claude to find where we
+parse the config"*. The skill tells your agent how to write the brief, which
+role to use, and what to do with the answer.
+
+From a terminal:
+
+```sh
+cahoots pick --role advise --caller claude    # who would get it; nothing runs
+cahoots run --role advise --caller claude --brief brief.md
+cahoots status                                # the runs started here
+cahoots result <run>
+cahoots outcome <run> accepted                # or reworked, or discarded
+```
+
+`--caller` says who is asking, so that agent isn't picked; inside Claude Code
+or Codex it is detected. The brief is a file in your repository or a temp
+directory.
+
+A run carries on in the background. `run` waits 90 seconds for the answer,
+then hands back a run id you can `wait` on, check with `status` or `cancel`,
+so a slow answer never times out your agent's tool call. A run is stopped
+after 30 minutes, or sooner with `--timeout`.
+
+A change comes back in a worktree of its own, cut from your `HEAD`:
+
+```sh
+cahoots run --role implement --caller claude --fork --brief change.md
+```
+
+The output names the worktree (`data.worktree`). Read the change with
+`git -C <worktree> diff`, run the tests there, and bring over what you want.
+cahoots never commits or merges for you. In a
+[daft](https://github.com/avihut/daft) repository the worktree is cut with
+`daft start --fork`.
+
+Each command an agent runs prints one JSON object and exits with a code that
+means something (`cahoots exit-codes` lists them), so neither your agent nor
+your scripts have to parse prose.
+
+## Configure
+
+Settings live in `~/.config/cahoots/config.toml`. All of it is optional, and
+`cahoots registry` shows what is in effect.
 
 ```toml
 schema = 1
-harness.codex.cap = 80      # delegate to Codex while it is under 80% of its plan
-harness.codex.abort_at = 92 # …and stop a run in flight if it crosses 92% (default: cap + 10)
-harness.claude.cap = 50
 
-[meter.agent-usage]         # optional; without it only the built-in ledger gates
+[harness.codex]
+cap = 80         # start a run only while Codex is under 80% of its plan (default 75)
+abort_at = 92    # stop a running one that goes past 92% (default: cap + 10)
+
+[harness.claude]
+cap = 50
+
+[meter.agent-usage]        # where plan percentages come from (see below)
 binary = "/Applications/AgentUsage.app/Contents/MacOS/usage-cli"
 
-[review]                    # optional, off by default
-enabled = true              # a sample of your delegations waits for your harness's review
-apply_routing = false       # false: `cahoots report --suggest` only SHOWS what it would reorder
+[meter.ledger]
+max_runs_per_hour = 12     # per agent (the default)
+
+[roles.review]             # your own order for a role, first choice first
+candidates = [
+  { harness = "claude", model = "opus", effort = "high" },
+  { harness = "codex", model = "gpt-5.6-sol", effort = "high" },
+]
+
+[limits]
+timeout_secs = 1800        # how long a run may take (the default)
 ```
 
-## Where this stands with the vendors' terms
+Before every run, cahoots asks its meters, and refuses with the reason if one
+says no:
 
-Read this before you enable a target; the account at risk is yours.
-**`docs/VENDOR-TERMS.md`** has the sources, quotes and dates.
+- **The ledger** is built in and always on. It counts runs per hour per agent
+  from cahoots' own records.
+- **Plan percentages** (`cap`, `abort_at`) come from
+  [Agent Usage](https://github.com/avihut/coding-agent-usage-tracker), which
+  meters Claude Code's and Codex's plan limits. cahoots needs its
+  `usage-cli headroom` command, which hasn't been released yet. Until it is,
+  leave `[meter.agent-usage]` out, and the ledger is what holds.
 
-- **OpenAI (Codex):** scripted `codex exec` under your own ChatGPT sign-in is
-  documented, and OpenAI invites other software to drive Codex. Supported.
-- **Anthropic (Claude Code):** scripted `claude -p` under your own
-  subscription is documented and currently counts against your plan — but the
-  terms permit scripted access only "where we otherwise explicitly permit
-  it", Anthropic prefers API keys for third-party tools and reserves the right
-  to bill such use separately, and it has announced changes (now paused) that
-  would alter this. Supported, with those caveats.
-- **Google (Antigravity CLI):** the terms call using third-party software to
-  access the service a breach, and accounts have been banned. **Not
-  supported** under a personal sign-in until Google says otherwise in writing.
+## Learning from your own results
 
-Every vendor's stated preference for programmatic use is an API key;
-`billing = "api"` is that route.
+This is off unless you set `[review] enabled = true`. Then, for about one run
+in five, the agent that delegated it is asked to review it, choosing from a
+fixed list of possible findings. When reviews of two different runs in two
+different directories agree, your agents see a short note about it before
+they write their next brief. Reviews spend a little of the reviewing agent's
+plan.
 
-## Platforms
+What you record with `cahoots outcome` can also reorder a role's choices, by
+one place at most. `cahoots report --suggest` shows what it would change, and
+nothing changes until you set `apply_routing = true` under `[review]`. An
+order you wrote under `[roles]` stays as you wrote it unless you add
+`calibrate = true` to that role.
 
-macOS and Linux. No Windows.
+All of it stays on this machine. From a terminal, `cahoots learn list` shows
+what reviews have taught it, and `cahoots learn reset` forgets that.
 
-## Milestones
+## What cahoots will and won't do
 
-| | |
-|---|---|
-| **M0** ✓ | Repository, gates, CI; a spike against the real CLIs (`docs/SPIKE.md`) |
-| **M1** ✓ | The broker: Claude Code ⇄ Codex, read-only roles, gate, run records |
-| **M2** ✓ | `cahoots install` — the skills and agent definitions, per harness |
-| **M3** | v0.1: the release machinery is in (`RELEASING.md`); the release itself is not cut yet |
-| **M4** ✓ | A writer role in a worktree of its own, `resume`, a mid-run usage watchdog |
-| **M5** ✓ | Outcomes, review, notes, and routing calibration (shadow mode by default) |
-| **M6** | Antigravity CLI — **on hold**: Google's terms, not a technical reason (`docs/VENDOR-TERMS.md`) |
+- **Readers can't change anything.** For `advise`, `review` and `explore`,
+  Claude Code gets only its read and search tools, and Codex runs in its
+  read-only sandbox with no way to ask for more.
+- **Writers work somewhere else.** `implement` never touches your working
+  tree. Codex writes only in its worktree and the temp directories, with no
+  network unless your own Codex settings allow it. Claude Code edits files
+  there but can't run commands, so run the tests yourself.
+- **Your agents' settings stay yours.** cahoots never edits Claude Code's or
+  Codex's settings or permission files, and never reads their credentials.
+  Codex does one thing on its own: it marks each worktree a Codex writer
+  works in as trusted in `~/.codex/config.toml`. Those entries are safe to
+  delete once the worktree is gone.
+- **Nothing leaves your machine except the runs.** There is no telemetry, no
+  update check and no network code at all. A run shows the other agent your
+  brief and your repository, and that agent's vendor sees what it reads, just
+  as if you had used that agent yourself.
+- **Your agent can't give itself more.** The commands an agent may run can't
+  raise a limit, enable a target, loosen a sandbox or change a setting.
 
-## Contributing
+cahoots guards against an agent that is sandboxed, or behind permission
+prompts, using it to get around them. It can't protect you from an agent you
+have already given an unrestricted shell. [The threat
+model](docs/THREAT-MODEL.md) is the long version.
 
-`CONTRIBUTING.md` is the short version; `AGENTS.md` is the contract, for people
-and agents alike. Security reports: `SECURITY.md`.
+## Your accounts and the vendors' terms
+
+A run drives one of your subscriptions from a script. Here is where each
+vendor stands (sources and dates are in
+[docs/VENDOR-TERMS.md](docs/VENDOR-TERMS.md)):
+
+- **Codex: supported.** OpenAI documents scripted `codex exec` under a
+  ChatGPT sign-in, and invites other software to drive Codex.
+- **Claude Code: supported, with caveats.** Scripted `claude -p` is
+  documented and counts against your plan. But Anthropic's terms allow
+  automated access only where it explicitly permits it, and it prefers API
+  keys for third-party tools.
+- **Antigravity: not supported.** Google's terms call using third-party
+  software to access the service a breach, and accounts have been banned.
+
+Every vendor's preferred route for programmatic use is an API key. Set
+`billing = "api"` on an agent and cahoots passes the key through; that agent
+then bills per token, and plan caps no longer apply to it.
+
+## Uninstall
+
+```sh
+cahoots uninstall                                  # what install added, and nothing else
+rm -rf ~/.config/cahoots ~/.local/state/cahoots    # settings, run records, what was learned
+cargo uninstall cahoots
+```
+
+Run `uninstall` before the `rm`: the list of what `install` wrote lives in
+the state directory. A skill file you made your own by deleting its
+`cahoots_version` line is left alone. Then take out the permission rules you
+added.
+
+## More
+
+[How it works](docs/ARCHITECTURE.md) · [Threat model](docs/THREAT-MODEL.md) ·
+[Vendor terms](docs/VENDOR-TERMS.md) · [Contributing](CONTRIBUTING.md) ·
+[Security](SECURITY.md)
+
+Unofficial and independent: not affiliated with or endorsed by Anthropic,
+OpenAI or Google. Claude Code, Codex and Antigravity are their owners'
+trademarks.
 
 ## License
 
