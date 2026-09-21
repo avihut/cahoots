@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use cahoots::meter::detect::{self, Because, Decision, Found, Places, Record};
 use cahoots::meter::{MeterId, Selection};
-use common::{World, fake_harness};
+use common::{World, fake_at};
 use serde_json::{Value, json};
 
 const LIMITS: &str = "claude_block_tokens = 300_000_000\ncodex_day_tokens = 50_000_000";
@@ -359,8 +359,7 @@ impl Machine {
     fn fake(&self, dir: &Path, name: &str, plan: Option<Value>) -> PathBuf {
         fs::create_dir_all(dir).unwrap();
         let path = dir.join(name);
-        fs::copy(fake_harness(), &path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_at(&path);
         if let Some(plan) = plan {
             fs::write(
                 path.with_file_name(format!("{name}.plan")),
@@ -455,7 +454,7 @@ fn a_usage_cli_that_gains_headroom_brings_the_question() {
             options.iter().map(|found| found.meter).collect::<Vec<_>>(),
             MeterId::ALL
         ),
-        other => panic!("expected a question, got {other:?}"),
+        other => panic!("expected a question, got {other:?} from {found:?}"),
     }
 }
 

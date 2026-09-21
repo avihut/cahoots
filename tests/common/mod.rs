@@ -40,6 +40,15 @@ pub fn fake_harness() -> PathBuf {
     path
 }
 
+/// Puts the fake at `path` as a new file, the way an update replaces a
+/// binary. Rewritten in place just after it ran, a binary's next run on macOS
+/// failed now and then.
+pub fn fake_at(path: &Path) {
+    let _ = fs::remove_file(path);
+    fs::copy(fake_harness(), path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 pub struct Answer {
     pub code: i32,
     pub json: Value,
@@ -90,9 +99,7 @@ impl World {
             fs::create_dir_all(dir).unwrap();
         }
         for name in ["claude", "codex"] {
-            let path = world.bin.join(name);
-            fs::copy(fake_harness(), &path).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            fake_at(&world.bin.join(name));
         }
         // Its own repository, so the workspace ends at `work/` and the fake
         // binaries beside it are outside of it.
@@ -153,8 +160,7 @@ impl World {
     /// — `guarded` is the call that carries `--max-data-age`.
     pub fn meter(&self, plan: serde_json::Value, extra: &str) {
         let path = self.bin.join("usage-cli");
-        fs::copy(fake_harness(), &path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_at(&path);
         fs::write(self.bin.join("usage-cli.plan"), plan.to_string()).unwrap();
         self.configure(&format!(
             "{extra}\n[meter.agent-usage]\nbinary = {path:?}\n"
@@ -172,8 +178,7 @@ impl World {
     /// `table`; with `None` it is only there to be found.
     pub fn ccusage(&self, plan: Value, extra: &str, table: Option<&str>) -> PathBuf {
         let path = self.bin.join("ccusage");
-        fs::copy(fake_harness(), &path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_at(&path);
         fs::write(self.bin.join("ccusage.plan"), plan.to_string()).unwrap();
         match table {
             Some(table) => self.configure(&format!(
