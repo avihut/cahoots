@@ -9,8 +9,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use cahoots::meter::MeterId;
-use cahoots::meter::detect::{self, Decision, Found, Places};
+use cahoots::meter::detect::{self, Because, Decision, Found, Places, Record};
+use cahoots::meter::{MeterId, Selection};
 use common::{World, fake_harness};
 use serde_json::{Value, json};
 
@@ -424,9 +424,60 @@ fn a_usage_cli_without_headroom_is_found_but_not_offered() {
         Decision::Use {
             meter: MeterId::Ccusage,
             binary: ccusage,
-            because: "the only one found".to_string(),
+            because: Because::OnlyOneFound,
         }
     );
+}
+
+#[test]
+fn a_usage_cli_that_gains_headroom_brings_the_question() {
+    let machine = Machine::new();
+    machine.fake(&machine.bin, "ccusage", None);
+    machine.tracker_app(19);
+    let Record::Write(first) = detect::decide(None, None, None, &machine.detect())
+        .unwrap()
+        .record()
+    else {
+        panic!("the only one found is recorded");
+    };
+    assert_eq!(first.meter, Some(MeterId::Ccusage));
+
+    // The tracker's next release answers `headroom`. ccusage was only ever
+    // the only one found, so the next install asks rather than keeping it.
+    machine.tracker_app(0);
+    let chosen = first
+        .binary
+        .as_deref()
+        .map(|binary| (MeterId::Ccusage, binary));
+    let found = detect::detect(&machine.places(), chosen);
+    match detect::decide(None, Some(&first), None, &found).unwrap() {
+        Decision::Ask { options } => assert_eq!(
+            options.iter().map(|found| found.meter).collect::<Vec<_>>(),
+            MeterId::ALL
+        ),
+        other => panic!("expected a question, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_gone_meter_with_nothing_in_its_place_is_forgotten() {
+    let machine = Machine::new();
+    let ccusage = machine.fake(&machine.bin, "ccusage", None);
+    let named = detect::decide(
+        None,
+        None,
+        Some(Selection::Meter(MeterId::Ccusage)),
+        &machine.detect(),
+    )
+    .unwrap();
+    let Record::Write(chosen) = named.record() else {
+        panic!("{named:?} is recorded");
+    };
+    fs::remove_file(&ccusage).unwrap();
+    let found = detect::detect(&machine.places(), Some((MeterId::Ccusage, &ccusage)));
+    let decision = detect::decide(None, Some(&chosen), None, &found).unwrap();
+    assert_eq!(decision, Decision::NoneFound);
+    assert_eq!(decision.record(), Record::Remove);
 }
 
 #[test]

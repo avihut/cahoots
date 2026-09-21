@@ -376,8 +376,12 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 dry_run,
             )?;
             let files = crate::install::files::install(&dirs, harness, dry_run)?;
-            if !dry_run && let Some(file) = decision.record() {
-                file.save(&dirs)?;
+            if !dry_run {
+                match decision.record() {
+                    detect::Record::Write(file) => file.save(&dirs)?,
+                    detect::Record::Remove => MeterFile::remove(&dirs)?,
+                    detect::Record::Leave => {}
+                }
             }
             let in_effect = decision.in_effect();
             let meter = serde_json::json!({

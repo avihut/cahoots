@@ -323,6 +323,10 @@ pub struct MeterFile {
     /// `None`: a person chose to have no usage meter (`install --meter none`).
     pub meter: Option<MeterId>,
     pub binary: Option<PathBuf>,
+    /// Used because it was the only one found, not because a person chose
+    /// it: `install` chooses again each time, and asks once there is another.
+    #[serde(default)]
+    pub only_one_found: bool,
 }
 
 impl MeterFile {
@@ -361,6 +365,20 @@ impl MeterFile {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|error| Fail::internal(format!("cannot encode the meter choice: {error}")))?;
         crate::run::record::write_private(&dirs.meter_file(), &json)
+    }
+
+    /// No choice at all, as before the first `install`: the ledger alone
+    /// gates runs. Like `save`, only `install` calls this.
+    pub fn remove(dirs: &Dirs) -> Res<()> {
+        let path = dirs.meter_file();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Fail::config(format!(
+                "cannot remove {}: {error}",
+                path.display()
+            ))),
+        }
     }
 }
 
@@ -445,6 +463,7 @@ mod tests {
             v: 1,
             meter,
             binary: Some(PathBuf::from(binary)),
+            only_one_found: false,
         }
     }
 
@@ -479,6 +498,7 @@ mod tests {
             v: 1,
             meter: None,
             binary: None,
+            only_one_found: false,
         };
         assert!(effective(&none.meter, Some(&said_none)).is_none());
     }

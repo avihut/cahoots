@@ -87,8 +87,11 @@ admitting the run that crosses the line.
   newer), the tracker's `headroom`, which it answers from its digest. One
   usable meter is used; several, and the person is asked. The choice goes in
   `<config>/meter.json`, a file of its own, so the hand-written config is
-  never rewritten, and it stands until `install --meter` changes it. A
-  `[meter.<id>]` table in the config outranks it.
+  never rewritten. A person's answer stands until `install --meter` changes
+  it; a meter used because it was the only one found is chosen again on every
+  install, so a second one brings the question. When none can be used the
+  file goes, and the ledger alone gates runs. A `[meter.<id>]` table in the
+  config outranks all of it.
 - **Stale data, per meter and harness.** The tracker's Codex numbers only
   refresh when Codex runs locally, so a strict freshness guard would refuse it
   forever. For such snapshot-on-use readings, a stale one is re-asked without
