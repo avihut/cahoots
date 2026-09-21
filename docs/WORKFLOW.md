@@ -63,8 +63,10 @@ title is held to the commit grammar by the `pr-title` check.
 - **main: integrity** — no deletion, no force-push, linear history. Nobody
   bypasses it.
 - **main: PR gate** — a PR, squash only, threads resolved, signed commits,
-  `gate` and `pr-title` green on an up-to-date branch. The repository admin
-  bypasses it so the maintainer's local flow keeps working.
+  `gate` and `pr-title` green. The branch need not be up to date with `main`,
+  only free of conflicts; the CI run on every push to `main` catches two green
+  PRs that break it together. The repository admin bypasses it so the
+  maintainer's local flow keeps working.
 - **release tags are immutable** — a pushed `v*` tag never moves.
 
 `gate` and `pr-title` are spelled in four places; `guard` rule 8 holds them
