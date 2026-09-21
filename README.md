@@ -182,8 +182,9 @@ cahoots reads your usage from one of these:
   runs ccusage offline.
 
 `install` picks the one it finds, or asks you when it finds both, and
-remembers your answer. To change it later, run
-`cahoots install --meter agent-usage` (or `ccusage`, or `none`), and add
+remembers your answer. If it found only one, it looks again each time you
+run `cahoots install`, and asks once it finds both. To change your answer,
+run `cahoots install --meter agent-usage` (or `ccusage`, or `none`), and add
 `--meter-binary <path>` if install can't find it. A `[meter.<name>]` section
 in `config.toml` wins over what install picked.
 
