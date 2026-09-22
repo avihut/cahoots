@@ -94,6 +94,23 @@ configuration.
 absolute paths; a path inside the workspace, or group- or world-writable, is
 refused.
 
+**The usage meter decides admission, so the caller must not reach it.** It
+is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
+a meter that said "plenty left" whenever the caller liked would turn every cap
+off. So it runs only from a path a person pinned (`install` records the one it
+found, from a terminal; the config may name one) and never from a PATH lookup:
+the caller sets PATH, and a `ccusage` it planted in a directory it can write —
+a temp directory, say — would come first. It runs with a PATH of its own (its
+directories, then the system's — never the caller's, which would pick the
+interpreter a script meter runs on), HOME from the passwd database and no other
+variable, so the caller cannot point it at an empty log directory; and it runs
+from `/`, where no repository can leave it a config file. ccusage always gets
+`--offline`, its own switch against fetching a price list; run with the
+network and every write under the home directory denied, it gave the same
+answer, and the kernel's sandbox log — which does record a denied attempt —
+showed none. A meter that fails, times out or answers in a shape cahoots does
+not know refuses the run.
+
 **Targets are off until enabled.** A run sends repository content to another
 vendor. That is a decision for a human, per harness, once (`cahoots enable`).
 

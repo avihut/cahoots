@@ -2,8 +2,6 @@
 //! "why was I refused" has an answer before the run is attempted. It changes
 //! nothing: not the config, not a harness's permission rules.
 
-use std::time::Duration;
-
 use serde::Serialize;
 use serde_json::json;
 
@@ -12,10 +10,10 @@ use crate::env;
 use crate::exit::{Envelope, Exit, Res};
 use crate::harness;
 use crate::install::rules;
+use crate::meter::{Answer, Ask, Ccusage, Chosen, UsageMeter, detect, tokens};
 use crate::model::HarnessId;
 use crate::pick;
 use crate::registry::Registry;
-use crate::spawn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -165,29 +163,14 @@ pub fn doctor() -> Res<Envelope> {
         )
     });
 
-    match &registry.meters.agent_usage {
+    match &registry.meters.usage {
         None => checks.push(check(
-            "meter: agent-usage",
+            "meter",
             Status::Warn,
-            "not configured — only the built-in ledger gates runs, and it cannot see what you use outside cahoots",
+            "no usage meter — only the built-in ledger gates runs, and it cannot see what you use \
+             outside cahoots. `cahoots install` looks for Agent Usage and ccusage",
         )),
-        Some(meter) => match spawn::resolve_binary("usage-cli", Some(&meter.binary), &[]) {
-            Err(fail) => checks.push(check("meter: agent-usage", Status::Fail, fail.message)),
-            Ok(binary) => {
-                for id in HarnessId::ALL.into_iter().filter(|id| registry.harness(*id).enabled) {
-                    let args = ["headroom", "--provider", id.as_str(), "--cap", "100", "--json"];
-                    let status = spawn::run_helper(&binary, &args, None, Duration::from_secs(10))
-                        .ok()
-                        .and_then(|output| output.status);
-                    checks.push(match status {
-                        Some(0 | 24 | 25) => check(format!("meter: {id}"), Status::Ok, "the tracker answers"),
-                        Some(26) => check(format!("meter: {id}"), Status::Fail, "the tracker has no numbers for it — every run will be refused"),
-                        Some(19) => check(format!("meter: {id}"), Status::Fail, "this usage-cli has no `headroom` noun — update the tracker"),
-                        _ => check(format!("meter: {id}"), Status::Fail, "the tracker gave no answer — is its daemon running?"),
-                    });
-                }
-            }
-        },
+        Some(meter) => meter_checks(&mut checks, &registry, meter),
     }
     checks.push(check(
         "meter: ledger",
@@ -198,6 +181,129 @@ pub fn doctor() -> Res<Envelope> {
         ),
     ));
     Ok(finish(checks))
+}
+
+/// The usage meter: is it there and usable, and what does it say about each
+/// enabled target?
+fn meter_checks(checks: &mut Vec<Check>, registry: &Registry, meter: &UsageMeter) {
+    let name = format!("meter: {}", meter.id());
+    let by = match registry.meters.usage_chosen_by {
+        Some(Chosen::Config) => "on in the config file",
+        _ => "chosen by `cahoots install`",
+    };
+    let exe = match meter.resolve() {
+        Ok(exe) => exe,
+        Err(fail) => {
+            checks.push(check(
+                name,
+                Status::Fail,
+                format!("{} ({by})", fail.message),
+            ));
+            return;
+        }
+    };
+    let found = detect::probe(meter.id(), &exe.pinned);
+    let what = match &found.version {
+        Some(version) => format!("{} {version} — {by}", exe.pinned.display()),
+        None => format!("{} — {by}", exe.pinned.display()),
+    };
+    checks.push(match (&found.unusable, &found.note) {
+        (Some(why), _) => check(name, Status::Fail, format!("{what}: {why}")),
+        (None, Some(note)) => check(name, Status::Warn, format!("{what}: {note}")),
+        (None, None) => check(name, Status::Ok, what),
+    });
+    if !found.usable() {
+        return;
+    }
+    for id in HarnessId::ALL
+        .into_iter()
+        .filter(|id| registry.harness(*id).enabled)
+    {
+        let answer = meter.ask(&Ask {
+            harness: id,
+            cap: 100,
+            fresh: false,
+            forecast: false,
+        });
+        let (status, detail) = match meter {
+            UsageMeter::AgentUsage(_) => tracker_health(&answer),
+            UsageMeter::Ccusage(ccusage) => ccusage_health(ccusage, id, &answer),
+        };
+        checks.push(check(format!("meter: {id}"), status, detail));
+    }
+}
+
+fn tracker_health(answer: &Answer) -> (Status, String) {
+    match answer.verdict {
+        Exit::Ok | Exit::OverCap | Exit::Forecast => (
+            Status::Ok,
+            match answer.percent {
+                Some(percent) => format!("the tracker answers — {percent:.0}% used"),
+                None => "the tracker answers".to_string(),
+            },
+        ),
+        Exit::NoData => (
+            Status::Fail,
+            "the tracker has no numbers for it — every run will be refused".to_string(),
+        ),
+        _ => (
+            Status::Fail,
+            answer.why.clone().unwrap_or_else(|| {
+                "the tracker gave no answer — is its daemon running?".to_string()
+            }),
+        ),
+    }
+}
+
+fn ccusage_health(meter: &Ccusage, harness: HarnessId, answer: &Answer) -> (Status, String) {
+    if answer.verdict == Exit::NoDigest {
+        return (
+            Status::Fail,
+            answer
+                .why
+                .clone()
+                .unwrap_or_else(|| "ccusage gave no answer".to_string()),
+        );
+    }
+    // Claude Code logged that it is at its limit: every run waits for the reset.
+    if let Some(why) = &answer.why {
+        return (Status::Warn, why.clone());
+    }
+    let used = answer
+        .reading
+        .as_ref()
+        .and_then(|reading| reading["tokens"].as_u64())
+        .unwrap_or(0);
+    let (window, knob) = match harness {
+        HarnessId::Claude => ("in this 5-hour block", "claude_block_tokens"),
+        HarnessId::Codex => ("today", "codex_day_tokens"),
+    };
+    match (meter.limit(harness), answer.percent) {
+        (Some(limit), Some(percent)) => (
+            Status::Ok,
+            format!(
+                "{percent:.0}% of the {} tokens you set — {} used {window}",
+                tokens(limit),
+                tokens(used)
+            ),
+        ),
+        _ if harness == HarnessId::Claude => (
+            Status::Warn,
+            format!(
+                "{} tokens used {window}, and no limit declared: only Claude Code's own limit \
+                 notice stops a run — set {knob} under [meter.ccusage] to cap it",
+                tokens(used)
+            ),
+        ),
+        _ => (
+            Status::Warn,
+            format!(
+                "not measured: {} tokens used {window}, and no limit declared — set {knob} under \
+                 [meter.ccusage] to cap it",
+                tokens(used)
+            ),
+        ),
+    }
 }
 
 fn finish(checks: Vec<Check>) -> Envelope {

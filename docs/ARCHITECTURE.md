@@ -57,34 +57,64 @@ Admit only if `used + reserve(role) ≤ cap`. The reserve (3 points for a
 read-only role, 8 for `implement`, to start) is what stops check-then-act from
 admitting the run that crosses the line.
 
-- **Meters.** `agent-usage` shells out to the Agent Usage tracker's
-  `usage-cli headroom` (absolute path in config). `ledger` is built in — runs
-  and tokens per window per target, from cahoots' own records — so the gate
-  works on day one without the tracker, and doubles as a runs-per-hour ceiling
-  that bounds an agent's retry loop. Several meters may be configured; all
-  must pass. Any meter exit cahoots doesn't know is treated as *no data*:
-  fail closed.
-- **Stale data, per provider.** Codex's numbers only refresh when Codex runs
-  locally, so a strict freshness guard would refuse it forever. For such
-  snapshot-on-use providers, a stale reading is re-asked without the age guard
-  against `cap − 15`: a stale reading is a lower bound, and the run itself
-  refreshes it. For polled providers, stale means the tracker's daemon is
-  down: refuse.
+- **Meters.** Two, and both must pass. The **ledger** is built in — runs and
+  tokens per window per target, from cahoots' own records — so the gate works
+  on day one with nothing else installed, and doubles as a runs-per-hour
+  ceiling that bounds an agent's retry loop. The **usage meter** is a CLI the
+  person already runs; `src/meter` asks it and turns the answer into the
+  gate's verdict. One is on at a time:
+  - `agent-usage` — the Agent Usage tracker's `usage-cli headroom`: each
+    plan's own percentages, with their age and a forecast. Its exit codes
+    are the gate's refusal codes, unchanged.
+  - `ccusage` — token counts from the harnesses' own logs: `blocks --active`
+    for Claude Code's 5-hour block, `codex daily --last 1` for Codex. No
+    vendor publishes a plan's limit in tokens, so a percentage exists only
+    against one the person declares (`claude_block_tokens`,
+    `codex_day_tokens`); `cap` and `abort_at` are then percentages of it.
+    Without one, Claude Code is still refused while its log says it hit its
+    limit, and Codex is not measured. There is no forecast: ccusage's
+    projection is a straight line through a burn rate that counts cache
+    reads, and it would refuse nearly every run of a busy session. Always
+    `--offline`, ccusage's switch against fetching a price list.
+
+  A meter runs from a path a person pinned — never a PATH lookup, which the
+  calling agent controls — from `/`, so no repository can hand it a config
+  file, and with a PATH and HOME of its own. Any answer cahoots doesn't
+  understand is *no usage data source* (13): fail closed.
+- **Choosing the meter.** `cahoots install` looks for each one — ccusage on
+  PATH; `usage-cli` where the tracker's launch agent runs it, on PATH and in
+  the Applications folders — and probes it: ccusage's `--version` (20 or
+  newer), the tracker's `headroom`, which it answers from its digest. One
+  usable meter is used; several, and the person is asked. The choice goes in
+  `<config>/meter.json`, a file of its own, so the hand-written config is
+  never rewritten. A person's answer stands until `install --meter` changes
+  it; a meter used because it was the only one found is chosen again on every
+  install, so a second one brings the question. When none can be used the
+  file goes, and the ledger alone gates runs. A `[meter.<id>]` table in the
+  config outranks all of it.
+- **Stale data, per meter and harness.** The tracker's Codex numbers only
+  refresh when Codex runs locally, so a strict freshness guard would refuse it
+  forever. For such snapshot-on-use readings, a stale one is re-asked without
+  the age guard against `cap − 15`: a stale reading is a lower bound, and the
+  run itself refreshes it. For polled ones, stale means the tracker's daemon
+  is down: refuse. ccusage reads the logs themselves, so nothing it says is
+  stale.
 - **Slots.** Per-target `max_concurrent` (default 1) as lock files, fail-fast:
   `pick` skips a busy target, an explicit `--to` returns *busy*. A global
   `max_active_runs`. `CAHOOTS_DEPTH` is exported on every spawn, but an agent
   can scrub it — the slots are the real bound on recursion.
 - A run stops at its wall-clock timeout, at the callee's own budget flag, or
   at the **watchdog** (M4): while a run is going, the supervisor re-asks the
-  tracker every `limits.watchdog_secs` (default 120) whether the target has
+  usage meter every `limits.watchdog_secs` (default 120) whether the target has
   crossed `harness.<id>.abort_at` — a threshold of its own, always above the
   cap (default cap + 10), because stopping work in flight is a higher bar than
   refusing to start it. It takes two over-threshold readings in a row, and
   only FRESH ones count: a stale, missing or unintelligible reading is "no
   reading", resets the count, and never stops anything. The run ends as
   `budget` (exit 43) with what it had said so far, and can be resumed after
-  the limit resets. Without a tracker there is no watchdog: cahoots' own
-  ledger cannot move during a run.
+  the limit resets. It needs a percentage that moves during the run — the
+  tracker's, or ccusage's against a declared limit — so without one there is
+  no watchdog: cahoots' own ledger cannot move during a run.
 
 ## Registry and command construction (M1)
 
@@ -129,7 +159,7 @@ other_target | fix_config`), and optionally `message` and `data`.
 | Code | Meaning |
 |---|---|
 | 0 / 1 / 2 | ok / internal error / usage error |
-| 13, 21, 24, 25, 26 | gate refusals — `usage-cli headroom`'s codes, unchanged |
+| 13, 21, 24, 25, 26 | gate refusals — `usage-cli headroom`'s codes, unchanged; every meter's answer maps onto them |
 | 30 / 31 / 32 | no eligible target / target unavailable / busy |
 | 33 / 34 | refused by policy / configuration error |
 | 40 / 41 / 42 / 43 | run failed / timed out / cancelled / stopped by budget |
@@ -167,6 +197,11 @@ fixes it for its own harness.
 - **Permission rules are printed, never applied.** `install` ends by listing
   the rules still missing and the file each belongs in; `doctor` checks them —
   and the installed copies' freshness — read-only.
+- **It chooses the usage meter** (see *The gate*) — before it writes a file,
+  so a question left unanswered leaves nothing half-done. The question goes to
+  stderr: stdout is the one JSON envelope, as for every verb. `--meter
+  <agent-usage|ccusage|none>` answers it in advance, and `--meter-binary`
+  names a copy install would not find.
 
 ## Review and local learning (M5, opt-in)
 

@@ -133,7 +133,7 @@ fn doctor_reports_without_changing_anything() {
     assert_eq!(find("config")["status"], "ok");
     assert_eq!(find("codex: binary")["status"], "ok");
     assert_eq!(find("codex: target")["status"], "ok");
-    assert_eq!(find("meter: agent-usage")["status"], "warn");
+    assert_eq!(find("meter")["status"], "warn", "no usage meter is on");
     assert_eq!(find("build")["status"], "warn", "a dev build must say so");
 
     std::fs::write(

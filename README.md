@@ -63,13 +63,14 @@ cahoots enable claude   # …and to Claude Code
 ```
 
 `install` adds cahoots' skills and a delegate agent to Claude Code and Codex,
-and prints the permission rules that let each of them call cahoots without
-asking you every time. It never edits their settings: add the rules yourself,
-Claude Code's to `~/.claude/settings.json` and Codex's to
-`~/.codex/rules/default.rules`, then run `cahoots doctor` again to check
-them. If you run Claude Code with its sandbox on, also list `cahoots` in
-`sandbox.excludedCommands`, because a run has to reach the other agent's
-vendor.
+and looks for a [usage meter](#usage-meters): if it finds one it uses it, and
+if it finds more than one it asks you which. It also prints the permission
+rules that let each agent call cahoots without asking you every time. It
+never edits their settings: add the rules yourself, Claude Code's to
+`~/.claude/settings.json` and Codex's to `~/.codex/rules/default.rules`, then
+run `cahoots doctor` again to check them. If you run Claude Code with its
+sandbox on, also list `cahoots` in `sandbox.excludedCommands`, because a run
+has to reach the other agent's vendor.
 
 Every agent starts switched off as a target, because a run sends your code to
 that agent's vendor. Read [where the vendors stand](#your-accounts-and-the-vendors-terms)
@@ -134,9 +135,6 @@ abort_at = 92    # stop a running one that goes past 92% (default: cap + 10)
 [harness.claude]
 cap = 50
 
-[meter.agent-usage]        # where plan percentages come from (see below)
-binary = "/Applications/AgentUsage.app/Contents/MacOS/usage-cli"
-
 [meter.ledger]
 max_runs_per_hour = 12     # per agent (the default)
 
@@ -155,11 +153,40 @@ says no:
 
 - **The ledger** is built in and always on. It counts runs per hour per agent
   from cahoots' own records.
-- **Plan percentages** (`cap`, `abort_at`) come from
-  [Agent Usage](https://github.com/avihut/coding-agent-usage-tracker), which
-  meters Claude Code's and Codex's plan limits. cahoots needs its
-  `usage-cli headroom` command, which hasn't been released yet. Until it is,
-  leave `[meter.agent-usage]` out, and the ledger is what holds.
+- **The usage meter** says how much of each plan you've used, so that `cap`
+  and `abort_at` mean something. It is a tool you already run; see below.
+
+### Usage meters
+
+cahoots reads your usage from one of these:
+
+- **[Agent Usage](https://github.com/avihut/coding-agent-usage-tracker)**
+  meters Claude Code's and Codex's plan limits as the vendors report them, so
+  `cap = 80` means 80% of the plan. cahoots needs its `usage-cli headroom`
+  command, which hasn't been released yet; until it is, `install` finds
+  Agent Usage but doesn't offer it.
+- **[ccusage](https://github.com/ccusage/ccusage)** (20 or newer) counts the
+  tokens in Claude Code's and Codex's own logs. It can't see your plan's
+  limit, so you say how many tokens make a whole plan, and `cap` and
+  `abort_at` become percentages of that:
+
+  ```toml
+  [meter.ccusage]
+  claude_block_tokens = 300_000_000   # a whole plan, in one 5-hour block of Claude Code
+  codex_day_tokens = 60_000_000       # …and in one day of Codex
+  ```
+
+  Until you set them, a run to Claude Code is refused only when Claude Code's
+  own log says it has hit its limit, and Codex isn't metered at all.
+  `cahoots doctor` shows the counts so far, to size them by. cahoots always
+  runs ccusage offline.
+
+`install` picks the one it finds, or asks you when it finds both, and
+remembers your answer. If it found only one, it looks again each time you
+run `cahoots install`, and asks once it finds both. To change your answer,
+run `cahoots install --meter agent-usage` (or `ccusage`, or `none`), and add
+`--meter-binary <path>` if install can't find it. A `[meter.<name>]` section
+in `config.toml` wins over what install picked.
 
 ## Learning from your own results
 

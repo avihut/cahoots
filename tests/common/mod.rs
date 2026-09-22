@@ -24,7 +24,7 @@ pub struct World {
 }
 
 /// The `fake_harness` example, which cargo builds next to the test binaries.
-fn fake_harness() -> PathBuf {
+pub fn fake_harness() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let path = exe
         .parent()
@@ -38,6 +38,15 @@ fn fake_harness() -> PathBuf {
         path.display()
     );
     path
+}
+
+/// Puts the fake at `path` as a new file, the way an update replaces a
+/// binary. Rewritten in place just after it ran, a binary's next run on macOS
+/// failed now and then.
+pub fn fake_at(path: &Path) {
+    let _ = fs::remove_file(path);
+    fs::copy(fake_harness(), path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 pub struct Answer {
@@ -90,9 +99,7 @@ impl World {
             fs::create_dir_all(dir).unwrap();
         }
         for name in ["claude", "codex"] {
-            let path = world.bin.join(name);
-            fs::copy(fake_harness(), &path).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            fake_at(&world.bin.join(name));
         }
         // Its own repository, so the workspace ends at `work/` and the fake
         // binaries beside it are outside of it.
@@ -153,8 +160,7 @@ impl World {
     /// — `guarded` is the call that carries `--max-data-age`.
     pub fn meter(&self, plan: serde_json::Value, extra: &str) {
         let path = self.bin.join("usage-cli");
-        fs::copy(fake_harness(), &path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fake_at(&path);
         fs::write(self.bin.join("usage-cli.plan"), plan.to_string()).unwrap();
         self.configure(&format!(
             "{extra}\n[meter.agent-usage]\nbinary = {path:?}\n"
@@ -163,7 +169,33 @@ impl World {
 
     /// Every command line the fake meter was called with.
     pub fn meter_calls(&self) -> Vec<String> {
-        fs::read_to_string(self.bin.join("usage-cli.calls"))
+        self.calls("usage-cli.calls")
+    }
+
+    /// Installs a fake `ccusage` beside the harnesses and writes its `plan`
+    /// (`{"claude": [{"tokens": 40}], "codex": […]}` — see the fake). With
+    /// `table` it is turned on in the config, as `[meter.ccusage]` plus
+    /// `table`; with `None` it is only there to be found.
+    pub fn ccusage(&self, plan: Value, extra: &str, table: Option<&str>) -> PathBuf {
+        let path = self.bin.join("ccusage");
+        fake_at(&path);
+        fs::write(self.bin.join("ccusage.plan"), plan.to_string()).unwrap();
+        match table {
+            Some(table) => self.configure(&format!(
+                "{extra}\n[meter.ccusage]\nbinary = {path:?}\n{table}\n"
+            )),
+            None => self.configure(extra),
+        }
+        path
+    }
+
+    /// Every command line the fake ccusage was called with (`--version` aside).
+    pub fn ccusage_calls(&self) -> Vec<String> {
+        self.calls("ccusage.calls")
+    }
+
+    fn calls(&self, file: &str) -> Vec<String> {
+        fs::read_to_string(self.bin.join(file))
             .unwrap_or_default()
             .lines()
             .map(str::to_string)

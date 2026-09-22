@@ -27,13 +27,7 @@ pub fn resolve_binary(name: &str, configured: Option<&Path>, workspace: &[&Path]
     let unavailable = |why: String| Fail::new(Exit::TargetUnavailable, why);
     let found = match configured {
         Some(path) => path.to_path_buf(),
-        None => env::path_var()
-            .and_then(|path| {
-                std::env::split_paths(&path)
-                    .filter(|dir| dir.is_absolute())
-                    .map(|dir| dir.join(name))
-                    .find(|candidate| is_executable_file(candidate))
-            })
+        None => find_on_path(name, env::path_var().as_deref())
             .ok_or_else(|| unavailable(format!("`{name}` is not on PATH")))?,
     };
     let canonical = fs::canonicalize(&found)
@@ -69,6 +63,16 @@ pub fn resolve_binary(name: &str, configured: Option<&Path>, workspace: &[&Path]
     Ok(canonical)
 }
 
+/// The first executable `name` in the directories of `path` (a PATH value),
+/// as found — not resolved: a symlink a package manager keeps pointing at
+/// the current version stays a symlink. Relative entries are skipped.
+pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
 fn is_executable_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
@@ -79,13 +83,26 @@ pub struct Output {
     pub stdout: String,
 }
 
-/// Runs a short-lived helper (`--version`, `git`, `ps`, a meter) with a
-/// deadline and a minimal environment, and returns its stdout.
+/// Runs a short-lived helper (`--version`, `git`, `ps`) with a deadline and a
+/// minimal environment, and returns its stdout.
 pub fn run_helper<S: AsRef<OsStr>>(
     binary: &Path,
     args: &[S],
     cwd: Option<&Path>,
     deadline: Duration,
+) -> Res<Output> {
+    run_helper_with_path(binary, args, cwd, deadline, env::path_var())
+}
+
+/// [`run_helper`], with the PATH given instead of this process's — for a
+/// usage meter, whose answer the calling agent must not be able to steer
+/// through the interpreter or the tools it finds.
+pub fn run_helper_with_path<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
 ) -> Res<Output> {
     let mut command = Command::new(binary);
     command
@@ -94,7 +111,7 @@ pub fn run_helper<S: AsRef<OsStr>>(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(path) = env::path_var() {
+    if let Some(path) = path {
         command.env("PATH", path);
     }
     if let Ok(home) = crate::dirs::passwd_home() {

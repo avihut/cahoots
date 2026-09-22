@@ -11,9 +11,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AgentUsageConfig, Billing, UserConfig};
+use crate::config::{Billing, UserConfig};
 use crate::dirs::Dirs;
 use crate::exit::{Fail, Res};
+use crate::meter::{self, Chosen, MeterFile, UsageMeter};
 use crate::model::{Candidate, Effort, HarnessId, ModelName, Role};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -62,7 +63,9 @@ pub struct Limits {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Meters {
-    pub agent_usage: Option<AgentUsageConfig>,
+    /// The usage meter in effect, if any (`meter.rs`).
+    pub usage: Option<UsageMeter>,
+    pub usage_chosen_by: Option<Chosen>,
     pub ledger_max_runs_per_hour: u32,
     pub ledger_max_tokens_per_day: Option<u64>,
 }
@@ -179,6 +182,12 @@ impl Registry {
         let config = UserConfig::load(&dirs.config_file())?;
         let enabled = EnabledFile::load(dirs)?;
         let mut registry = Registry::effective(&config, &enabled.enabled);
+        // The meter `install` chose counts only where the config file names
+        // none; its recorded path also serves a table that gives no binary.
+        let chosen = MeterFile::load(dirs)?;
+        let usage = meter::effective(&config.meter, chosen.as_ref());
+        registry.meters.usage_chosen_by = usage.as_ref().map(|(_, by)| *by);
+        registry.meters.usage = usage.map(|(meter, _)| meter);
         if registry.review.enabled && registry.review.apply_routing {
             let learned = registry.learned(dirs);
             for (role, entry) in &mut registry.roles {
@@ -279,6 +288,7 @@ impl Registry {
             })
             .collect();
         let ledger = config.meter.ledger.clone().unwrap_or_default();
+        let usage = meter::effective(&config.meter, None);
         Registry {
             harnesses,
             roles,
@@ -298,7 +308,8 @@ impl Registry {
                 apply_routing: config.review.apply_routing.unwrap_or(false),
             },
             meters: Meters {
-                agent_usage: config.meter.agent_usage.clone(),
+                usage_chosen_by: usage.as_ref().map(|(_, by)| *by),
+                usage: usage.map(|(meter, _)| meter),
                 ledger_max_runs_per_hour: ledger.max_runs_per_hour.unwrap_or(12),
                 ledger_max_tokens_per_day: ledger.max_tokens_per_day,
             },

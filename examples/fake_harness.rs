@@ -1,7 +1,8 @@
 //! A stand-in for the harness CLIs, for the test suite (hard rule 8: tests
 //! never call a real harness). Copied into a temp directory under the name
 //! `claude` or `codex`, it answers `--version` with that CLI's fingerprint and
-//! otherwise speaks that CLI's output stream.
+//! otherwise speaks that CLI's output stream. Named `usage-cli` or `ccusage`,
+//! it is a usage meter instead.
 //!
 //! The brief (stdin) steers it, one directive per line:
 //!
@@ -72,6 +73,93 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
     std::process::exit(answer["code"].as_i64().unwrap_or(13) as i32);
 }
 
+/// As `ccusage`: answers `--version` (`ccusage.version` next to the binary
+/// overrides it), `blocks --active --json` for Claude Code and `codex daily
+/// --json` for Codex, from `ccusage.plan`, logging each call to
+/// `ccusage.calls`. The plan: `{"claude": [reading, …], "codex": [reading,
+/// …], "exit": 1, "garbage": true}`. A reading is `{"tokens": n, "projected":
+/// n, "limit_notice": "<UTC time>", "idle": true}`; the list is served in
+/// turn and its last reading repeats — so the first call is admission and the
+/// rest are the watchdog.
+fn fake_ccusage(exe: &std::path::Path, argv: &[String]) {
+    if argv.iter().any(|arg| arg == "--version") {
+        let version = std::fs::read_to_string(exe.with_file_name("ccusage.version"))
+            .unwrap_or_else(|_| "ccusage 20.0.23".to_string());
+        println!("{}", version.trim());
+        return;
+    }
+    let harness = if argv.iter().any(|arg| arg == "codex") {
+        "codex"
+    } else {
+        "claude"
+    };
+    let calls = exe.with_file_name("ccusage.calls");
+    let earlier = std::fs::read_to_string(&calls)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("codex") == (harness == "codex"))
+        .count();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&calls)
+        .expect("calls");
+    let _ = writeln!(log, "{}", argv[1..].join(" "));
+    // Where it was run from (ccusage reads a config file from there), and
+    // the PATH it was given (a script meter's interpreter is found on it).
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = std::fs::write(
+            exe.with_file_name("ccusage.cwd"),
+            cwd.to_string_lossy().as_bytes(),
+        );
+    }
+    let _ = std::fs::write(
+        exe.with_file_name("ccusage.path"),
+        std::env::var("PATH").unwrap_or_default(),
+    );
+    let plan: serde_json::Value = std::fs::read_to_string(exe.with_file_name("ccusage.plan"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if let Some(code) = plan["exit"].as_i64() {
+        std::process::exit(code as i32);
+    }
+    if plan["garbage"] == true {
+        println!("Usage report (not JSON)");
+        return;
+    }
+    let idle = json!({"idle": true});
+    let reading = match plan[harness].as_array() {
+        Some(list) if !list.is_empty() => &list[earlier.min(list.len() - 1)],
+        _ => &idle,
+    };
+    let tokens = reading["tokens"].as_u64().unwrap_or(0);
+    if harness == "codex" {
+        let rows = if tokens > 0 {
+            json!([{"date": "2026-09-21", "totalTokens": tokens}])
+        } else {
+            json!([])
+        };
+        emit(json!({"daily": rows, "totals": {"totalTokens": tokens}}));
+        return;
+    }
+    if reading["idle"] == true {
+        emit(json!({"blocks": []}));
+        return;
+    }
+    let mut block = json!({
+        "id": "2026-09-21T05:00:00.000Z",
+        "isActive": true,
+        "isGap": false,
+        "totalTokens": tokens,
+        "projection": {"totalTokens": reading["projected"].as_u64().unwrap_or(tokens)},
+    });
+    if let Some(notice) = reading["limit_notice"].as_str() {
+        block["usageLimitResetTime"] = json!(notice);
+    }
+    emit(json!({"blocks": [block]}));
+}
+
 fn main() {
     let exe = std::env::current_exe().expect("current_exe");
     let flavor = exe.file_name().unwrap().to_string_lossy().to_string();
@@ -79,6 +167,9 @@ fn main() {
 
     if flavor == "usage-cli" {
         return fake_meter(&exe, &argv);
+    }
+    if flavor == "ccusage" {
+        return fake_ccusage(&exe, &argv);
     }
 
     if argv.iter().any(|arg| arg == "--version") {

@@ -14,6 +14,8 @@ use std::process::ExitCode;
 
 use crate::dirs::Dirs;
 use crate::exit::{self, Envelope, Exit, Fail, Res};
+use crate::meter::detect::{self, Decision, Found};
+use crate::meter::{self, MeterFile, Selection};
 use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
 use crate::run::client::{self, ResumeArgs, RunArgs};
@@ -129,7 +131,8 @@ pub enum Verb {
         #[command(subcommand)]
         action: ReviewAction,
     },
-    /// Install (or update) the skill and agent definitions for the harnesses on this machine
+    /// Install (or update) the skill and agent definitions for the harnesses on this machine,
+    /// and choose the usage meter
     Install {
         /// Only this harness (the shared skill is always written)
         #[arg(long)]
@@ -137,6 +140,13 @@ pub enum Verb {
         /// Say what would be written, and write nothing
         #[arg(long)]
         dry_run: bool,
+        /// The usage meter: agent-usage, ccusage or none. Default: the one found, and a
+        /// question when more than one is
+        #[arg(long)]
+        meter: Option<Selection>,
+        /// Where that meter's CLI is, when it is not where install looks
+        #[arg(long, requires = "meter")]
+        meter_binary: Option<PathBuf>,
     },
     /// Remove what `install` wrote — and only that
     Uninstall {
@@ -348,9 +358,38 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
         Verb::Outcome { run, outcome } => client::outcome(&run, outcome),
         Verb::Report { days, suggest } => crate::report::report(days, suggest),
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
-        Verb::Install { harness, dry_run } => {
+        Verb::Install {
+            harness,
+            dry_run,
+            meter,
+            meter_binary,
+        } => {
             let dirs = Dirs::resolve()?;
+            let config = crate::config::UserConfig::load(&dirs.config_file())?;
+            // Decided — and asked, when it comes to that — before anything is
+            // written, so a question left unanswered leaves nothing half-done.
+            let (found, decision) = choose_meter(
+                &dirs,
+                &config.meter,
+                meter,
+                meter_binary.as_deref(),
+                dry_run,
+            )?;
             let files = crate::install::files::install(&dirs, harness, dry_run)?;
+            if !dry_run {
+                match decision.record() {
+                    detect::Record::Write(file) => file.save(&dirs)?,
+                    detect::Record::Remove => MeterFile::remove(&dirs)?,
+                    detect::Record::Leave => {}
+                }
+            }
+            let in_effect = decision.in_effect();
+            let meter = serde_json::json!({
+                "found": found,
+                "decision": decision,
+                "in_effect": in_effect,
+                "still_to_do": detect::still_to_do(in_effect, &config.meter, &dirs.config_file()),
+            });
             let rules: serde_json::Map<String, serde_json::Value> = HarnessId::ALL
                 .into_iter()
                 .filter(|id| harness.is_none_or(|only| only == *id))
@@ -366,14 +405,19 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 .collect();
             let mut envelope = Envelope::new(
                 Exit::Ok,
-                "cahoots never edits a harness's permission rules: to let a harness delegate without \
-                 a prompt, add the rules below yourself. Then `cahoots enable <harness>` for each \
-                 target you want, and `cahoots doctor` to check."
-                    .to_string(),
+                format!(
+                    "{} cahoots never edits a harness's permission rules: to let a harness delegate \
+                     without a prompt, add the rules below yourself. Then `cahoots enable <harness>` \
+                     for each target you want, and `cahoots doctor` to check.",
+                    decision.sentence()
+                ),
             );
-            envelope.data = Some(
-                serde_json::json!({ "dry_run": dry_run, "files": files, "rules_to_add": rules }),
-            );
+            envelope.data = Some(serde_json::json!({
+                "dry_run": dry_run,
+                "files": files,
+                "rules_to_add": rules,
+                "meter": meter,
+            }));
             Ok(envelope)
         }
         Verb::Uninstall { dry_run } => {
@@ -402,6 +446,55 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             Ok(Envelope::new(Exit::Ok, None))
         }
     }
+}
+
+/// `install`'s usage meter: what is here, and which one to use — asking the
+/// person when there is a choice to make, never under `--dry-run`. Nothing is
+/// written here; the caller records the decision once the files are in.
+fn choose_meter(
+    dirs: &Dirs,
+    config: &crate::config::MeterConfig,
+    selection: Option<Selection>,
+    binary: Option<&std::path::Path>,
+    dry_run: bool,
+) -> Res<(Vec<Found>, Decision)> {
+    if selection == Some(Selection::NoMeter) && binary.is_some() {
+        return Err(Fail::new(
+            Exit::Usage,
+            "--meter-binary names a meter's binary, and --meter none names no meter",
+        ));
+    }
+    let previous = MeterFile::load(dirs)?;
+    let first = previous
+        .as_ref()
+        .and_then(|file| Some((file.meter?, file.binary.as_deref()?)));
+    let path = crate::env::path_var();
+    let mut found = detect::detect(&detect::Places::of(&dirs.home, path.as_deref()), first);
+    if let (Some(Selection::Meter(meter)), Some(binary)) = (selection, binary) {
+        // A path a person gives replaces the search for that meter.
+        let binary = std::path::absolute(binary)
+            .map_err(|error| Fail::new(Exit::Usage, format!("{}: {error}", binary.display())))?;
+        found.retain(|found| found.meter != meter);
+        found.push(detect::probe(meter, &binary));
+    }
+    let decision = detect::decide(
+        meter::configured(config),
+        previous.as_ref(),
+        selection,
+        &found,
+    )?;
+    let decision = match decision {
+        Decision::Ask { options } if !dry_run => {
+            let selection = detect::ask_which(
+                &options,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr(),
+            )?;
+            detect::picked(selection, &options)?
+        }
+        other => other,
+    };
+    Ok((found, decision))
 }
 
 /// Prints the envelope and turns it into the process's exit status. A closed
