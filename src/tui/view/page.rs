@@ -80,11 +80,14 @@ pub fn render(page: &mut Page, w: usize, h: usize, colors: Colors) -> Vec<String
             Line::Row(n) => row(&mut c, at, &page.rows[*n], *n == page.at, value_col),
         }
     }
-    if page.scroll > 0 {
-        c.text(TOP, w.saturating_sub(2), "↑", Style::dim());
-    }
-    if page.scroll + view < lines.len() {
-        c.text(TOP + view - 1, w.saturating_sub(2), "↓", Style::dim());
+    // More of the list above or below; under a box, the box is what counts.
+    if page.editor.is_none() {
+        if page.scroll > 0 {
+            c.text(TOP, w.saturating_sub(2), "↑", Style::dim());
+        }
+        if page.scroll + view < lines.len() {
+            c.text(TOP + view - 1, w.saturating_sub(2), "↓", Style::dim());
+        }
     }
 
     let current = page.rows[page.at].clone();
@@ -403,6 +406,15 @@ mod tests {
             "{screen:#?}"
         );
         assert!(screen[2].ends_with('↑'), "{screen:#?}");
+        // Under a box, the list's arrows are not drawn: they would sit on its edge.
+        page.press(Key::Enter);
+        let boxed = shown(&mut page, 60, 8);
+        assert!(
+            !boxed
+                .iter()
+                .any(|line| line.ends_with('↑') || line.ends_with('↓')),
+            "{boxed:#?}"
+        );
     }
 
     #[test]
