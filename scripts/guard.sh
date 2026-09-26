@@ -67,7 +67,7 @@ fi
 
 # 6. The dependency list is closed. deny.toml holds the transitive graph;
 #    this holds what Cargo.toml itself names.
-allowed_crates="clap anyhow thiserror serde serde_json toml nix ctrlc uuid rusqlite fs2 assert_cmd predicates tempfile serial_test insta"
+allowed_crates="clap anyhow thiserror serde serde_json toml toml_edit nix ctrlc uuid rusqlite fs2 assert_cmd predicates tempfile serial_test insta"
 crates=$(text_of Cargo.toml | awk '
     /^\[/ {
         on = ($0 ~ /dependencies\]$/)
@@ -80,7 +80,7 @@ crates=$(text_of Cargo.toml | awk '
 for crate in $crates; do
     case " $allowed_crates " in
     *" $crate "*) ;;
-    *) fail "Cargo.toml depends on '$crate' (AGENTS.md: the dependency list is closed — amend it there first)" ;;
+    *) fail "Cargo.toml depends on '$crate' (AGENTS.md rule 9: the dependency list is closed — add it to allowed_crates here first, and say so in the PR)" ;;
     esac
 done
 
@@ -121,6 +121,21 @@ while IFS= read -r script; do
         fail "$script has no mise task (AGENTS.md: a script and its task land together)"
     fi
 done < <(git ls-files -- 'scripts/*')
+
+# 10. The interface and the logic are separate layers (hard rule 11). The
+#     logic returns data and never touches the terminal; src/tui presents and
+#     knows nothing of the logic; only the command layer holds both.
+command_layer=(':!src/main.rs' ':!src/cli.rs' ':!src/cli')
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])(e?print(ln)?!|(stdin|stdout|stderr)\(\))|IsTerminal' -- \
+    src "${command_layer[@]}" ':!src/tui'); then
+    fail "the terminal is touched outside the interface (hard rule 11: the logic returns data; src/cli and src/tui show it)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE 'crate::' -- src/tui); then
+    fail "src/tui reaches into the logic (hard rule 11: the interface knows nothing of it)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])tui::' -- src "${command_layer[@]}" ':!src/tui'); then
+    fail "the logic reaches for the TUI (hard rule 11: only the command layer asks a person)" "$(where "$hits")"
+fi
 
 if [ "$failures" -gt 0 ]; then
     printf '\nguard: %d rule(s) tripped\n' "$failures" >&2

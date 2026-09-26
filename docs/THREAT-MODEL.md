@@ -33,13 +33,16 @@ directory permissions are already broken.
 
 **Two tiers of verbs.** Agent verbs — `pick run resume wait status result
 cancel outcome notes review` — are the only ones the printed rules name. Human verbs
-(`install`, `uninstall`, `enable`, `learn`, `registry`) change what cahoots may
-do, and refuse to run without a terminal on stdin. A test pins the agent tier
+(`install`, `uninstall`, `settings`, `enable`, `learn`, `registry`) change what
+cahoots may do, and refuse to run without a terminal on stdin. A test pins the agent tier
 by name: growing it is a change to this document.
 
 **No flag widens authority.** There is no `--ungated`; the gate is bypassed
-only by configuration, which is a human's file. `--in-place` works only if
-configuration allows it. Read-only roles are forced read-only by
+only by configuration, which is a human's file. cahoots writes it only through
+human verbs — `settings`, `enable`, and `install` for the meter a person
+chose — and in place: the setting asked for changes, nothing else in the file
+does, and nothing is written that the config's own checks would refuse.
+`--in-place` works only if configuration allows it. Read-only roles are forced read-only by
 `validate_argv`, after every other decision.
 
 **Resuming is not a side door.** `resume` continues a harness's own session,
@@ -97,8 +100,9 @@ refused.
 **The usage meter decides admission, so the caller must not reach it.** It
 is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
 a meter that said "plenty left" whenever the caller liked would turn every cap
-off. So it runs only from a path a person pinned (`install` records the one it
-found, from a terminal; the config may name one) and never from a PATH lookup:
+off. So it runs only from a path a person pinned (`install` records where it
+found each, from a terminal; config.toml may name one) and never from a PATH
+lookup:
 the caller sets PATH, and a `ccusage` it planted in a directory it can write —
 a temp directory, say — would come first. It runs with a PATH of its own (its
 directories, then the system's — never the caller's, which would pick the
@@ -112,7 +116,9 @@ showed none. A meter that fails, times out or answers in a shape cahoots does
 not know refuses the run.
 
 **Targets are off until enabled.** A run sends repository content to another
-vendor. That is a decision for a human, per harness, once (`cahoots enable`).
+vendor. That is a decision for a human, per harness, once: `cahoots enable`,
+or the settings page, writes `enabled = true` in that harness's table in
+config.toml.
 
 **Results are untrusted.** `result` is size-capped and its envelope marks the
 content `untrusted`; the skill tells the caller to treat it as a colleague's

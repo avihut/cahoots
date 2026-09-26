@@ -18,6 +18,41 @@ harness N+1 is one registry entry and one installer target, not N new
 integrations. The caller is excluded at run time, not by maintaining N
 variants of the definitions.
 
+## Layers: the logic apart from the interface
+
+There are three layers, and only one of them holds both ends (`AGENTS.md`
+hard rule 11, held by `scripts/guard.sh`):
+
+- **The logic** is everything that decides or does: the registry, the gate
+  and its meters, runs, install, learning, the settings. It returns data:
+  results, refusals, and, when it needs a person, a *question* and a way to
+  take the answer back. For install's meter choice, `Decision::Ask { options }`
+  goes out and `detect::picked(selection, …)` takes the answer back; for the
+  settings page, every setting is data (`src/settings.rs`) and a change goes
+  back through `settings::set` or `settings::reset`. It never
+  prints, prompts or looks at a terminal. So every path through it runs the
+  same for an agent, a script or a person, and its tests need no terminal.
+  The supervisor, which runs detached, writes what it sees to its run's log
+  (`RunDir::log`), not to a stream.
+- **The interface** is how cahoots meets whoever called it. Agents and
+  scripts get one JSON envelope and an exit code that means something
+  (`src/exit.rs`, printed by `cli::emit`). A person at a terminal gets the
+  Clack rail for a command's questions, and the settings page on the whole
+  screen (`src/tui`, designed in `docs/TUI.md`). It presents what it is
+  given, returns answers as plain data (which choice, which number, what
+  order), and knows nothing of meters, gates, runs or settings.
+- **The command layer** is `src/main.rs`, `src/cli.rs` and `src/cli/`. It
+  parses the command line, calls the logic, and puts the logic's questions to
+  a person. `src/cli/questions.rs` holds their words and what each answer
+  means, and `src/cli/settings.rs` the settings' words and what each answer
+  on the page changes. It hands the answers back to the logic and prints the
+  envelope.
+
+The TUI is layered the same way inside: the terminal itself, what its bytes
+mean, each way of answering (a choice, a number, an order), the page's
+state, how things look, and what runs them (the rail, the whole screen) are
+separate files, and only the first touches a terminal.
+
 ## One run model (M1)
 
 A caller's tool call times out in minutes (Claude Code: 120 s by default, 600 s
@@ -84,14 +119,17 @@ admitting the run that crosses the line.
 - **Choosing the meter.** `cahoots install` looks for each one — ccusage on
   PATH; `usage-cli` where the tracker's launch agent runs it, on PATH and in
   the Applications folders — and probes it: ccusage's `--version` (20 or
-  newer), the tracker's `headroom`, which it answers from its digest. One
-  usable meter is used; several, and the person is asked. The choice goes in
-  `<config>/meter.json`, a file of its own, so the hand-written config is
-  never rewritten. A person's answer stands until `install --meter` changes
-  it; a meter used because it was the only one found is chosen again on every
-  install, so a second one brings the question. When none can be used the
-  file goes, and the ledger alone gates runs. A `[meter.<id>]` table in the
-  config outranks all of it.
+  newer), the tracker's `headroom`, which it answers from its digest. What it
+  finds goes in `<config>/meter.json`: where each usable meter is, cahoots'
+  own record of the machine. Which meter is used is a person's choice, and it
+  lives with their other settings, as `[meter] use` in config.toml
+  (agent-usage, ccusage or none): the answer to install's question,
+  `install --meter`, or `cahoots settings` writes it, and it stands until
+  they change it. With no choice made, one usable meter found is used, and
+  several bring the question; the only one found is never written as a
+  choice, so a second one found later brings the question too. When none is
+  found, the ledger alone gates runs. A `[meter.<id>]` table only holds that
+  meter's knobs, and a `binary` there outranks where install found it.
 - **Stale data, per meter and harness.** The tracker's Codex numbers only
   refresh when Codex runs locally, so a strict freshness guard would refuse it
   forever. For such snapshot-on-use readings, a stale one is re-asked without
@@ -132,7 +170,11 @@ callee on stdin, never in argv.
 The user's file holds typed knobs only — binary path, enabled, models and
 efforts, candidate order per role, caps — with `deny_unknown_fields`.
 Precedence: CLI flag > user > learned > default. There is no command template
-to edit, by design: **data can never widen authority.**
+to edit, by design: **data can never widen authority.** cahoots writes the
+file too, but only through human verbs (`settings`, `enable`, `install`),
+and in place (`config::edit`, on `toml_edit`): a setting changes, the rest
+of the file — its comments, its order, its tables — stays as the person
+wrote it, and nothing is written that `UserConfig::parse` would refuse.
 
 Harness CLIs drift. That is detected, not templated around: a tested-version
 range per harness (`doctor`), checked-in `--help` captures with a test that
@@ -198,10 +240,14 @@ fixes it for its own harness.
   the rules still missing and the file each belongs in; `doctor` checks them —
   and the installed copies' freshness — read-only.
 - **It chooses the usage meter** (see *The gate*) — before it writes a file,
-  so a question left unanswered leaves nothing half-done. The question goes to
-  stderr: stdout is the one JSON envelope, as for every verb. `--meter
-  <agent-usage|ccusage|none>` answers it in advance, and `--meter-binary`
-  names a copy install would not find.
+  so a question left unanswered leaves nothing half-done. It asks on the
+  Clack rail (`docs/TUI.md`), with the arrow keys, on stderr: stdout is the
+  one JSON envelope, as for every verb, and only when config.toml has no
+  `[meter] use`. `--meter <agent-usage|ccusage|none>` answers it in advance,
+  and `--meter-binary` names a copy install would not find. Once the files
+  are in, it writes what it found to meter.json and a person's answer to
+  config.toml (`[meter] use`, and a `--meter-binary` path as that meter's
+  `binary`); a dry run writes neither.
 
 ## Review and local learning (M5, opt-in)
 

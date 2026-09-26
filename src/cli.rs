@@ -5,6 +5,14 @@
 //! So the verbs come in tiers. Agent verbs are the only ones the printed
 //! allow-rules name. Human verbs change what cahoots may do, and refuse to run
 //! without a terminal on stdin. Inspect verbs read and report.
+//!
+//! This is the command layer, the one place the logic and the interface meet
+//! (hard rule 11). It calls the logic, puts the logic's questions to a person
+//! (`questions`, on `crate::tui`), hands the answers back, and prints the one
+//! JSON envelope.
+
+mod questions;
+mod settings;
 
 use clap::{Parser, Subcommand};
 
@@ -15,11 +23,12 @@ use std::process::ExitCode;
 use crate::dirs::Dirs;
 use crate::exit::{self, Envelope, Exit, Fail, Res};
 use crate::meter::detect::{self, Decision, Found};
-use crate::meter::{self, MeterFile, Selection};
+use crate::meter::{MeterFile, MeterId, Selection};
 use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
 use crate::run::client::{self, ResumeArgs, RunArgs};
 use crate::run::supervise;
+use crate::tui;
 
 pub const VERSION: &str = if cfg!(cahoots_dev_build) {
     concat!(
@@ -155,6 +164,11 @@ pub enum Verb {
     },
     /// Print the skill this version installs
     Skill,
+    /// See and change every setting: a page at the terminal, or one at a time
+    Settings {
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
+    },
     /// Allow a harness to be used as a target (a run sends it repository content)
     Enable {
         harness: HarnessId,
@@ -209,6 +223,19 @@ pub enum ReviewAction {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+pub enum SettingsAction {
+    /// Set one: `cahoots settings set harness.codex.cap 60`
+    Set {
+        /// Its path in config.toml, as `cahoots settings` lists them
+        key: String,
+        /// In config.toml's units: on/off, a number, a path, or harness:model:effort,…
+        value: String,
+    },
+    /// Put one back to its default, which takes it out of config.toml
+    Reset { key: String },
+}
+
+#[derive(Debug, Clone, Subcommand)]
 pub enum LearnAction {
     /// What has been learned, and from how much
     List,
@@ -234,7 +261,7 @@ pub fn tier_of(name: &str) -> Option<Tier> {
     Some(match name {
         "pick" | "run" | "resume" | "wait" | "status" | "result" | "cancel" | "outcome"
         | "notes" | "review" => Tier::Agent,
-        "install" | "uninstall" | "enable" | "learn" | "registry" => Tier::Human,
+        "install" | "uninstall" | "settings" | "enable" | "learn" | "registry" => Tier::Human,
         "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
         "__supervise" => Tier::Internal,
         _ => return None,
@@ -257,6 +284,7 @@ impl Verb {
             Verb::Install { .. } => "install",
             Verb::Uninstall { .. } => "uninstall",
             Verb::Skill => "skill",
+            Verb::Settings { .. } => "settings",
             Verb::Enable { .. } => "enable",
             Verb::Learn { .. } => "learn",
             Verb::Registry => "registry",
@@ -332,6 +360,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             timeout_secs: timeout,
         }),
         Verb::Pick { role, to, caller } => client::pick_target(role, caller, to),
+        Verb::Settings { action } => settings::settings(action),
         Verb::Enable { harness, off } => {
             let enabled = crate::registry::set_enabled(&Dirs::resolve()?, harness, !off)?;
             ok(serde_json::json!({ "enabled": enabled }))
@@ -376,11 +405,14 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 dry_run,
             )?;
             let files = crate::install::files::install(&dirs, harness, dry_run)?;
+            let mut config = config;
             if !dry_run {
-                match decision.record() {
-                    detect::Record::Write(file) => file.save(&dirs)?,
-                    detect::Record::Remove => MeterFile::remove(&dirs)?,
-                    detect::Record::Leave => {}
+                // What was found is cahoots' own record; a choice is the
+                // person's, and goes where their other settings are.
+                MeterFile::of(&found).save(&dirs)?;
+                let changes = decision.config_changes(meter_binary.is_some());
+                if !changes.is_empty() {
+                    config = crate::config::edit::apply(&dirs.config_file(), &changes)?;
                 }
             }
             let in_effect = decision.in_effect();
@@ -388,7 +420,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 "found": found,
                 "decision": decision,
                 "in_effect": in_effect,
-                "still_to_do": detect::still_to_do(in_effect, &config.meter, &dirs.config_file()),
+                "still_to_do": detect::still_to_do(in_effect, &config.meter, &found, &dirs.config_file()),
             });
             let rules: serde_json::Map<String, serde_json::Value> = HarnessId::ALL
                 .into_iter()
@@ -408,7 +440,8 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 format!(
                     "{} cahoots never edits a harness's permission rules: to let a harness delegate \
                      without a prompt, add the rules below yourself. Then `cahoots enable <harness>` \
-                     for each target you want, and `cahoots doctor` to check.",
+                     for each target you want (`cahoots settings` shows every setting), and \
+                     `cahoots doctor` to check.",
                     decision.sentence()
                 ),
             );
@@ -448,9 +481,10 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
     }
 }
 
-/// `install`'s usage meter: what is here, and which one to use — asking the
-/// person when there is a choice to make, never under `--dry-run`. Nothing is
-/// written here; the caller records the decision once the files are in.
+/// `install`'s usage meter: what is here, and which one to use, asking the
+/// person when the logic says there is a choice to make (never under
+/// `--dry-run`). Nothing is written here; the caller records the decision once
+/// the files are in.
 fn choose_meter(
     dirs: &Dirs,
     config: &crate::config::MeterConfig,
@@ -464,12 +498,24 @@ fn choose_meter(
             "--meter-binary names a meter's binary, and --meter none names no meter",
         ));
     }
-    let previous = MeterFile::load(dirs)?;
-    let first = previous
-        .as_ref()
-        .and_then(|file| Some((file.meter?, file.binary.as_deref()?)));
+    // Where config.toml says each meter is, then where it was found last
+    // time. A file an older cahoots wrote only loses its hints: this run
+    // writes it again.
+    let previous = MeterFile::load(dirs).ok().flatten();
+    let mut first: Vec<(MeterId, &std::path::Path)> = MeterId::ALL
+        .into_iter()
+        .filter_map(|id| Some((id, config.binary(id)?)))
+        .collect();
+    if let Some(previous) = &previous {
+        first.extend(
+            previous
+                .found
+                .iter()
+                .map(|(id, binary)| (*id, binary.as_path())),
+        );
+    }
     let path = crate::env::path_var();
-    let mut found = detect::detect(&detect::Places::of(&dirs.home, path.as_deref()), first);
+    let mut found = detect::detect(&detect::Places::of(&dirs.home, path.as_deref()), &first);
     if let (Some(Selection::Meter(meter)), Some(binary)) = (selection, binary) {
         // A path a person gives replaces the search for that meter.
         let binary = std::path::absolute(binary)
@@ -477,24 +523,39 @@ fn choose_meter(
         found.retain(|found| found.meter != meter);
         found.push(detect::probe(meter, &binary));
     }
-    let decision = detect::decide(
-        meter::configured(config),
-        previous.as_ref(),
-        selection,
-        &found,
-    )?;
+    let decision = detect::decide(config.use_, selection, &found)?;
     let decision = match decision {
         Decision::Ask { options } if !dry_run => {
-            let selection = detect::ask_which(
-                &options,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stderr(),
-            )?;
+            let selection = {
+                let Some(mut terminal) = person_at_terminal() else {
+                    return Err(questions::no_terminal_for_meter());
+                };
+                questions::which_meter(&options, &mut terminal, &mut std::io::stderr(), colors())?
+                // The terminal is given back here, before install says more.
+            };
             detect::picked(selection, &options)?
         }
         other => other,
     };
     Ok((found, decision))
+}
+
+/// The person's terminal, set up for a question. `None` when there is no
+/// terminal to ask at, or it cannot move its cursor (`TERM=dumb`).
+fn person_at_terminal() -> Option<tui::Terminal> {
+    if crate::env::dumb_terminal() {
+        return None;
+    }
+    tui::Terminal::open()
+}
+
+/// The rail in color, unless `NO_COLOR` says otherwise.
+fn colors() -> tui::Colors {
+    if crate::env::no_color() {
+        tui::Colors::OFF
+    } else {
+        tui::Colors::ON
+    }
 }
 
 /// Prints the envelope and turns it into the process's exit status. A closed
@@ -560,6 +621,9 @@ mod tests {
             vec!["cahoots", "uninstall"],
             vec!["cahoots", "enable", "codex"],
             vec!["cahoots", "registry"],
+            vec!["cahoots", "settings"],
+            vec!["cahoots", "settings", "set", "harness.codex.cap", "60"],
+            vec!["cahoots", "settings", "reset", "harness.codex.cap"],
         ] {
             let verb = Cli::try_parse_from(argv).unwrap().verb;
             let fail = refusal(&verb, false).expect("refused without a terminal");

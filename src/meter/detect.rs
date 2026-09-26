@@ -1,8 +1,12 @@
 //! `install`'s part: which usage meters this machine has, and which one to
-//! use. One usable meter is used; several, and a person picks. A person's
-//! choice stands until `install --meter` changes it; the only one found is
-//! chosen again each time, so a second one brings the question. A
-//! `[meter.<id>]` table in the config file outranks all of it.
+//! use. A person's choice (`[meter] use` in config.toml) stands until they
+//! change it, and `install --meter` is one way to. With no choice made, one
+//! usable meter is used and several bring a question; the only one found is
+//! only ever found, never chosen, so a second one brings the question too.
+//!
+//! This is logic, so it decides and never asks (hard rule 11): the question
+//! goes out as `Decision::Ask`, and the answer comes back in through `picked`.
+//! The command layer puts it to the person (`src/cli/questions.rs`).
 //!
 //! Detection runs a candidate only after it passes the binary policy, and
 //! only with arguments that read: ccusage's `--version`, and the tracker's
@@ -11,12 +15,13 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{Exe, MeterFile, MeterId, Selection, agent_usage, ccusage};
+use super::{Exe, MeterId, Selection, agent_usage, ccusage};
+use crate::config::MeterConfig;
+use crate::config::edit::{Change, KeyPath};
 use crate::exit::{Exit, Fail, Res};
 use crate::spawn;
 
@@ -95,15 +100,16 @@ impl<'a> Places<'a> {
 
 /// Every meter this machine has: per meter, the first copy that can be used
 /// — or, when none can, the first one found, to say why not. `first` is
-/// tried before the usual places: the copy chosen last time.
-pub fn detect(at: &Places<'_>, first: Option<(MeterId, &Path)>) -> Vec<Found> {
+/// tried before the usual places: where config.toml says a meter is, and
+/// where it was found last time.
+pub fn detect(at: &Places<'_>, first: &[(MeterId, &Path)]) -> Vec<Found> {
     let mut found = Vec::new();
     for meter in MeterId::ALL {
         let on_path = spawn::find_on_path(meter.binary_name(), at.path);
         let mut places: Vec<PathBuf> = first
+            .iter()
             .filter(|(id, _)| *id == meter)
             .map(|(_, binary)| binary.to_path_buf())
-            .into_iter()
             .collect();
         match meter {
             MeterId::AgentUsage => {
@@ -139,9 +145,7 @@ pub fn detect(at: &Places<'_>, first: Option<(MeterId, &Path)>) -> Vec<Found> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum Decision {
-    /// The config file turns a meter on; the choice is the config file's.
-    Config { meter: MeterId },
-    /// What was chosen before still stands (`None`: no meter, as a person said).
+    /// config.toml chose, and the choice stands (`None`: no meter).
     Keep { meter: Option<MeterId> },
     /// This one: the only one found, the one named, or the one picked.
     Use {
@@ -149,7 +153,7 @@ pub enum Decision {
         binary: PathBuf,
         because: Because,
     },
-    /// None, because a person said so (`--meter none`).
+    /// None, because a person said so (`--meter none`, or the question).
     NoneChosen,
     /// None could be used; only the ledger gates runs.
     NoneFound,
@@ -179,58 +183,53 @@ impl std::fmt::Display for Because {
     }
 }
 
-/// What becomes of `meter.json` once a decision is carried out.
-#[derive(Debug, PartialEq)]
-pub enum Record {
-    Leave,
-    Write(MeterFile),
-    /// Nothing can be used: an earlier choice would only refuse every run
-    /// while `install` says the ledger alone gates them.
-    Remove,
-}
-
 impl Decision {
     /// The meter on once this decision is carried out.
     pub fn in_effect(&self) -> Option<MeterId> {
         match self {
-            Decision::Config { meter } | Decision::Use { meter, .. } => Some(*meter),
+            Decision::Use { meter, .. } => Some(*meter),
             Decision::Keep { meter } => *meter,
             Decision::NoneChosen | Decision::NoneFound | Decision::Ask { .. } => None,
         }
     }
 
-    pub fn record(&self) -> Record {
+    /// What `install` writes to config.toml for this decision: a person's
+    /// choice as `[meter] use`, and a binary they named (`--meter-binary`) as
+    /// that meter's `binary`. What was only found goes to `meter.json`, not
+    /// here: nobody chose it.
+    pub fn config_changes(&self, binary_named: bool) -> Vec<Change> {
+        let chose = |selection: Selection| Change::Set {
+            path: KeyPath::of("meter.use"),
+            value: selection.as_str().into(),
+        };
         match self {
             Decision::Use {
                 meter,
                 binary,
-                because,
-            } => Record::Write(MeterFile {
-                v: 1,
-                meter: Some(*meter),
-                binary: Some(binary.clone()),
-                only_one_found: *because == Because::OnlyOneFound,
-            }),
-            Decision::NoneChosen => Record::Write(MeterFile {
-                v: 1,
-                meter: None,
-                binary: None,
-                only_one_found: false,
-            }),
-            Decision::NoneFound => Record::Remove,
-            Decision::Config { .. } | Decision::Keep { .. } | Decision::Ask { .. } => Record::Leave,
+                because: because @ (Because::YouNamedIt | Because::YouChoseIt),
+            } => {
+                let mut changes = vec![chose(Selection::Meter(*meter))];
+                if binary_named && *because == Because::YouNamedIt {
+                    changes.push(Change::Set {
+                        path: KeyPath::of(&format!("meter.{meter}.binary")),
+                        value: binary.to_string_lossy().as_ref().into(),
+                    });
+                }
+                changes
+            }
+            Decision::NoneChosen => vec![chose(Selection::NoMeter)],
+            _ => Vec::new(),
         }
     }
 
     /// One sentence for the person who ran `install`.
     pub fn sentence(&self) -> String {
         match self {
-            Decision::Config { meter } => format!("Usage meter: {meter}, as the config file says."),
             Decision::Keep { meter: Some(meter) } => {
-                format!("Usage meter: {meter}, as chosen before.")
+                format!("Usage meter: {meter}, as chosen in config.toml.")
             }
             Decision::Keep { meter: None } => {
-                "No usage meter, as chosen before: only the ledger gates runs.".to_string()
+                "No usage meter, as chosen in config.toml: only the ledger gates runs.".to_string()
             }
             Decision::Use { meter, because, .. } => format!("Usage meter: {meter} ({because})."),
             Decision::NoneChosen => "No usage meter, as you said: only the ledger gates runs.".to_string(),
@@ -247,25 +246,15 @@ impl Decision {
     }
 }
 
-/// The decision, from what was found and what was said. PURE — `install`
-/// asks and writes; this only decides, so it is tested without a terminal.
+/// The decision, from what config.toml chose (`chosen`), what the command
+/// line says (`selection`, which wins: it is the person's word now) and what
+/// was found. PURE — `install` asks and writes; this only decides, so it is
+/// tested without a terminal.
 pub fn decide(
-    configured: Option<MeterId>,
-    previous: Option<&MeterFile>,
+    chosen: Option<Selection>,
     selection: Option<Selection>,
     found: &[Found],
 ) -> Res<Decision> {
-    if let Some(meter) = configured {
-        if selection.is_some() {
-            return Err(Fail::new(
-                Exit::Usage,
-                format!(
-                    "the config file turns on [meter.{meter}], and that outranks what install chooses — remove the table first, or leave out --meter"
-                ),
-            ));
-        }
-        return Ok(Decision::Config { meter });
-    }
     match selection {
         Some(Selection::NoMeter) => return Ok(Decision::NoneChosen),
         Some(Selection::Meter(meter)) => {
@@ -288,23 +277,10 @@ pub fn decide(
         }
         None => {}
     }
-    if let Some(previous) = previous {
-        let still_there = |meter: MeterId| {
-            found.iter().any(|found| {
-                found.meter == meter
-                    && found.usable()
-                    && Some(&found.binary) == previous.binary.as_ref()
-            })
-        };
-        match previous.meter {
-            None => return Ok(Decision::Keep { meter: None }),
-            Some(meter) if !previous.only_one_found && still_there(meter) => {
-                return Ok(Decision::Keep { meter: Some(meter) });
-            }
-            // Gone, moved or broken — or no one's choice: choose again, as if
-            // for the first time.
-            Some(_) => {}
-        }
+    if let Some(chosen) = chosen {
+        return Ok(Decision::Keep {
+            meter: chosen.meter(),
+        });
     }
     let usable: Vec<&Found> = found.iter().filter(|found| found.usable()).collect();
     Ok(match usable.as_slice() {
@@ -320,85 +296,73 @@ pub fn decide(
     })
 }
 
-/// Asks a person to pick one of `options`. The question goes to `output` —
-/// stderr, because stdout carries the one JSON envelope — and the answer is
-/// read from `input`. An empty answer takes the first option.
-pub fn ask_which(
-    options: &[Found],
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Res<Selection> {
-    let _ = writeln!(
-        output,
-        "cahoots can read how much of each plan is used from more than one tool here:"
-    );
-    for (n, found) in options.iter().enumerate() {
-        let _ = writeln!(
-            output,
-            "  {}) {:<12} {}",
-            n + 1,
-            found.meter,
-            found.meter.summary()
-        );
-        let _ = writeln!(output, "     {:<12} {}", "", found.binary.display());
-    }
-    let refused = || {
-        Fail::new(
-            Exit::Usage,
-            "no meter chosen — `cahoots install --meter <agent-usage|ccusage|none>` chooses without asking",
-        )
-    };
-    for _ in 0..3 {
-        let _ = write!(output, "Which one should it use? [1]: ");
-        let _ = output.flush();
-        let mut line = String::new();
-        match input.read_line(&mut line) {
-            Ok(0) | Err(_) => return Err(refused()),
-            Ok(_) => {}
-        }
-        if let Some(selection) = answer(line.trim(), options) {
-            return Ok(selection);
-        }
-        let _ = writeln!(
-            output,
-            "  a number from 1 to {}, a name, or `none`",
-            options.len()
-        );
-    }
-    Err(refused())
-}
-
 /// What a person still has to do before the meter in effect caps anything:
+/// a meter chosen in config.toml that is not here refuses every run, and
 /// ccusage has no percentage until a limit is declared.
 pub fn still_to_do(
     in_effect: Option<MeterId>,
-    config: &crate::config::MeterConfig,
+    config: &MeterConfig,
+    found: &[Found],
     config_file: &Path,
 ) -> Option<String> {
-    if in_effect != Some(MeterId::Ccusage) {
-        return None;
+    let meter = in_effect?;
+    let mut to_do = Vec::new();
+    // Its table's binary is the one used, when it names one.
+    let pinned = config.binary(meter);
+    let here = found.iter().find(|found| found.meter == meter);
+    let works =
+        here.is_some_and(|found| found.usable() && pinned.is_none_or(|p| p == found.binary));
+    if !works {
+        let why = match (pinned, here) {
+            (Some(pinned), Some(found)) if found.binary == pinned => format!(
+                "{} cannot be used: {}",
+                pinned.display(),
+                found.unusable.as_deref().unwrap_or("it did not answer")
+            ),
+            (Some(pinned), _) => format!("{} cannot be used", pinned.display()),
+            (None, Some(found)) => format!(
+                "the {} at {} cannot be used: {}",
+                meter.binary_name(),
+                found.binary.display(),
+                found.unusable.as_deref().unwrap_or("it did not answer")
+            ),
+            (None, None) => format!("no {} was found", meter.binary_name()),
+        };
+        to_do.push(format!(
+            "config.toml chooses the {meter} meter, but {why}, so every run is refused until it \
+             can be: install or update it, set its path as `binary` under [meter.{meter}], or \
+             choose another meter with `use` under [meter] — `cahoots settings` does either, as \
+             does an edit to {}.",
+            config_file.display()
+        ));
     }
-    let table = config.ccusage.as_ref();
-    let claude = table.and_then(|t| t.claude_block_tokens).is_none();
-    let codex = table.and_then(|t| t.codex_day_tokens).is_none();
-    let (missing, until) = match (claude, codex) {
-        (false, false) => return None,
-        (true, true) => (
-            "claude_block_tokens and codex_day_tokens",
-            "Claude Code is held only by its own limit notice, and Codex only by the ledger",
-        ),
-        (true, false) => (
-            "claude_block_tokens",
-            "Claude Code is held only by its own limit notice",
-        ),
-        (false, true) => ("codex_day_tokens", "Codex is held only by the ledger"),
-    };
-    Some(format!(
-        "ccusage counts tokens and cannot see a plan's limit: set {missing} under [meter.ccusage] \
-         in {} — the tokens that count as a whole plan, in a 5-hour block for Claude Code and in a \
-         day for Codex. Until then {until}. `cahoots doctor` shows the counts to size them by.",
-        config_file.display()
-    ))
+    if meter == MeterId::Ccusage {
+        let table = config.ccusage.as_ref();
+        let claude = table.and_then(|t| t.claude_block_tokens).is_none();
+        let codex = table.and_then(|t| t.codex_day_tokens).is_none();
+        let missing = match (claude, codex) {
+            (false, false) => None,
+            (true, true) => Some((
+                "claude_block_tokens and codex_day_tokens",
+                "Claude Code is held only by its own limit notice, and Codex only by the ledger",
+            )),
+            (true, false) => Some((
+                "claude_block_tokens",
+                "Claude Code is held only by its own limit notice",
+            )),
+            (false, true) => Some(("codex_day_tokens", "Codex is held only by the ledger")),
+        };
+        if let Some((missing, until)) = missing {
+            to_do.push(format!(
+                "ccusage counts tokens and cannot see a plan's limit: set {missing} under \
+                 [meter.ccusage] in {} (`cahoots settings`) — the tokens that count as a whole \
+                 plan, in a 5-hour block for Claude Code and in a day for Codex. Until then \
+                 {until}. `cahoots doctor` shows the counts to size them by.",
+                config_file.display()
+            ));
+        }
+    }
+    (!to_do.is_empty()).then(|| to_do.join(" "))
 }
 
 /// What a person picked from the question, as a decision.
@@ -417,25 +381,10 @@ pub fn picked(selection: Selection, options: &[Found]) -> Res<Decision> {
     }
 }
 
-fn answer(text: &str, options: &[Found]) -> Option<Selection> {
-    let meter = if text.is_empty() {
-        options.first()?.meter
-    } else if text == "none" {
-        return Some(Selection::NoMeter);
-    } else if let Ok(n) = text.parse::<usize>() {
-        options.get(n.checked_sub(1)?)?.meter
-    } else {
-        options
-            .iter()
-            .find(|found| found.meter.as_str() == text)?
-            .meter
-    };
-    Some(Selection::Meter(meter))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UserConfig;
 
     fn found(meter: MeterId, binary: &str, unusable: Option<&str>) -> Found {
         Found {
@@ -458,230 +407,172 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn one_usable_meter_is_used_and_several_are_asked_about() {
-        let only_ccusage = vec![
+    fn only_ccusage() -> Vec<Found> {
+        vec![
             found(
                 MeterId::AgentUsage,
                 "/x/usage-cli",
                 Some("it has no `headroom` noun yet"),
             ),
             found(MeterId::Ccusage, "/opt/homebrew/bin/ccusage", None),
-        ];
+        ]
+    }
+
+    const CCUSAGE: Option<Selection> = Some(Selection::Meter(MeterId::Ccusage));
+
+    #[test]
+    fn with_no_choice_one_usable_meter_is_used_and_several_are_asked_about() {
         assert_eq!(
-            decide(None, None, None, &only_ccusage).unwrap(),
+            decide(None, None, &only_ccusage()).unwrap(),
             Decision::Use {
                 meter: MeterId::Ccusage,
                 binary: PathBuf::from("/opt/homebrew/bin/ccusage"),
                 because: Because::OnlyOneFound,
             }
         );
-        match decide(None, None, None, &both()).unwrap() {
+        match decide(None, None, &both()).unwrap() {
             Decision::Ask { options } => assert_eq!(options.len(), 2),
             other => panic!("expected a question, got {other:?}"),
         }
-        assert_eq!(decide(None, None, None, &[]).unwrap(), Decision::NoneFound);
+        assert_eq!(decide(None, None, &[]).unwrap(), Decision::NoneFound);
         assert_eq!(
-            decide(None, None, None, &only_ccusage[..1]).unwrap(),
+            decide(None, None, &only_ccusage()[..1]).unwrap(),
             Decision::NoneFound,
             "found but unusable is not a meter"
         );
     }
 
     #[test]
-    fn a_choice_stands_until_it_is_gone_or_changed() {
-        let chosen = MeterFile {
-            v: 1,
-            meter: Some(MeterId::Ccusage),
-            binary: Some(PathBuf::from("/opt/homebrew/bin/ccusage")),
-            only_one_found: false,
-        };
+    fn a_choice_in_config_toml_stands_and_nothing_is_asked() {
         assert_eq!(
-            decide(None, Some(&chosen), None, &both()).unwrap(),
+            decide(CCUSAGE, None, &both()).unwrap(),
             Decision::Keep {
                 meter: Some(MeterId::Ccusage)
             }
         );
-        // Its binary is gone: choose again, and with two found, ask.
-        let moved = MeterFile {
-            binary: Some(PathBuf::from("/usr/local/bin/ccusage")),
-            ..chosen.clone()
-        };
-        assert!(matches!(
-            decide(None, Some(&moved), None, &both()).unwrap(),
-            Decision::Ask { .. }
-        ));
-        // "None" is a choice too, and it stands.
-        let none = MeterFile {
-            v: 1,
-            meter: None,
-            binary: None,
-            only_one_found: false,
-        };
         assert_eq!(
-            decide(None, Some(&none), None, &both()).unwrap(),
-            Decision::Keep { meter: None }
+            decide(Some(Selection::NoMeter), None, &both()).unwrap(),
+            Decision::Keep { meter: None },
+            "no meter is a choice too"
         );
-        // Naming one overrides what was chosen before.
-        assert!(matches!(
-            decide(
-                None,
-                Some(&chosen),
-                Some(Selection::Meter(MeterId::AgentUsage)),
-                &both()
-            )
-            .unwrap(),
-            Decision::Use {
-                meter: MeterId::AgentUsage,
-                ..
-            }
-        ));
+        // Even when what it chose is gone: install says so (`still_to_do`)
+        // rather than choose for the person.
         assert_eq!(
-            decide(None, Some(&chosen), Some(Selection::NoMeter), &both()).unwrap(),
-            Decision::NoneChosen
+            decide(CCUSAGE, None, &[]).unwrap(),
+            Decision::Keep {
+                meter: Some(MeterId::Ccusage)
+            }
         );
     }
 
     #[test]
-    fn the_only_one_found_is_chosen_again_so_a_second_one_is_asked_about() {
-        let only_ccusage = vec![
-            found(
-                MeterId::AgentUsage,
-                "/x/usage-cli",
-                Some("it has no `headroom` noun yet"),
-            ),
-            found(MeterId::Ccusage, "/opt/homebrew/bin/ccusage", None),
-        ];
-        let Record::Write(first) = decide(None, None, None, &only_ccusage).unwrap().record() else {
-            panic!("the only one found is recorded");
-        };
-        assert!(first.only_one_found, "{first:?}");
-        // Still the only one: the same again, and still no one's choice.
-        assert_eq!(
-            decide(None, Some(&first), None, &only_ccusage)
-                .unwrap()
-                .record(),
-            Record::Write(first.clone())
-        );
-        // The tracker can be used now too, and no one ever picked ccusage.
-        assert!(matches!(
-            decide(None, Some(&first), None, &both()).unwrap(),
-            Decision::Ask { .. }
-        ));
-        // A person's answer, named or picked, is theirs, and it stands.
+    fn the_command_line_outranks_config_toml_and_is_written_there() {
         let named = decide(
-            None,
-            Some(&first),
-            Some(Selection::Meter(MeterId::Ccusage)),
+            CCUSAGE,
+            Some(Selection::Meter(MeterId::AgentUsage)),
             &both(),
         )
         .unwrap();
-        let chose = picked(Selection::Meter(MeterId::Ccusage), &both()).unwrap();
-        for decision in [named, chose] {
-            let Record::Write(theirs) = decision.record() else {
-                panic!("{decision:?} is recorded");
-            };
-            assert!(!theirs.only_one_found, "{theirs:?}");
-            assert_eq!(
-                decide(None, Some(&theirs), None, &both()).unwrap(),
-                Decision::Keep {
-                    meter: Some(MeterId::Ccusage)
+        assert!(
+            matches!(
+                named,
+                Decision::Use {
+                    meter: MeterId::AgentUsage,
+                    because: Because::YouNamedIt,
+                    ..
                 }
-            );
+            ),
+            "{named:?}"
+        );
+        let text = |changes: Vec<Change>| format!("{changes:?}");
+        assert!(text(named.config_changes(false)).contains("\"agent-usage\""));
+        assert_eq!(named.config_changes(false).len(), 1);
+        assert_eq!(
+            named.config_changes(true).len(),
+            2,
+            "a binary named on the command line is written too"
+        );
+        let none = decide(CCUSAGE, Some(Selection::NoMeter), &both()).unwrap();
+        assert_eq!(none, Decision::NoneChosen);
+        assert!(text(none.config_changes(false)).contains("\"none\""));
+        let picked = picked(Selection::Meter(MeterId::Ccusage), &both()).unwrap();
+        assert_eq!(
+            picked.config_changes(false).len(),
+            1,
+            "an answer is a choice"
+        );
+    }
+
+    #[test]
+    fn what_was_only_found_is_never_written_as_a_choice() {
+        for decision in [
+            decide(None, None, &only_ccusage()).unwrap(),
+            decide(CCUSAGE, None, &both()).unwrap(),
+            Decision::NoneFound,
+            decide(None, None, &both()).unwrap(),
+        ] {
+            assert!(decision.config_changes(true).is_empty(), "{decision:?}");
         }
-    }
-
-    #[test]
-    fn with_nothing_usable_no_earlier_choice_stands_in() {
-        let chosen = MeterFile {
-            v: 1,
-            meter: Some(MeterId::Ccusage),
-            binary: Some(PathBuf::from("/opt/homebrew/bin/ccusage")),
-            only_one_found: false,
-        };
-        // It is gone and nothing else can be used: were the file kept, every
-        // run would be refused while `install` said the ledger alone gates.
-        let decision = decide(None, Some(&chosen), None, &[]).unwrap();
-        assert_eq!(decision, Decision::NoneFound);
-        assert_eq!(decision.in_effect(), None);
-        assert_eq!(decision.record(), Record::Remove);
-        // What a person said stays said.
-        assert_eq!(
-            Decision::NoneChosen.record(),
-            Record::Write(MeterFile {
-                v: 1,
-                meter: None,
-                binary: None,
-                only_one_found: false,
-            })
-        );
-    }
-
-    #[test]
-    fn the_config_file_decides_when_it_names_a_meter() {
-        assert_eq!(
-            decide(Some(MeterId::AgentUsage), None, None, &both()).unwrap(),
-            Decision::Config {
-                meter: MeterId::AgentUsage
-            }
-        );
-        let fail = decide(
-            Some(MeterId::AgentUsage),
-            None,
-            Some(Selection::Meter(MeterId::Ccusage)),
-            &both(),
-        )
-        .unwrap_err();
-        assert_eq!(fail.exit, Exit::Usage);
     }
 
     #[test]
     fn a_named_meter_must_be_there_and_usable() {
         let unusable = vec![found(MeterId::AgentUsage, "/x/usage-cli", Some("too old"))];
-        let fail = decide(
-            None,
-            None,
-            Some(Selection::Meter(MeterId::AgentUsage)),
-            &unusable,
-        )
-        .unwrap_err();
+        let fail =
+            decide(None, Some(Selection::Meter(MeterId::AgentUsage)), &unusable).unwrap_err();
         assert!(fail.message.contains("too old"), "{}", fail.message);
-        let fail = decide(
-            None,
-            None,
-            Some(Selection::Meter(MeterId::Ccusage)),
-            &unusable,
-        )
-        .unwrap_err();
+        let fail = decide(None, Some(Selection::Meter(MeterId::Ccusage)), &unusable).unwrap_err();
         assert!(fail.message.contains("--meter-binary"), "{}", fail.message);
     }
 
     #[test]
-    fn the_question_takes_a_number_a_name_or_nothing() {
-        let options = both();
-        let pick = |typed: &str| {
-            let mut output = Vec::new();
-            let result = ask_which(&options, &mut typed.as_bytes(), &mut output);
-            (result, String::from_utf8(output).unwrap())
-        };
-        let (choice, shown) = pick("\n");
-        assert_eq!(choice.unwrap(), Selection::Meter(MeterId::AgentUsage));
+    fn a_chosen_meter_that_is_not_here_is_what_is_still_to_do() {
+        let config = |text: &str| UserConfig::parse(text).unwrap().meter;
+        let file = Path::new("/c/config.toml");
+        let chose = config("schema = 1\nmeter.use = \"agent-usage\"");
+        let to_do = still_to_do(Some(MeterId::AgentUsage), &chose, &[], file).unwrap();
         assert!(
-            shown.contains("1) agent-usage") && shown.contains("2) ccusage"),
-            "{shown}"
+            to_do.contains("no usage-cli was found")
+                && to_do.contains("every run is refused")
+                && to_do.contains("[meter.agent-usage]"),
+            "{to_do}"
         );
-        assert_eq!(pick("2\n").0.unwrap(), Selection::Meter(MeterId::Ccusage));
+        let unusable = [found(MeterId::AgentUsage, "/x/usage-cli", Some("too old"))];
+        let to_do = still_to_do(Some(MeterId::AgentUsage), &chose, &unusable, file).unwrap();
+        assert!(
+            to_do.contains("/x/usage-cli cannot be used: too old"),
+            "{to_do}"
+        );
         assert_eq!(
-            pick("ccusage\n").0.unwrap(),
-            Selection::Meter(MeterId::Ccusage)
+            still_to_do(Some(MeterId::AgentUsage), &chose, &both(), file),
+            None
         );
-        assert_eq!(pick("none\n").0.unwrap(), Selection::NoMeter);
-        // A wrong answer is asked again; three of them, or no answer at all, is no choice.
+        // A path of its own that does not work is not saved by another copy.
+        let pinned = config(
+            "schema = 1\nmeter.use = \"agent-usage\"\n[meter.agent-usage]\nbinary = \"/gone/usage-cli\"",
+        );
+        let to_do = still_to_do(Some(MeterId::AgentUsage), &pinned, &both(), file).unwrap();
+        assert!(to_do.contains("/gone/usage-cli cannot be used"), "{to_do}");
+    }
+
+    #[test]
+    fn ccusage_is_still_to_do_until_its_limits_are_declared() {
+        let config = |text: &str| UserConfig::parse(text).unwrap().meter;
+        let file = Path::new("/c/config.toml");
+        let found = only_ccusage();
+        let to_do =
+            still_to_do(Some(MeterId::Ccusage), &config("schema = 1"), &found, file).unwrap();
+        assert!(
+            to_do.contains("claude_block_tokens and codex_day_tokens"),
+            "{to_do}"
+        );
+        let declared = config(
+            "schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300_000_000\ncodex_day_tokens = 50_000_000",
+        );
         assert_eq!(
-            pick("7\n2\n").0.unwrap(),
-            Selection::Meter(MeterId::Ccusage)
+            still_to_do(Some(MeterId::Ccusage), &declared, &found, file),
+            None
         );
-        assert_eq!(pick("7\n8\n9\n1\n").0.unwrap_err().exit, Exit::Usage);
-        assert_eq!(pick("").0.unwrap_err().exit, Exit::Usage);
+        assert_eq!(still_to_do(None, &declared, &[], file), None);
     }
 }

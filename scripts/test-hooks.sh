@@ -95,6 +95,12 @@ printf 'fn main() {}\n' >src/main.rs
 printf 'use std::process::Command;\npub fn spawn() { let _ = Command::new("claude"); }\n' >src/spawn.rs
 printf 'pub const SKILLS: &str = ".agents/skills";\n' >src/install/paths.rs
 printf 'pub fn home_override() -> Option<String> { std::env::var("CAHOOTS_STATE_DIR").ok() }\n' >src/env.rs
+# The layers as rule 11 draws them: the command layer prints and asks through
+# the TUI, and the TUI touches the terminal.
+mkdir -p src/cli src/tui
+printf 'pub fn emit(line: &str) { println!("{line}"); }\npub fn ask() -> bool { crate::tui::open() }\n' >src/cli.rs
+printf 'pub fn which() -> bool { crate::tui::open() }\n' >src/cli/questions.rs
+printf 'use std::io::IsTerminal;\npub fn open() -> bool { std::io::stderr().is_terminal() }\n' >src/tui/mod.rs
 git add -A
 git commit -qm 'chore: fixture'
 base=$(git rev-parse HEAD)
@@ -127,6 +133,11 @@ trips Cargo.toml 'reqwest = "0.12"'
 trips Cargo.toml '[dependencies.tokio]'
 trips .github/workflows/ci.yml '      - uses: actions/checkout@v7'
 trips .github/rulesets/main-pr-gate.json '{ "context": "build", "integration_id": 15368 }'
+trips src/gate.rs 'fn shout() { eprintln!("over the cap"); }'
+trips src/gate.rs 'fn answer() -> std::io::Stdin { std::io::stdin() }'
+trips src/gate.rs 'use std::io::IsTerminal;'
+trips src/tui/mod.rs 'use crate::meter::MeterId;'
+trips src/gate.rs 'use crate::tui::Rail;'
 printf '#!/bin/sh\n' >scripts/orphan.sh
 git add -A
 fails "$scripts/guard.sh" --staged

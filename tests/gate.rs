@@ -55,7 +55,9 @@ fn what_the_gate_does_not_understand_is_a_refusal() {
     }
     // A meter that is configured but not there.
     let world = World::new();
-    world.configure("[meter.agent-usage]\nbinary = \"/nonexistent/usage-cli\"");
+    world.configure(
+        "meter.use = \"agent-usage\"\n[meter.agent-usage]\nbinary = \"/nonexistent/usage-cli\"",
+    );
     assert_eq!(world.run("hello", &[]).code, 13);
 }
 

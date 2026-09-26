@@ -45,6 +45,14 @@ reasonable thing to allow, and a PR that bends one needs to say so up front
   callee's output.
 - **Everything learned stays local.**
 - **The dependency list is closed.** `#![forbid(unsafe_code)]`. No async.
+- **The interface and the logic are separate layers.** The logic returns
+  data and never touches the terminal. The JSON envelope (for agents) and
+  `src/tui` (for a person) present it, and only `src/cli` holds both
+  (`docs/ARCHITECTURE.md`).
+- **A question to a person is an arrow-key selector on the Clack rail,**
+  never a typed-in answer, and a flag answers it too. The settings page
+  (`cahoots settings`) is chosen with the keys the same way, and
+  `settings set` / `settings reset` do without it (`docs/TUI.md`).
 
 ## Pull requests
 

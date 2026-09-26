@@ -51,10 +51,20 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
    fingerprints the real paths around the whole suite and fails on any
    change. `mise run smoke` is the one exception to "no real harness", is
    local only, and says what it costs.
-9. **The dependency list is closed** (`Cargo.toml`, held by `guard.sh`). A new
-   crate is a change to this file first.
+9. **The dependency list is closed** (`Cargo.toml`, held to the list in
+   `scripts/guard.sh`). A new crate is a change to that list first, and its
+   PR says so up front.
 10. **`#![forbid(unsafe_code)]`**, synchronous code (`std::process`, threads,
     one channel — no async runtime), Unix only.
+11. **The interface and the logic are separate layers.** The logic (the
+    registry, the gate and its meters, runs, install, learning, the
+    settings) returns data: results, refusals, and, when it needs a person,
+    a question and a way to take the answer back. It never prints, prompts or looks at a
+    terminal. The interface presents that data and returns answers as data:
+    the JSON envelope for agents and scripts, and `src/tui` for a person. It
+    knows nothing of meters, gates or runs. Only the command layer
+    (`src/main.rs`, `src/cli.rs`, `src/cli/`) holds both.
+    `docs/ARCHITECTURE.md` draws the layers.
 
 The agent tier of verbs (`pick run resume wait status result cancel outcome
 notes review`) is what harnesses are told to allow. Adding a verb or a flag to that
@@ -63,6 +73,19 @@ tier is a threat-model change: update `docs/THREAT-MODEL.md` in the same PR.
 Exit codes are API (`src/exit.rs`, `cahoots exit-codes`). Codes 11–26 belong
 to the Agent Usage tracker's `usage-cli`; cahoots reuses its five `headroom`
 codes with their meanings and numbers its own from 30. Never renumber.
+
+## Talking to a person
+
+A question to a person is an interactive prompt on the Clack rail: arrow
+keys and Enter, never a typed-in answer. Every question also has a flag that
+answers it, because an agent or a script has no terminal to answer at.
+The settings are a page of their own, `cahoots settings`, on the whole
+screen, with `settings set` and `settings reset` as its flags; it writes
+config.toml in place, keeping the person's comments. `docs/TUI.md` is the
+design and its rules, and `src/tui` is its one implementation. A new
+question starts as data the logic returns, and its words live in
+`src/cli/questions.rs`; a new setting starts in config.toml and the catalog
+(`src/settings.rs`), and its words live in `src/cli/settings.rs`.
 
 ## Working here
 

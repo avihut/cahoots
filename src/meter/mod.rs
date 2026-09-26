@@ -9,8 +9,10 @@
 //!   cannot see a plan's limit, so the person declares one, in tokens.
 //!
 //! One meter is on at a time, beside the built-in ledger (`gate.rs`), which
-//! is always on. A `[meter.<id>]` table in the config file turns a meter on;
-//! without one, the meter `install` chose (`meter.json`) is on.
+//! is always on. `[meter] use` in config.toml says which; without it, the
+//! meter is the only one `install` found (`meter.json`), if it found just
+//! one. A `[meter.<id>]` table holds that meter's knobs, and turns nothing
+//! on.
 //!
 //! The set is closed. A meter is a variant here, its command lines built in
 //! code from typed values (hard rule 3) — never taken from a config file.
@@ -20,13 +22,14 @@ mod agent_usage;
 mod ccusage;
 pub mod detect;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 pub use agent_usage::AgentUsage;
@@ -94,11 +97,33 @@ impl FromStr for MeterId {
     }
 }
 
-/// What `install --meter` names: a meter, or none at all.
+/// A meter, or none at all: what `[meter] use` and `install --meter` name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
     Meter(MeterId),
     NoMeter,
+}
+
+impl Selection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Selection::Meter(id) => id.as_str(),
+            Selection::NoMeter => "none",
+        }
+    }
+
+    pub fn meter(self) -> Option<MeterId> {
+        match self {
+            Selection::Meter(id) => Some(id),
+            Selection::NoMeter => None,
+        }
+    }
+}
+
+impl fmt::Display for Selection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
 }
 
 impl FromStr for Selection {
@@ -116,6 +141,15 @@ impl FromStr for Selection {
     }
 }
 
+/// `use = "ccusage"` in config.toml.
+impl<'de> Deserialize<'de> for Selection {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        name.parse()
+            .map_err(|fail: Fail| serde::de::Error::custom(fail.message))
+    }
+}
+
 /// The meter in effect, with its settings.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "meter", rename_all = "kebab-case")]
@@ -124,13 +158,13 @@ pub enum UsageMeter {
     Ccusage(Ccusage),
 }
 
-/// Who turned the meter on.
+/// Why the meter in effect is the one on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Chosen {
-    /// A `[meter.<id>]` table in the config file.
+    /// A person chose it: `[meter] use` in config.toml.
     Config,
-    /// `cahoots install`, which found it (and asked, if it found several).
+    /// No one chose: it is the only one `cahoots install` found.
     Install,
 }
 
@@ -314,23 +348,42 @@ fn run(exe: &Exe, args: &[String]) -> Result<spawn::Output, String> {
     .map_err(|fail| fail.message)
 }
 
-/// What `meter.json` holds: the meter `install` chose. Its own file, written
-/// only by `install`, so the hand-written config is never rewritten.
+/// What `meter.json` holds: where `install` found each usage meter it can
+/// use on this machine. It is cahoots' record of the machine, written only by
+/// `install`. Which meter is used is a person's choice, and that lives in
+/// config.toml (`[meter] use`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterFile {
     pub v: u32,
-    /// `None`: a person chose to have no usage meter (`install --meter none`).
-    pub meter: Option<MeterId>,
-    pub binary: Option<PathBuf>,
-    /// Used because it was the only one found, not because a person chose
-    /// it: `install` chooses again each time, and asks once there is another.
-    #[serde(default)]
-    pub only_one_found: bool,
+    pub found: BTreeMap<MeterId, PathBuf>,
 }
 
 impl MeterFile {
-    /// `None` when `install` has never chosen.
+    pub const V: u32 = 2;
+
+    /// The file for what `install` found: each meter that can be used.
+    pub fn of(found: &[detect::Found]) -> MeterFile {
+        MeterFile {
+            v: MeterFile::V,
+            found: found
+                .iter()
+                .filter(|found| found.usable())
+                .map(|found| (found.meter, found.binary.clone()))
+                .collect(),
+        }
+    }
+
+    /// The meter found alone, which is on until a person chooses. With two
+    /// found, there is a choice to make, and nothing is on until it is made.
+    pub fn only(&self) -> Option<MeterId> {
+        match self.found.keys().collect::<Vec<_>>().as_slice() {
+            [only] => Some(**only),
+            _ => None,
+        }
+    }
+
+    /// `None` when `install` has never run.
     pub fn load(dirs: &Dirs) -> Res<Option<MeterFile>> {
         let path = dirs.meter_file();
         let text = match fs::read_to_string(&path) {
@@ -343,87 +396,60 @@ impl MeterFile {
                 )));
             }
         };
-        let file: MeterFile = serde_json::from_str(&text)
-            .map_err(|error| Fail::config(format!("{}: {error}", path.display())))?;
-        if file
-            .binary
-            .as_deref()
-            .is_some_and(|binary| !binary.is_absolute())
-        {
-            return Err(Fail::config(format!(
-                "{}: the meter's binary must be an absolute path",
+        let broken = |why: String| {
+            Fail::config(format!(
+                "{}: {why} — `cahoots install` writes it again",
                 path.display()
+            ))
+        };
+        let json: Value = serde_json::from_str(&text).map_err(|error| broken(error.to_string()))?;
+        if json["v"] != MeterFile::V {
+            return Err(broken(format!(
+                "written by another version of cahoots (v {})",
+                json["v"]
             )));
+        }
+        let file: MeterFile =
+            serde_json::from_value(json).map_err(|error| broken(error.to_string()))?;
+        if file.found.values().any(|binary| !binary.is_absolute()) {
+            return Err(broken("a meter's binary must be an absolute path".into()));
         }
         Ok(Some(file))
     }
 
     /// Only the `install` verb calls this, and that verb only runs from a
-    /// terminal: which meter judges the gate is a person's decision.
+    /// terminal.
     pub fn save(&self, dirs: &Dirs) -> Res<()> {
         crate::dirs::ensure_private_dir(&dirs.config)?;
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|error| Fail::internal(format!("cannot encode the meter choice: {error}")))?;
-        crate::run::record::write_private(&dirs.meter_file(), &json)
-    }
-
-    /// No choice at all, as before the first `install`: the ledger alone
-    /// gates runs. Like `save`, only `install` calls this.
-    pub fn remove(dirs: &Dirs) -> Res<()> {
-        let path = dirs.meter_file();
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(Fail::config(format!(
-                "cannot remove {}: {error}",
-                path.display()
-            ))),
-        }
+        let json = serde_json::to_vec_pretty(self).map_err(|error| {
+            Fail::internal(format!("cannot encode what install found: {error}"))
+        })?;
+        crate::run::record::write_private_atomic(&dirs.meter_file(), &json)
     }
 }
 
-/// The meter in effect: the one the config file turns on, else the one
-/// `install` chose, else none. A `[meter.<id>]` table with no `binary` takes
-/// the path `install` recorded for that same meter — and with neither, the
-/// meter refuses until one is pinned (`UsageMeter::resolve`).
-pub fn effective(config: &MeterConfig, chosen: Option<&MeterFile>) -> Option<(UsageMeter, Chosen)> {
-    let recorded = |id: MeterId| {
-        chosen
-            .filter(|file| file.meter == Some(id))
-            .and_then(|file| file.binary.clone())
+/// The meter in effect, and why: the one config.toml's `[meter] use` names,
+/// else the only one `install` found, else none. Its binary is the one its
+/// `[meter.<id>]` table names, else where `install` found it; with neither,
+/// the meter refuses until one is pinned (`UsageMeter::resolve`). Its knobs
+/// are that table's.
+pub fn effective(config: &MeterConfig, found: Option<&MeterFile>) -> Option<(UsageMeter, Chosen)> {
+    let (id, chosen) = match config.use_ {
+        Some(selection) => (selection.meter()?, Chosen::Config),
+        None => (found?.only()?, Chosen::Install),
     };
-    if let Some(table) = &config.agent_usage {
-        return Some((
-            UsageMeter::AgentUsage(AgentUsage::from_config(
-                table,
-                recorded(MeterId::AgentUsage),
-            )),
-            Chosen::Config,
-        ));
-    }
-    if let Some(table) = &config.ccusage {
-        return Some((
-            UsageMeter::Ccusage(Ccusage::from_config(table, recorded(MeterId::Ccusage))),
-            Chosen::Config,
-        ));
-    }
-    let file = chosen?;
-    let meter = match file.meter? {
+    let found_at = found.and_then(|file| file.found.get(&id).cloned());
+    let meter = match id {
         MeterId::AgentUsage => UsageMeter::AgentUsage(AgentUsage::from_config(
-            &Default::default(),
-            file.binary.clone(),
+            &config.agent_usage.clone().unwrap_or_default(),
+            found_at,
         )),
         MeterId::Ccusage => UsageMeter::Ccusage(Ccusage::from_config(
-            &Default::default(),
-            file.binary.clone(),
+            &config.ccusage.clone().unwrap_or_default(),
+            found_at,
         )),
     };
-    Some((meter, Chosen::Install))
-}
-
-/// The meter a config file turns on, if it turns one on.
-pub fn configured(config: &MeterConfig) -> Option<MeterId> {
-    effective(config, None).map(|(meter, _)| meter.id())
+    Some((meter, chosen))
 }
 
 /// `161_441_521` → `161M`: how token counts read in a message.
@@ -438,6 +464,8 @@ pub fn tokens(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::config::UserConfig;
 
@@ -458,49 +486,96 @@ mod tests {
         assert!("codexbar".parse::<Selection>().is_err());
     }
 
-    fn file(meter: Option<MeterId>, binary: &str) -> MeterFile {
+    fn found(entries: &[(MeterId, &str)]) -> MeterFile {
         MeterFile {
-            v: 1,
-            meter,
-            binary: Some(PathBuf::from(binary)),
-            only_one_found: false,
+            v: MeterFile::V,
+            found: entries
+                .iter()
+                .map(|(id, binary)| (*id, PathBuf::from(binary)))
+                .collect(),
         }
     }
 
     #[test]
-    fn the_config_file_outranks_what_install_chose() {
-        let chosen = file(Some(MeterId::AgentUsage), "/opt/usage-cli");
-        let none = UserConfig::parse("schema = 1").unwrap();
-        let (meter, by) = effective(&none.meter, Some(&chosen)).unwrap();
-        assert_eq!((meter.id(), by), (MeterId::AgentUsage, Chosen::Install));
-        assert_eq!(meter.binary(), Some(Path::new("/opt/usage-cli")));
+    fn a_person_s_choice_outranks_the_only_one_found() {
+        let only_ccusage = found(&[(MeterId::Ccusage, "/opt/homebrew/bin/ccusage")]);
+        let unchosen = UserConfig::parse("schema = 1").unwrap();
+        let (meter, by) = effective(&unchosen.meter, Some(&only_ccusage)).unwrap();
+        assert_eq!((meter.id(), by), (MeterId::Ccusage, Chosen::Install));
+        assert_eq!(meter.binary(), Some(Path::new("/opt/homebrew/bin/ccusage")));
 
-        let ccusage =
-            UserConfig::parse("schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300_000_000")
-                .unwrap();
-        let (meter, by) = effective(&ccusage.meter, Some(&chosen)).unwrap();
-        assert_eq!((meter.id(), by), (MeterId::Ccusage, Chosen::Config));
-        // The path install recorded belongs to another meter: not borrowed.
+        let chose = UserConfig::parse("schema = 1\n[meter]\nuse = \"agent-usage\"").unwrap();
+        let (meter, by) = effective(&chose.meter, Some(&only_ccusage)).unwrap();
+        assert_eq!((meter.id(), by), (MeterId::AgentUsage, Chosen::Config));
+        // Never found and never pinned: no binary, so it refuses until one is.
         assert_eq!(meter.binary(), None);
 
-        // The same meter: its table's knobs, install's path.
-        let chosen = file(Some(MeterId::Ccusage), "/opt/homebrew/bin/ccusage");
-        let (meter, _) = effective(&ccusage.meter, Some(&chosen)).unwrap();
-        assert_eq!(meter.binary(), Some(Path::new("/opt/homebrew/bin/ccusage")));
-        assert!(meter.watches(HarnessId::Claude) && !meter.watches(HarnessId::Codex));
+        let none = UserConfig::parse("schema = 1\n[meter]\nuse = \"none\"").unwrap();
+        assert!(effective(&none.meter, Some(&only_ccusage)).is_none());
     }
 
     #[test]
-    fn no_table_and_no_choice_is_no_meter() {
+    fn a_table_configures_its_meter_and_turns_nothing_on() {
+        let limits =
+            UserConfig::parse("schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300_000_000")
+                .unwrap();
+        assert!(effective(&limits.meter, None).is_none());
+        let both = found(&[
+            (
+                MeterId::AgentUsage,
+                "/Applications/AgentUsage.app/Contents/MacOS/usage-cli",
+            ),
+            (MeterId::Ccusage, "/opt/homebrew/bin/ccusage"),
+        ]);
+        assert!(
+            effective(&limits.meter, Some(&both)).is_none(),
+            "two found and none chosen: nothing is on until a person chooses"
+        );
+        // Chosen: its table's knobs, and the path install found.
+        let chosen = UserConfig::parse(
+            "schema = 1\nmeter.use = \"ccusage\"\n[meter.ccusage]\nclaude_block_tokens = 300_000_000",
+        )
+        .unwrap();
+        let (meter, _) = effective(&chosen.meter, Some(&both)).unwrap();
+        assert_eq!(meter.binary(), Some(Path::new("/opt/homebrew/bin/ccusage")));
+        assert!(meter.watches(HarnessId::Claude) && !meter.watches(HarnessId::Codex));
+        // A path in the table outranks the one found.
+        let pinned = UserConfig::parse(
+            "schema = 1\nmeter.use = \"ccusage\"\n[meter.ccusage]\nbinary = \"/usr/local/bin/ccusage\"",
+        )
+        .unwrap();
+        let (meter, _) = effective(&pinned.meter, Some(&both)).unwrap();
+        assert_eq!(meter.binary(), Some(Path::new("/usr/local/bin/ccusage")));
+    }
+
+    #[test]
+    fn with_no_choice_and_nothing_found_there_is_no_meter() {
         let none = UserConfig::parse("schema = 1").unwrap();
         assert!(effective(&none.meter, None).is_none());
-        let said_none = MeterFile {
-            v: 1,
-            meter: None,
-            binary: None,
-            only_one_found: false,
+        assert!(effective(&none.meter, Some(&found(&[]))).is_none());
+    }
+
+    #[test]
+    fn what_install_found_is_read_back_only_as_this_version_writes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            home: tmp.path().to_path_buf(),
+            config: tmp.path().join("config"),
+            state: tmp.path().join("state"),
+            overridden: true,
         };
-        assert!(effective(&none.meter, Some(&said_none)).is_none());
+        assert_eq!(MeterFile::load(&dirs).unwrap(), None);
+        let file = found(&[(MeterId::Ccusage, "/opt/homebrew/bin/ccusage")]);
+        file.save(&dirs).unwrap();
+        assert_eq!(MeterFile::load(&dirs).unwrap(), Some(file));
+        for old in [
+            json!({"v": 1, "meter": "ccusage", "binary": "/opt/homebrew/bin/ccusage"}),
+            json!({"v": 2, "found": {"ccusage": "ccusage"}}),
+        ] {
+            fs::write(dirs.meter_file(), old.to_string()).unwrap();
+            let fail = MeterFile::load(&dirs).unwrap_err();
+            assert!(fail.message.contains("cahoots install"), "{}", fail.message);
+        }
     }
 
     #[test]
