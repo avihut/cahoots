@@ -337,7 +337,8 @@ pub fn current(
             .collect();
         let pinned = user.and_then(|u| u.binary.clone());
         let programs = programs(pinned.as_deref(), on_path.iter().map(|p| (p, Source::Path)));
-        let first = on_path.first().cloned().map(Value::Program);
+        // What a run takes with none pinned: the first on PATH, as it is.
+        let first = spawn::find_on_path(name, path).map(Value::Program);
         all.push(Setting::new(
             Key::Binary(id),
             Kind::Program(programs),
@@ -998,6 +999,14 @@ mod tests {
         );
         assert_eq!(binary.value, Some(Value::Program(dirs[0].join("codex"))));
         assert_eq!(binary.origin, Origin::Default);
+        // With none pinned, what is shown is what a run would take: the first
+        // on PATH, even one the policy then refuses.
+        let path = std::env::join_paths(&dirs[1..]).unwrap();
+        let settings = current(&UserConfig::default(), None, Some(&path));
+        assert_eq!(
+            setting(&settings, "harness.codex.binary").value,
+            Some(Value::Program(dirs[1].join("codex")))
+        );
     }
 
     #[test]
