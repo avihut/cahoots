@@ -12,7 +12,7 @@ use crate::meter::Selection;
 use crate::meter::detect::Found;
 use crate::tui::{Choice, Colors, Keys, Rail};
 
-const NO_METER: &str = "only cahoots' own runs-per-hour limit";
+pub(super) const NO_METER: &str = "only cahoots' own runs-per-hour limit";
 
 /// `install`'s question: which of the usage meters found to use, or none.
 /// Asked before `install` writes anything, so leaving it writes nothing.

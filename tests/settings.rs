@@ -1,13 +1,204 @@
 //! `cahoots settings`, end to end at a terminal of its own, against a world
-//! of throwaway directories: one setting at a time from the command line,
-//! and what reaches config.toml.
+//! of throwaway directories: the page, one setting at a time from the command
+//! line, and what reaches config.toml.
 
 mod common;
 
 use std::fs;
 
-use common::World;
+use common::{Finished, World};
+use nix::sys::termios::LocalFlags;
 use serde_json::json;
+
+const DOWN: &[u8] = b"\x1b[B";
+const UP: &[u8] = b"\x1b[A";
+const LEFT: &[u8] = b"\x1b[D";
+const RIGHT: &[u8] = b"\x1b[C";
+const ENTER: &[u8] = b"\r";
+const TAB: &[u8] = b"\t";
+const ESC: &[u8] = b"\x1b";
+
+/// The terminal is as it was before the page: line by line and echoed, the
+/// cursor shown, lines wrapping, and the shell's own screen.
+fn given_back(after: &Finished) {
+    assert!(
+        after
+            .mode
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG),
+        "{:?}",
+        after.mode.local_flags
+    );
+    for (off, on) in [
+        ("\x1b[?25l", "\x1b[?25h"),
+        ("\x1b[?7l", "\x1b[?7h"),
+        ("\x1b[?1049h", "\x1b[?1049l"),
+    ] {
+        let (off, on) = (after.screen.rfind(off), after.screen.rfind(on));
+        assert!(off.is_some() && on > off, "{:?}", after.screen);
+    }
+}
+
+#[test]
+fn the_page_changes_a_setting_in_place_and_gives_the_terminal_back() {
+    let world = World::new();
+    world.configure("# Kept by hand.\nharness.codex.cap = 60");
+    let file = world.config.join("config.toml");
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    for shown in [" Claude Code", " Codex", " Usage meter", "• 60%"] {
+        terminal.wait_for(shown);
+    }
+    terminal.press(DOWN);
+    terminal.wait_for("❯ Usage cap");
+    terminal.press(ENTER);
+    terminal.wait_for("◀  75%  ▶");
+    terminal.press(LEFT);
+    terminal.wait_for("◀  70%  ▶");
+    terminal.press(LEFT);
+    terminal.wait_for("◀  65%  ▶");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [harness.claude] cap = 65");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    assert_eq!(
+        after.json["data"]["changed"],
+        json!([{"key": "harness.claude.cap", "value": 65, "origin": "config"}])
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("harness.claude.cap = 65\n")
+            && text.contains("# Kept by hand.\nharness.codex.cap = 60\n"),
+        "{text}"
+    );
+    given_back(&after);
+}
+
+#[test]
+fn closing_the_page_without_a_change_changes_nothing() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    // Into a box and out of it, then out of the page.
+    terminal.press(DOWN);
+    terminal.press(ENTER);
+    terminal.wait_for("◀  75%  ▶");
+    terminal.press(RIGHT);
+    terminal.wait_for("◀  80%  ▶");
+    terminal.press(ESC);
+    terminal.wait_for("↑↓ move · tab section");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    assert_eq!(after.json["data"]["changed"], json!([]));
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    given_back(&after);
+}
+
+#[test]
+fn enter_turns_a_target_on_and_off_again() {
+    let world = World::bare();
+    world.configure("");
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.press(TAB);
+    terminal.wait_for("Runs go to Codex only while this is on.");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [harness.codex] enabled = true");
+    assert!(
+        fs::read_to_string(&file)
+            .unwrap()
+            .contains("harness.codex.enabled = true\n")
+    );
+    terminal.press(ENTER);
+    terminal.wait_for("Took [harness.codex] enabled out of config.toml: back to off");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(
+        after.json["data"]["changed"],
+        json!([{"key": "harness.codex.enabled", "value": false, "origin": "default"}])
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn choosing_a_meter_writes_it_as_the_persons_choice() {
+    let world = World::new();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.press(TAB);
+    terminal.press(TAB);
+    terminal.wait_for("❯ Meter");
+    terminal.press(ENTER);
+    terminal.wait_for("● none ✓ (only cahoots' own runs-per-hour limit)");
+    terminal.press(UP);
+    terminal.wait_for("● ccusage (token counts");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [meter] use = \"ccusage\"");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    let text = fs::read_to_string(world.config.join("config.toml")).unwrap();
+    assert!(text.contains("\n[meter]\nuse = \"ccusage\"\n"), "{text}");
+}
+
+#[test]
+fn a_change_the_config_refuses_is_said_in_its_box_and_nothing_is_written() {
+    let world = World::new();
+    world.configure("harness.claude.abort_at = 85");
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.press(DOWN);
+    terminal.press(ENTER);
+    terminal.wait_for("◀  75%  ▶");
+    for shown in ["◀  80%  ▶", "◀  85%  ▶", "◀  90%  ▶"] {
+        terminal.press(RIGHT);
+        terminal.wait_for(shown);
+    }
+    terminal.press(ENTER);
+    terminal.wait_for("must be above the cap (90)");
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    terminal.press(ESC);
+    terminal.wait_for("↑↓ move · tab section");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.json["data"]["changed"], json!([]));
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn the_page_is_drawn_again_at_a_new_size() {
+    let world = World::new();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for(&format!("\x1b[2;1H\x1b[2K{}\x1b[3;1H", "─".repeat(100)));
+    terminal.resize(30, 60);
+    terminal.wait_for(&format!("\x1b[2;1H\x1b[2K{}\x1b[3;1H", "─".repeat(60)));
+    terminal.wait_for("\x1b[30;1H");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    given_back(&after);
+}
+
+#[test]
+fn a_config_that_does_not_parse_is_said_before_any_page() {
+    let world = World::new();
+    fs::write(
+        world.config.join("config.toml"),
+        "schema = 1\n[harness.codex\n",
+    )
+    .unwrap();
+    let after = world.at_terminal(&["settings"]).finish();
+    assert_eq!(after.code, 34, "{}", after.json);
+    assert!(!after.screen.contains("\x1b[?1049h"), "{:?}", after.screen);
+}
 
 #[test]
 fn set_writes_one_key_among_the_others_and_reset_takes_it_out() {

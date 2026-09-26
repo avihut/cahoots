@@ -51,7 +51,7 @@ impl<'a, W: Write> Rail<'a, W> {
             }
             let pressed = keys.pressed();
             if pressed.is_empty() {
-                state = state.press(Key::Cancel, choices.len());
+                state = state.press(Key::Quit, choices.len());
             }
             for key in pressed {
                 state = state.press(key, choices.len());

@@ -16,28 +16,41 @@ pub enum Select {
 impl Select {
     /// Opens on the first choice, the one Enter alone takes.
     pub fn new() -> Select {
-        Select::Open { highlighted: 0 }
+        Select::at(0)
+    }
+
+    /// Opens on this choice: the one a setting has now.
+    pub fn at(highlighted: usize) -> Select {
+        Select::Open { highlighted }
     }
 
     /// What `key` does among `count` choices. Up from the first is the last,
-    /// and down from the last is the first, as in Clack. Once it is over, no key
-    /// changes it.
+    /// and down from the last is the first, as in Clack, where ← and → move
+    /// too. Once it is over, no key changes it.
     pub fn press(self, key: Key, count: usize) -> Select {
         let Select::Open { highlighted } = self else {
             return self;
         };
         match key {
-            Key::Up => Select::Open {
+            Key::Up | Key::Left => Select::Open {
                 highlighted: (highlighted + count - 1) % count,
             },
-            Key::Down => Select::Open {
+            Key::Down | Key::Right => Select::Open {
                 highlighted: (highlighted + 1) % count,
             },
             Key::Enter => Select::Answered {
                 chosen: highlighted,
             },
-            Key::Cancel => Select::Left { highlighted },
-            Key::Other => self,
+            Key::Cancel | Key::Quit => Select::Left { highlighted },
+            _ => self,
+        }
+    }
+
+    /// The choice highlighted now, answered or not.
+    pub fn highlighted(self) -> usize {
+        match self {
+            Select::Open { highlighted } | Select::Left { highlighted } => highlighted,
+            Select::Answered { chosen } => chosen,
         }
     }
 
@@ -76,6 +89,15 @@ mod tests {
         );
         assert_eq!(after(&[Key::Up]), Select::Open { highlighted: 2 });
         assert_eq!(
+            after(&[Key::Right, Key::Right, Key::Left]),
+            Select::Open { highlighted: 1 },
+            "← and → are ↑ and ↓"
+        );
+        assert_eq!(
+            Select::at(2).press(Key::Down, 3),
+            Select::Open { highlighted: 0 }
+        );
+        assert_eq!(
             after(&[Key::Down, Key::Other]),
             Select::Open { highlighted: 1 }
         );
@@ -89,6 +111,7 @@ mod tests {
         assert_eq!(answered.press(Key::Down, 3), answered);
         let left = after(&[Key::Down, Key::Cancel]);
         assert_eq!(left, Select::Left { highlighted: 1 });
+        assert_eq!(after(&[Key::Quit]), Select::Left { highlighted: 0 });
         assert_eq!(left.answer(), None);
         assert!(left.is_over() && answered.is_over() && !Select::new().is_over());
     }

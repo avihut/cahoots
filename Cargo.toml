@@ -33,7 +33,7 @@ toml = "1"
 # Edits config.toml in place (`cahoots settings`, `enable`, `install`), so a
 # person's comments and layout survive. It shares toml's parser and writer.
 toml_edit = "0.25"
-nix = { version = "0.31", features = ["user", "fs", "signal", "process", "term", "poll"] }
+nix = { version = "0.31", features = ["user", "fs", "signal", "process", "term", "poll", "event"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

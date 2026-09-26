@@ -365,12 +365,16 @@ pub fn path_str(path: &Path) -> &str {
 /// stderr, and stdout piped apart, as in `cahoots install | jq`. What the
 /// terminal shows is collected as it comes, so a test can wait for a question,
 /// press keys, and then read the screen, the JSON, and the terminal's mode.
+/// Like a real terminal, it answers when it is asked where its cursor is
+/// (`ESC [ 6 n`): at its far corner, which is its size.
 pub struct AtTerminal {
     child: std::process::Child,
     master: Arc<OwnedFd>,
     /// Kept open, to read the terminal's mode once the command is gone.
     slave: OwnedFd,
     shown: Arc<Mutex<Vec<u8>>>,
+    /// Rows and columns.
+    size: Arc<Mutex<(u16, u16)>>,
     done: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
@@ -401,12 +405,27 @@ impl AtTerminal {
         let child = command.spawn().expect("cahoots starts");
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
+        let size = Arc::new(Mutex::new((size.ws_row, size.ws_col)));
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
-            let (master, shown, done) = (master.clone(), shown.clone(), done.clone());
+            let (master, shown, size, done) =
+                (master.clone(), shown.clone(), size.clone(), done.clone());
             std::thread::spawn(move || {
+                let mut answered = 0;
                 while !done.load(Ordering::Relaxed) {
                     drain(&master, &shown, 50);
+                    let asked = shown
+                        .lock()
+                        .unwrap()
+                        .windows(4)
+                        .filter(|bytes| bytes == b"\x1b[6n")
+                        .count();
+                    for _ in answered..asked {
+                        let (rows, cols) = *size.lock().unwrap();
+                        let answer = format!("\x1b[{rows};{cols}R");
+                        let _ = nix::unistd::write(&*master, answer.as_bytes());
+                    }
+                    answered = asked;
                 }
             })
         };
@@ -415,9 +434,18 @@ impl AtTerminal {
             master,
             slave: pty.slave,
             shown,
+            size,
             done,
             reader: Some(reader),
         }
+    }
+
+    /// The terminal is `rows` by `cols` now: it says so the way a terminal
+    /// does, with SIGWINCH, and answers the next size question with it.
+    pub fn resize(&self, rows: u16, cols: u16) {
+        *self.size.lock().unwrap() = (rows, cols);
+        let pid = nix::unistd::Pid::from_raw(self.child.id() as i32);
+        nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGWINCH).expect("SIGWINCH");
     }
 
     pub fn screen(&self) -> String {

@@ -2,6 +2,9 @@
 //! state (`docs/TUI.md` has the full vocabulary). Text in, lines out: nothing
 //! here reads a key or knows a terminal.
 
+mod canvas;
+pub(super) mod page;
+
 use super::Choice;
 use super::select::Select;
 
