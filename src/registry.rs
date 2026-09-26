@@ -93,7 +93,7 @@ pub const DEFAULT_MAX_DATA_AGE_SECS: u64 = 900;
 
 /// Ten points above the cap, never at 100 if it can be helped (a plan that is
 /// fully used has already cut the user off), and always above the cap.
-fn default_abort_at(cap: u8) -> u8 {
+pub fn default_abort_at(cap: u8) -> u8 {
     cap.saturating_add(10)
         .min(99)
         .max(cap.saturating_add(1))

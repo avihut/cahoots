@@ -8,6 +8,10 @@
 //! A person may edit the file by hand at any moment, so each change reads it
 //! afresh. A file that does not parse is refused and left alone: its person
 //! may be halfway through an edit.
+//!
+//! One thing can move. toml_edit keeps a table's keys together, so dotted
+//! keys of one table that another table's split up (`a.x`, `b.y`, `a.z`)
+//! come back together (`a.x`, `a.z`, `b.y`), each with its own comments.
 
 use std::fmt;
 use std::fs;
@@ -17,7 +21,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, InlineTable, Item, KeyMut, RawString, Table, TableLike, Value};
 
 use super::{SCHEMA, UserConfig};
-use crate::exit::{Fail, Res};
+use crate::exit::{Exit, Fail, Res};
 
 /// Where a key sits: the tables it is in, then its own name, written the way
 /// a dotted key is (`harness.codex.cap`). Every key cahoots edits is a bare
@@ -52,6 +56,10 @@ pub enum Change {
 /// Makes `changes` to the file (a missing one starts as `schema = 1`) and
 /// returns the config it now holds. Nothing is written unless the result is a
 /// config cahoots accepts, and nothing at all when the changes change nothing.
+///
+/// A refusal says whose it is: `Usage` when the file was a good config and
+/// the change is what it refuses, `Config` when the file was not good to
+/// begin with.
 pub fn apply(file: &Path, changes: &[Change]) -> Res<UserConfig> {
     let (text, existed) = match fs::read_to_string(file) {
         Ok(text) => (text, true),
@@ -82,7 +90,13 @@ pub fn apply(file: &Path, changes: &[Change]) -> Res<UserConfig> {
         }
     }
     let edited = doc.to_string();
-    let config = UserConfig::parse(&edited)?;
+    let config = UserConfig::parse(&edited).map_err(|fail| {
+        if UserConfig::parse(&text).is_ok() {
+            Fail::new(Exit::Usage, fail.message)
+        } else {
+            fail
+        }
+    })?;
     if !existed || edited != text {
         if let Some(dir) = file.parent() {
             crate::dirs::ensure_private_dir(dir)?;
@@ -539,7 +553,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::exit::Exit;
     use crate::model::HarnessId;
 
     fn set(path: &str, value: impl Into<Value>) -> Change {
@@ -590,6 +603,24 @@ mod tests {
         assert!(capped.ends_with("\n[review]\nenabled = true\n"), "{capped}");
         // And taking out what was put in gives back the file it was.
         assert_eq!(edited(&on, &[remove("harness.codex.cap")]), DOTTED);
+    }
+
+    #[test]
+    fn dotted_keys_that_others_split_up_come_back_together() {
+        let text = "schema = 1\n\
+            harness.claude.cap = 50\n\
+            # Codex\n\
+            harness.codex.cap = 60\n\
+            harness.claude.max_concurrent = 2\n";
+        assert_eq!(
+            edited(text, &[set("harness.codex.max_concurrent", 3_i64)]),
+            "schema = 1\n\
+             harness.claude.cap = 50\n\
+             harness.claude.max_concurrent = 2\n\
+             # Codex\n\
+             harness.codex.cap = 60\n\
+             harness.codex.max_concurrent = 3\n"
+        );
     }
 
     #[test]
@@ -768,31 +799,42 @@ mod tests {
     fn a_refused_edit_leaves_the_file_as_it_was() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("config.toml");
-        for (text, change, why) in [
+        for (text, change, exit, why) in [
             (
                 "schema = 1\n[harness.codex]\ncap = 80\n",
                 set("harness.codex.abort_at", 70_i64),
+                Exit::Usage,
                 "must be above the cap",
             ),
             (
                 "schema = 1\n[harness.codex]\ncap = 80\n",
                 set("harness.codex.cap", 101_i64),
+                Exit::Usage,
+                "must be 1–100",
+            ),
+            // A file that was no good before the change is its own problem.
+            (
+                "schema = 1\n[harness.codex]\ncap = 0\n",
+                set("harness.codex.billing", "api"),
+                Exit::Config,
                 "must be 1–100",
             ),
             (
                 "schema = 1\n[harness.codex\ncap = 80\n",
                 set("harness.codex.cap", 60_i64),
+                Exit::Config,
                 "does not parse at line 2",
             ),
             (
                 "schema = 1\nharness = 3\n",
                 set("harness.codex.cap", 60_i64),
+                Exit::Config,
                 "`harness` is not a table",
             ),
         ] {
             fs::write(&file, text).unwrap();
             let fail = apply(&file, &[change]).unwrap_err();
-            assert_eq!(fail.exit, Exit::Config);
+            assert_eq!(fail.exit, exit, "{text}");
             assert!(fail.message.contains(why), "{}", fail.message);
             assert_eq!(fs::read_to_string(&file).unwrap(), text);
         }

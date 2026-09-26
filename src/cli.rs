@@ -12,6 +12,7 @@
 //! JSON envelope.
 
 mod questions;
+mod settings;
 
 use clap::{Parser, Subcommand};
 
@@ -163,6 +164,11 @@ pub enum Verb {
     },
     /// Print the skill this version installs
     Skill,
+    /// See and change every setting: a page at the terminal, or one at a time
+    Settings {
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
+    },
     /// Allow a harness to be used as a target (a run sends it repository content)
     Enable {
         harness: HarnessId,
@@ -217,6 +223,19 @@ pub enum ReviewAction {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+pub enum SettingsAction {
+    /// Set one: `cahoots settings set harness.codex.cap 60`
+    Set {
+        /// Its path in config.toml, as `cahoots settings` lists them
+        key: String,
+        /// In config.toml's units: on/off, a number, a path, or harness:model:effort,…
+        value: String,
+    },
+    /// Put one back to its default, which takes it out of config.toml
+    Reset { key: String },
+}
+
+#[derive(Debug, Clone, Subcommand)]
 pub enum LearnAction {
     /// What has been learned, and from how much
     List,
@@ -242,7 +261,7 @@ pub fn tier_of(name: &str) -> Option<Tier> {
     Some(match name {
         "pick" | "run" | "resume" | "wait" | "status" | "result" | "cancel" | "outcome"
         | "notes" | "review" => Tier::Agent,
-        "install" | "uninstall" | "enable" | "learn" | "registry" => Tier::Human,
+        "install" | "uninstall" | "settings" | "enable" | "learn" | "registry" => Tier::Human,
         "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
         "__supervise" => Tier::Internal,
         _ => return None,
@@ -265,6 +284,7 @@ impl Verb {
             Verb::Install { .. } => "install",
             Verb::Uninstall { .. } => "uninstall",
             Verb::Skill => "skill",
+            Verb::Settings { .. } => "settings",
             Verb::Enable { .. } => "enable",
             Verb::Learn { .. } => "learn",
             Verb::Registry => "registry",
@@ -340,6 +360,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             timeout_secs: timeout,
         }),
         Verb::Pick { role, to, caller } => client::pick_target(role, caller, to),
+        Verb::Settings { action } => settings::settings(action),
         Verb::Enable { harness, off } => {
             let enabled = crate::registry::set_enabled(&Dirs::resolve()?, harness, !off)?;
             ok(serde_json::json!({ "enabled": enabled }))
@@ -599,6 +620,9 @@ mod tests {
             vec!["cahoots", "uninstall"],
             vec!["cahoots", "enable", "codex"],
             vec!["cahoots", "registry"],
+            vec!["cahoots", "settings"],
+            vec!["cahoots", "settings", "set", "harness.codex.cap", "60"],
+            vec!["cahoots", "settings", "reset", "harness.codex.cap"],
         ] {
             let verb = Cli::try_parse_from(argv).unwrap().verb;
             let fail = refusal(&verb, false).expect("refused without a terminal");

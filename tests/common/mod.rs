@@ -168,17 +168,20 @@ impl World {
     }
 
     fn write_config(&self) {
-        let enabled: String = self
-            .enabled
-            .borrow()
+        let enabled = self.enabled.borrow();
+        let harness: String = ["claude", "codex"]
             .iter()
-            .map(|id| format!("harness.{id}.enabled = true\n"))
+            .map(|id| {
+                let on = if enabled.iter().any(|e| e == id) {
+                    format!("harness.{id}.enabled = true\n")
+                } else {
+                    String::new()
+                };
+                format!("harness.{id}.binary = {:?}\n{on}", self.bin.join(id))
+            })
             .collect();
         let text = format!(
-            "schema = 1\nharness.claude.binary = {:?}\nharness.codex.binary = {:?}\n{enabled}\
-             limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n",
-            self.bin.join("claude"),
-            self.bin.join("codex"),
+            "schema = 1\n{harness}limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n",
             self.extra.borrow(),
         );
         fs::write(self.config.join("config.toml"), text).unwrap();
