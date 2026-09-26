@@ -82,6 +82,16 @@ pub(super) fn decode(bytes: &[u8]) -> Vec<Key> {
     keys
 }
 
+/// The size the terminal's last answer in `bytes` says, as columns and rows:
+/// an answer can come late, among keys.
+pub(super) fn last_size(bytes: &[u8]) -> Option<(u16, u16)> {
+    (0..bytes.len())
+        .rev()
+        .filter_map(|at| size_report(&bytes[at..]))
+        .find(|&(_, rows, cols)| rows > 0 && cols > 0)
+        .map(|(_, rows, cols)| (cols, rows))
+}
+
 /// The terminal's answer to "where is the cursor", `ESC [ rows ; cols R`, at
 /// the start of `bytes`: its length, and the two numbers.
 pub(super) fn size_report(bytes: &[u8]) -> Option<(usize, u16, u16)> {
@@ -147,6 +157,18 @@ mod tests {
         assert_eq!(size_report(b"\x1b[40;120Rx"), Some((9, 40, 120)));
         assert_eq!(size_report(b"\x1b[1;5A"), None);
         assert_eq!(decode(b"\x1b[B\x1b[40;120R\r"), [Down, Enter]);
+    }
+
+    #[test]
+    fn a_late_size_answer_among_keys_still_says_the_size() {
+        assert_eq!(last_size(b"\x1b[B\x1b[40;120R\r"), Some((120, 40)));
+        assert_eq!(
+            last_size(b"\x1b[24;80R\x1b[30;100R"),
+            Some((100, 30)),
+            "the last answer is the size now"
+        );
+        assert_eq!(last_size(b"\x1b[0;0R"), None, "no size at all");
+        assert_eq!(last_size(b"\x1b[B\r"), None);
     }
 
     #[test]

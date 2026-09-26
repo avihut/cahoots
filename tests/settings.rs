@@ -5,6 +5,7 @@
 mod common;
 
 use std::fs;
+use std::time::Duration;
 
 use common::{Finished, World};
 use nix::sys::termios::LocalFlags;
@@ -181,6 +182,19 @@ fn the_page_is_drawn_again_at_a_new_size() {
     terminal.resize(30, 60);
     terminal.wait_for(&format!("\x1b[2;1H\x1b[2K{}\x1b[3;1H", "─".repeat(60)));
     terminal.wait_for("\x1b[30;1H");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    given_back(&after);
+}
+
+#[test]
+fn a_terminal_that_answers_its_size_late_still_gets_the_page_at_its_size() {
+    let world = World::new();
+    // Far past the 300 ms the page waits: it is drawn at 80×24 first, and at
+    // the terminal's own 100 columns once the answer comes.
+    let terminal = world.at_slow_terminal(&["settings"], Duration::from_millis(600));
+    terminal.wait_for(&format!("\x1b[2;1H\x1b[2K{}\x1b[3;1H", "─".repeat(100)));
     terminal.press(ESC);
     let after = terminal.finish();
     assert_eq!(after.code, 0, "{}", after.json);

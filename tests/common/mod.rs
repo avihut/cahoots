@@ -256,6 +256,16 @@ impl World {
 
     /// `at_terminal`, with `env` set on top.
     pub fn at_terminal_with(&self, args: &[&str], env: &[(&str, &str)]) -> AtTerminal {
+        AtTerminal::start(self.terminal_command(args, env), Duration::ZERO)
+    }
+
+    /// `at_terminal`, at a terminal that answers where its cursor is only
+    /// after `delay`, as one over a slow connection does.
+    pub fn at_slow_terminal(&self, args: &[&str], delay: Duration) -> AtTerminal {
+        AtTerminal::start(self.terminal_command(args, &[]), delay)
+    }
+
+    fn terminal_command(&self, args: &[&str], env: &[(&str, &str)]) -> StdCommand {
         let mut command = self.cahoots_std();
         command
             .args(args)
@@ -263,7 +273,7 @@ impl World {
             .env("NO_COLOR", "1")
             .env("TERM", "xterm-256color")
             .envs(env.iter().copied());
-        AtTerminal::start(command)
+        command
     }
 
     fn cahoots_std(&self) -> StdCommand {
@@ -390,7 +400,9 @@ pub struct Finished {
 }
 
 impl AtTerminal {
-    pub fn start(mut command: StdCommand) -> AtTerminal {
+    /// Starts `command` at the terminal, which answers a size question after
+    /// `delay`.
+    pub fn start(mut command: StdCommand, delay: Duration) -> AtTerminal {
         let size = Winsize {
             ws_row: 24,
             ws_col: 100,
@@ -421,6 +433,7 @@ impl AtTerminal {
                         .filter(|bytes| bytes == b"\x1b[6n")
                         .count();
                     for _ in answered..asked {
+                        std::thread::sleep(delay);
                         let (rows, cols) = *size.lock().unwrap();
                         let answer = format!("\x1b[{rows};{cols}R");
                         let _ = nix::unistd::write(&*master, answer.as_bytes());

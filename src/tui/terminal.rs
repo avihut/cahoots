@@ -198,7 +198,8 @@ impl WholeScreen {
     /// Keys, or word that the screen is a new size.
     fn pressed(&mut self) -> Vec<Key> {
         if !self.pending.is_empty() {
-            return keys_in(std::mem::take(&mut self.pending));
+            let pending = std::mem::take(&mut self.pending);
+            return self.keys_and_sizes(pending);
         }
         loop {
             let (typed, resized) = {
@@ -227,14 +228,31 @@ impl WholeScreen {
                 }
                 self.measure();
                 let mut keys = vec![Key::Resize(self.size.0, self.size.1)];
-                keys.extend(keys_in(std::mem::take(&mut self.pending)));
+                let pending = std::mem::take(&mut self.pending);
+                keys.extend(self.keys_and_sizes(pending));
                 return keys;
             }
             if typed {
                 // Nothing to read is the input ending.
-                return keys_in(read_some());
+                return self.keys_and_sizes(read_some());
             }
         }
+    }
+
+    /// The keys in `bytes`, after the size, when the terminal answered the
+    /// size question in them: an answer that came too late for `measure`
+    /// still sizes the page, as over a slow connection it does.
+    fn keys_and_sizes(&mut self, mut bytes: Vec<u8>) -> Vec<Key> {
+        if bytes == [0x1b] && readable(Duration::from_millis(30)) {
+            bytes.extend(read_some());
+        }
+        let mut keys = Vec::new();
+        if let Some((cols, rows)) = keys::last_size(&bytes) {
+            self.size = (cols, rows);
+            keys.push(Key::Resize(cols, rows));
+        }
+        keys.extend(keys::decode(&bytes));
+        keys
     }
 }
 
