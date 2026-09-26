@@ -77,7 +77,7 @@ pub fn doctor() -> Res<Envelope> {
             Status::Warn,
             format!(
                 "no longer read: a target is on when its table in {} says `enabled = true` — \
-                 `cahoots enable <harness>` writes that. Then delete {}",
+                 `cahoots enable <harness>` or `cahoots settings` writes that. Then delete {}",
                 dirs.config_file().display(),
                 dirs.config.join("enabled.json").display()
             ),
@@ -184,8 +184,8 @@ pub fn doctor() -> Res<Envelope> {
             "meter",
             Status::Warn,
             "no usage meter — only the built-in ledger gates runs, and it cannot see what you use \
-             outside cahoots. `cahoots install` looks for Agent Usage and ccusage, and `use` under \
-             [meter] in config.toml chooses one",
+             outside cahoots. `cahoots install` looks for Agent Usage and ccusage, and \
+             `cahoots settings` chooses one",
         )),
         Some(meter) => meter_checks(&mut checks, &registry, meter),
     }
@@ -308,7 +308,8 @@ fn ccusage_health(meter: &Ccusage, harness: HarnessId, answer: &Answer) -> (Stat
             Status::Warn,
             format!(
                 "{} tokens used {window}, and no limit declared: only Claude Code's own limit \
-                 notice stops a run — set {knob} under [meter.ccusage] to cap it",
+                 notice stops a run — set {knob} under [meter.ccusage] (`cahoots settings`) to \
+                 cap it",
                 tokens(used)
             ),
         ),
@@ -316,7 +317,7 @@ fn ccusage_health(meter: &Ccusage, harness: HarnessId, answer: &Answer) -> (Stat
             Status::Warn,
             format!(
                 "not measured: {} tokens used {window}, and no limit declared — set {knob} under \
-                 [meter.ccusage] to cap it",
+                 [meter.ccusage] (`cahoots settings`) to cap it",
                 tokens(used)
             ),
         ),

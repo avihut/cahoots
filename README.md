@@ -60,6 +60,7 @@ cahoots doctor          # what it found, and what is still missing
 cahoots install         # teach Claude Code and Codex to use cahoots
 cahoots enable codex    # let cahoots send work to Codex
 cahoots enable claude   # …and to Claude Code
+cahoots settings        # see and change every setting
 ```
 
 `install` adds cahoots' skills and a delegate agent to Claude Code and Codex,
@@ -74,9 +75,9 @@ has to reach the other agent's vendor.
 
 Every agent starts switched off as a target, because a run sends your code to
 that agent's vendor. Read [where the vendors stand](#your-accounts-and-the-vendors-terms)
-before you enable one. `install`, `enable` and the other commands that change
-what cahoots may do run only from a terminal, so an agent can't run them for
-you.
+before you enable one. `install`, `enable`, `settings` and the other commands
+that change what cahoots may do run only from a terminal, so an agent can't
+run them for you.
 
 ## Use it
 
@@ -122,18 +123,38 @@ your scripts have to parse prose.
 
 ## Configure
 
-Settings live in `~/.config/cahoots/config.toml`. All of it is optional, and
-`cahoots registry` shows what is in effect.
+`cahoots settings` shows every setting, what it is now and where that comes
+from. Move with the arrow keys, press Enter on one, and change it in the box
+that opens: pick from a list, step a number with ← and →, or put a role's
+agents in order. Enter saves it at once, and Esc closes the box, then the
+page.
+
+Settings live in `~/.config/cahoots/config.toml`, and that file stays yours.
+cahoots changes only the setting you changed, keeps your comments and the
+rest of your layout, and never writes a value the file couldn't hold; putting
+a setting back to its default takes it out of the file. Edit the file by hand
+whenever you like. All of it is optional, and `cahoots registry` shows what
+is in effect. Without the page:
+
+```sh
+cahoots settings set harness.codex.cap 80     # in the file's own units
+cahoots settings reset harness.codex.cap      # back to the default
+```
 
 ```toml
 schema = 1
 
 [harness.codex]
+enabled = true   # what `cahoots enable codex` writes
 cap = 80         # start a run only while Codex is under 80% of its plan (default 75)
 abort_at = 92    # stop a running one that goes past 92% (default: cap + 10)
 
 [harness.claude]
+enabled = true
 cap = 50
+
+[meter]
+use = "ccusage"            # the usage meter: agent-usage, ccusage or none
 
 [meter.ledger]
 max_runs_per_hour = 12     # per agent (the default)
@@ -181,14 +202,16 @@ cahoots reads your usage from one of these:
   `cahoots doctor` shows the counts so far, to size them by. cahoots always
   runs ccusage offline.
 
-`install` picks the one it finds, or asks you when it finds both, and
-remembers your answer. You pick with the arrow keys and Enter; Esc leaves
-without writing anything. If it found only one, it looks again each time you
-run `cahoots install`, and asks once it finds both. To change your answer, or
-to choose without being asked, run `cahoots install --meter agent-usage` (or
-`ccusage`, or `none`), and add `--meter-binary <path>` if install can't find
-it. A `[meter.<name>]` section in `config.toml` wins over what install picked,
-and while there is one, install doesn't ask.
+`install` looks for both. It uses the one it finds, or asks you when it finds
+both, and saves your answer in `config.toml` as `use` under `[meter]`. You
+pick with the arrow keys and Enter; Esc leaves without writing anything.
+Until you choose, the one it found is used, and it looks again each time you
+run `cahoots install`, asking once it finds both. Once you've chosen, it
+doesn't ask again. To choose without being asked, or to change your mind,
+pick the meter in `cahoots settings`, or run `cahoots install --meter
+agent-usage` (or `ccusage`, or `none`), with `--meter-binary <path>` if
+install can't find it. A `[meter.ccusage]` section only holds ccusage's
+settings: `use` is what turns a meter on.
 
 ## Learning from your own results
 

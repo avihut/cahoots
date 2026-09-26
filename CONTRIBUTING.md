@@ -50,7 +50,9 @@ reasonable thing to allow, and a PR that bends one needs to say so up front
   `src/tui` (for a person) present it, and only `src/cli` holds both
   (`docs/ARCHITECTURE.md`).
 - **A question to a person is an arrow-key selector on the Clack rail,**
-  never a typed-in answer, and a flag answers it too (`docs/TUI.md`).
+  never a typed-in answer, and a flag answers it too. The settings page
+  (`cahoots settings`) is chosen with the keys the same way, and
+  `settings set` / `settings reset` do without it (`docs/TUI.md`).
 
 ## Pull requests
 

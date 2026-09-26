@@ -331,7 +331,8 @@ pub fn still_to_do(
         to_do.push(format!(
             "config.toml chooses the {meter} meter, but {why}, so every run is refused until it \
              can be: install or update it, set its path as `binary` under [meter.{meter}], or \
-             choose another meter with `use` under [meter] — in {}.",
+             choose another meter with `use` under [meter] — `cahoots settings` does either, as \
+             does an edit to {}.",
             config_file.display()
         ));
     }
@@ -354,9 +355,9 @@ pub fn still_to_do(
         if let Some((missing, until)) = missing {
             to_do.push(format!(
                 "ccusage counts tokens and cannot see a plan's limit: set {missing} under \
-                 [meter.ccusage] in {} — the tokens that count as a whole plan, in a 5-hour block \
-                 for Claude Code and in a day for Codex. Until then {until}. `cahoots doctor` \
-                 shows the counts to size them by.",
+                 [meter.ccusage] in {} (`cahoots settings`) — the tokens that count as a whole \
+                 plan, in a 5-hour block for Claude Code and in a day for Codex. Until then \
+                 {until}. `cahoots doctor` shows the counts to size them by.",
                 config_file.display()
             ));
         }

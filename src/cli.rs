@@ -440,7 +440,8 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 format!(
                     "{} cahoots never edits a harness's permission rules: to let a harness delegate \
                      without a prompt, add the rules below yourself. Then `cahoots enable <harness>` \
-                     for each target you want, and `cahoots doctor` to check.",
+                     for each target you want (`cahoots settings` shows every setting), and \
+                     `cahoots doctor` to check.",
                     decision.sentence()
                 ),
             );

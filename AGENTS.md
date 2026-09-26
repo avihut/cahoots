@@ -57,9 +57,9 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
 10. **`#![forbid(unsafe_code)]`**, synchronous code (`std::process`, threads,
     one channel — no async runtime), Unix only.
 11. **The interface and the logic are separate layers.** The logic (the
-    registry, the gate and its meters, runs, install, learning) returns
-    data: results, refusals, and, when it needs a person, a question and a
-    way to take the answer back. It never prints, prompts or looks at a
+    registry, the gate and its meters, runs, install, learning, the
+    settings) returns data: results, refusals, and, when it needs a person,
+    a question and a way to take the answer back. It never prints, prompts or looks at a
     terminal. The interface presents that data and returns answers as data:
     the JSON envelope for agents and scripts, and `src/tui` for a person. It
     knows nothing of meters, gates or runs. Only the command layer
@@ -79,9 +79,13 @@ codes with their meanings and numbers its own from 30. Never renumber.
 A question to a person is an interactive prompt on the Clack rail: arrow
 keys and Enter, never a typed-in answer. Every question also has a flag that
 answers it, because an agent or a script has no terminal to answer at.
-`docs/TUI.md` is the design and its rules, and `src/tui` is its one
-implementation. A new question starts as data the logic returns, and its
-words live in `src/cli/questions.rs`.
+The settings are a page of their own, `cahoots settings`, on the whole
+screen, with `settings set` and `settings reset` as its flags; it writes
+config.toml in place, keeping the person's comments. `docs/TUI.md` is the
+design and its rules, and `src/tui` is its one implementation. A new
+question starts as data the logic returns, and its words live in
+`src/cli/questions.rs`; a new setting starts in config.toml and the catalog
+(`src/settings.rs`), and its words live in `src/cli/settings.rs`.
 
 ## Working here
 
