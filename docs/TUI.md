@@ -57,14 +57,16 @@ was decided:
 
 | Shape | Means | Color |
 |---|---|---|
-| `┌  title` | a conversation starts: the command that is asking | gray |
+| `┌  title` | a conversation starts: the command that is asking | the `┌` gray |
 | `│` | the rail every line hangs on | cyan while a question is open, gray once answered, red if left |
-| `◆  question` | the question being asked | cyan |
-| `●  choice (hint)` | the highlighted choice, and what it means | green; the hint dim |
+| `◆  question` | the question being asked | the `◆` cyan |
+| `●  choice (hint)` | the highlighted choice, and what it means | the `●` green, the hint dim |
 | `○  choice` | the other choices | dim |
-| `◇  question` | a question answered; the line below is the answer | green; the answer dim |
-| `■  question` | a question left; the line below is where it was | red; struck through |
-| `└  message` | the conversation's end: what was decided | gray; the message red if nothing was |
+| `◇  question` | a question answered; the line below is the answer | the `◇` green, the answer dim |
+| `■  question` | a question left; the line below is where it was | the `■` red, the choice dim and struck through |
+| `└  message` | the conversation's end: what was decided | the `└` gray, the message red if nothing was |
+
+Text is left in the terminal's own color unless the table says otherwise.
 
 Two spaces follow a symbol, and each choice takes one line. Only the
 highlighted choice shows its hint.
