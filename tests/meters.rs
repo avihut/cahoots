@@ -1,7 +1,8 @@
 //! The usage meters beyond the tracker's `headroom` contract (tests/gate.rs
 //! holds that one): ccusage behind the gate and the watchdog, the meter
-//! `install` chose, and how `install` finds one and picks — against fake
-//! binaries in throwaway directories, never the real ones.
+//! `install` chose, how `install` finds one and picks, and how it asks a
+//! person at a terminal — against fake binaries in throwaway directories,
+//! never the real ones.
 
 mod common;
 
@@ -11,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use cahoots::meter::detect::{self, Because, Decision, Found, Places, Record};
 use cahoots::meter::{MeterId, Selection};
-use common::{World, fake_at};
+use common::{Finished, World, fake_at};
+use nix::sys::termios::LocalFlags;
 use serde_json::{Value, json};
 
 const LIMITS: &str = "claude_block_tokens = 300_000_000\ncodex_day_tokens = 50_000_000";
@@ -551,4 +553,128 @@ fn the_copy_chosen_last_time_is_looked_at_first() {
     let chosen = machine.fake(&machine.root.join("elsewhere"), "ccusage", None);
     let found = detect::detect(&machine.places(), Some((MeterId::Ccusage, &chosen)));
     assert_eq!(found[0].binary, chosen);
+}
+
+// ── install: asking at a terminal ──
+
+/// Two meters `install` can use, both on this world's PATH: ccusage, and a
+/// `usage-cli` that answers `headroom`. Each is found on PATH before any
+/// Applications folder is looked in, so nothing outside the world is.
+fn two_meters(world: &World) {
+    fake_at(&world.bin.join("ccusage"));
+    fake_at(&world.bin.join("usage-cli"));
+    fs::write(
+        world.bin.join("usage-cli.plan"),
+        json!({"unguarded": {"code": 0, "percent": 12}}).to_string(),
+    )
+    .unwrap();
+}
+
+/// The terminal is as it was before the question: line by line and echoed,
+/// the cursor shown, lines wrapping.
+fn given_back(after: &Finished) {
+    assert!(
+        after
+            .mode
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG),
+        "{:?}",
+        after.mode.local_flags
+    );
+    for (off, on) in [("\x1b[?25l", "\x1b[?25h"), ("\x1b[?7l", "\x1b[?7h")] {
+        let (off, on) = (after.screen.rfind(off), after.screen.rfind(on));
+        assert!(off.is_some() && on > off, "{:?}", after.screen);
+    }
+}
+
+#[test]
+fn install_asks_at_the_terminal_and_the_arrow_keys_answer() {
+    let world = World::bare();
+    two_meters(&world);
+    let terminal = world.at_terminal(&["install"]);
+    terminal.wait_for("◆  Which usage meter should cahoots use?");
+    terminal.press(b"\x1b[B");
+    terminal.wait_for("● ccusage (token counts");
+    terminal.press(b"\r");
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.screen);
+    assert!(
+        after.json["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Usage meter: ccusage (you chose it)."),
+        "{}",
+        after.json
+    );
+    for shown in [
+        "┌  cahoots install",
+        "◇  Which usage meter should cahoots use?",
+        "│  ccusage",
+        "└  Usage meter: ccusage",
+    ] {
+        assert!(
+            after.screen.contains(shown),
+            "{shown:?} in {:?}",
+            after.screen
+        );
+    }
+    let chosen: Value =
+        serde_json::from_str(&fs::read_to_string(world.config.join("meter.json")).unwrap())
+            .unwrap();
+    assert_eq!(chosen["meter"], "ccusage");
+    assert_eq!(chosen["only_one_found"], false, "a person's answer");
+    given_back(&after);
+}
+
+#[test]
+fn leaving_the_question_writes_nothing_and_names_the_flag() {
+    let world = World::bare();
+    two_meters(&world);
+    let terminal = world.at_terminal(&["install"]);
+    terminal.wait_for("◆  Which usage meter should cahoots use?");
+    terminal.press(b"\x1b");
+    let after = terminal.finish();
+    assert_eq!(after.code, 2, "{}", after.screen);
+    assert!(
+        after.json["message"].as_str().unwrap().contains("--meter"),
+        "{}",
+        after.json
+    );
+    assert!(
+        after
+            .screen
+            .contains("■  Which usage meter should cahoots use?")
+            && after
+                .screen
+                .contains("└  No meter chosen, and nothing written"),
+        "{:?}",
+        after.screen
+    );
+    assert!(!world.config.join("meter.json").exists());
+    assert!(
+        !world.state.join("install-manifest.json").exists(),
+        "asked before anything was written"
+    );
+    given_back(&after);
+}
+
+#[test]
+fn with_no_terminal_to_ask_at_install_names_the_flag_instead() {
+    let world = World::bare();
+    two_meters(&world);
+    // A terminal on stdin, but TERM=dumb: nothing can be drawn on it.
+    let terminal = world.at_terminal_with(&["install"], &[("TERM", "dumb")]);
+    let after = terminal.finish();
+    assert_eq!(after.code, 2, "{}", after.screen);
+    let message = after.json["message"].as_str().unwrap();
+    assert!(
+        message.contains("asked at a terminal") && message.contains("--meter"),
+        "{message}"
+    );
+    assert!(
+        !after.screen.contains("◆"),
+        "nothing was drawn: {:?}",
+        after.screen
+    );
+    assert!(!world.config.join("meter.json").exists());
 }

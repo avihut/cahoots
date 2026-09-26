@@ -6,11 +6,19 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io::Read;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use assert_cmd::Command;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::pty::{Winsize, openpty};
+use nix::sys::termios::{Termios, tcgetattr};
 use serde_json::Value;
 
 pub struct World {
@@ -211,7 +219,29 @@ impl World {
     /// A `cahoots` command with a clean slate: this world's directories, and
     /// none of the harness markers the suite itself may be running under.
     pub fn cahoots(&self) -> Command {
-        let mut command = Command::cargo_bin("cahoots").unwrap();
+        Command::from_std(self.cahoots_std())
+    }
+
+    /// `cahoots <args>` at a terminal of its own (`AtTerminal`), with only this
+    /// world's bin directory on PATH, and color off so the screen reads as text.
+    pub fn at_terminal(&self, args: &[&str]) -> AtTerminal {
+        self.at_terminal_with(args, &[])
+    }
+
+    /// `at_terminal`, with `env` set on top.
+    pub fn at_terminal_with(&self, args: &[&str], env: &[(&str, &str)]) -> AtTerminal {
+        let mut command = self.cahoots_std();
+        command
+            .args(args)
+            .env("PATH", &self.bin)
+            .env("NO_COLOR", "1")
+            .env("TERM", "xterm-256color")
+            .envs(env.iter().copied());
+        AtTerminal::start(command)
+    }
+
+    fn cahoots_std(&self) -> StdCommand {
+        let mut command = StdCommand::new(env!("CARGO_BIN_EXE_cahoots"));
         command
             .current_dir(&self.work)
             .env("CAHOOTS_CONFIG_DIR", &self.config)
@@ -303,4 +333,127 @@ fn uuid_like() -> String {
 
 pub fn path_str(path: &Path) -> &str {
     path.to_str().unwrap()
+}
+
+/// A command run at a terminal of its own: a pseudo-terminal on its stdin and
+/// stderr, and stdout piped apart, as in `cahoots install | jq`. What the
+/// terminal shows is collected as it comes, so a test can wait for a question,
+/// press keys, and then read the screen, the JSON, and the terminal's mode.
+pub struct AtTerminal {
+    child: std::process::Child,
+    master: Arc<OwnedFd>,
+    /// Kept open, to read the terminal's mode once the command is gone.
+    slave: OwnedFd,
+    shown: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What a command left at its terminal.
+pub struct Finished {
+    pub code: i32,
+    pub json: Value,
+    /// Everything the terminal was sent, escapes and all.
+    pub screen: String,
+    /// The terminal's mode after the command was gone: what it was given back.
+    pub mode: Termios,
+}
+
+impl AtTerminal {
+    pub fn start(mut command: StdCommand) -> AtTerminal {
+        let size = Winsize {
+            ws_row: 24,
+            ws_col: 100,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let pty = openpty(&size, None::<&Termios>).expect("a pseudo-terminal");
+        command
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::piped());
+        let child = command.spawn().expect("cahoots starts");
+        let master = Arc::new(pty.master);
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (master, shown, done) = (master.clone(), shown.clone(), done.clone());
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    drain(&master, &shown, 50);
+                }
+            })
+        };
+        AtTerminal {
+            child,
+            master,
+            slave: pty.slave,
+            shown,
+            done,
+            reader: Some(reader),
+        }
+    }
+
+    pub fn screen(&self) -> String {
+        String::from_utf8_lossy(&self.shown.lock().unwrap()).into_owned()
+    }
+
+    /// Waits until the terminal has shown `text`.
+    pub fn wait_for(&self, text: &str) {
+        wait_until(&format!("the terminal shows {text:?}"), || {
+            self.screen().contains(text)
+        });
+    }
+
+    /// Types `keys` as a keyboard sends them: `b"\x1b[B"` is ↓, `b"\r"` Enter.
+    pub fn press(&self, keys: &[u8]) {
+        nix::unistd::write(&*self.master, keys).expect("the keys are typed");
+    }
+
+    /// Waits for the command to exit, and says what it left.
+    pub fn finish(mut self) -> Finished {
+        wait_until("the command exits", || {
+            self.child.try_wait().unwrap().is_some()
+        });
+        let code = self.child.wait().unwrap().code().expect("an exit code");
+        let mut stdout = String::new();
+        self.child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        self.done.store(true, Ordering::Relaxed);
+        self.reader.take().unwrap().join().unwrap();
+        // What it drew last may still be on its way.
+        drain(&self.master, &self.shown, 200);
+        let screen = self.screen();
+        let json = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+            panic!("stdout is not one JSON envelope ({error}): {stdout:?}\nscreen: {screen:?}")
+        });
+        Finished {
+            code,
+            json,
+            screen,
+            mode: tcgetattr(self.slave.as_fd()).expect("the terminal's mode"),
+        }
+    }
+}
+
+/// Reads what the terminal was sent until nothing more comes within `wait_ms`.
+fn drain(master: &OwnedFd, shown: &Mutex<Vec<u8>>, wait_ms: u16) {
+    let mut buf = [0u8; 4096];
+    loop {
+        let mut ready = [PollFd::new(master.as_fd(), PollFlags::POLLIN)];
+        if !matches!(poll(&mut ready, PollTimeout::from(wait_ms)), Ok(n) if n > 0) {
+            return;
+        }
+        match nix::unistd::read(master.as_fd(), &mut buf) {
+            Ok(read) if read > 0 => shown.lock().unwrap().extend_from_slice(&buf[..read]),
+            _ => {
+                std::thread::sleep(Duration::from_millis(wait_ms.into()));
+                return;
+            }
+        }
+    }
 }

@@ -18,6 +18,35 @@ harness N+1 is one registry entry and one installer target, not N new
 integrations. The caller is excluded at run time, not by maintaining N
 variants of the definitions.
 
+## Layers: the logic apart from the interface
+
+There are three layers, and only one of them holds both ends (`AGENTS.md`
+hard rule 11, held by `scripts/guard.sh`):
+
+- **The logic** is everything that decides or does: the registry, the gate
+  and its meters, runs, install, learning. It returns data: results,
+  refusals, and, when it needs a person, a *question* and a way to take the
+  answer back. For install's meter choice, `Decision::Ask { options }` goes
+  out and `detect::picked(selection, …)` takes the answer back. It never
+  prints, prompts or looks at a terminal. So every path through it runs the
+  same for an agent, a script or a person, and its tests need no terminal.
+  The supervisor, which runs detached, writes what it sees to its run's log
+  (`RunDir::log`), not to a stream.
+- **The interface** is how cahoots meets whoever called it. Agents and
+  scripts get one JSON envelope and an exit code that means something
+  (`src/exit.rs`, printed by `cli::emit`). A person at a terminal gets the
+  Clack rail (`src/tui`, designed in `docs/TUI.md`). It presents what it is
+  given, returns answers as plain data (which choice), and knows nothing of
+  meters, gates or runs.
+- **The command layer** is `src/main.rs`, `src/cli.rs` and `src/cli/`. It
+  parses the command line, calls the logic, and puts the logic's questions to
+  a person. `src/cli/questions.rs` holds their words and what each answer
+  means. It hands the answers back to the logic and prints the envelope.
+
+The TUI is layered the same way inside: the terminal itself, what its bytes
+mean, a prompt's state, how things look, and the conversation that runs them
+are separate files, and only the first touches a terminal.
+
 ## One run model (M1)
 
 A caller's tool call times out in minutes (Claude Code: 120 s by default, 600 s
@@ -198,8 +227,9 @@ fixes it for its own harness.
   the rules still missing and the file each belongs in; `doctor` checks them —
   and the installed copies' freshness — read-only.
 - **It chooses the usage meter** (see *The gate*) — before it writes a file,
-  so a question left unanswered leaves nothing half-done. The question goes to
-  stderr: stdout is the one JSON envelope, as for every verb. `--meter
+  so a question left unanswered leaves nothing half-done. It asks on the
+  Clack rail (`docs/TUI.md`), with the arrow keys, on stderr: stdout is the
+  one JSON envelope, as for every verb. `--meter
   <agent-usage|ccusage|none>` answers it in advance, and `--meter-binary`
   names a copy install would not find.
 

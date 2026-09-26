@@ -30,7 +30,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
-nix = { version = "0.31", features = ["user", "fs", "signal", "process"] }
+nix = { version = "0.31", features = ["user", "fs", "signal", "process", "term", "poll"] }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

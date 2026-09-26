@@ -122,6 +122,21 @@ while IFS= read -r script; do
     fi
 done < <(git ls-files -- 'scripts/*')
 
+# 10. The interface and the logic are separate layers (hard rule 11). The
+#     logic returns data and never touches the terminal; src/tui presents and
+#     knows nothing of the logic; only the command layer holds both.
+command_layer=(':!src/main.rs' ':!src/cli.rs' ':!src/cli')
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])(e?print(ln)?!|(stdin|stdout|stderr)\(\))|IsTerminal' -- \
+    src "${command_layer[@]}" ':!src/tui'); then
+    fail "the terminal is touched outside the interface (hard rule 11: the logic returns data; src/cli and src/tui show it)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE 'crate::' -- src/tui); then
+    fail "src/tui reaches into the logic (hard rule 11: the interface knows nothing of it)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])tui::' -- src "${command_layer[@]}" ':!src/tui'); then
+    fail "the logic reaches for the TUI (hard rule 11: only the command layer asks a person)" "$(where "$hits")"
+fi
+
 if [ "$failures" -gt 0 ]; then
     printf '\nguard: %d rule(s) tripped\n' "$failures" >&2
     exit 1

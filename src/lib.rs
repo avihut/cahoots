@@ -27,3 +27,4 @@ pub mod report;
 pub mod review;
 pub mod run;
 pub mod spawn;
+pub mod tui;

@@ -4,6 +4,10 @@
 //! chosen again each time, so a second one brings the question. A
 //! `[meter.<id>]` table in the config file outranks all of it.
 //!
+//! This is logic, so it decides and never asks (hard rule 11): the question
+//! goes out as `Decision::Ask`, and the answer comes back in through `picked`.
+//! The command layer puts it to the person (`src/cli/questions.rs`).
+//!
 //! Detection runs a candidate only after it passes the binary policy, and
 //! only with arguments that read: ccusage's `--version`, and the tracker's
 //! `headroom`, which answers from its digest (never the network, never a
@@ -11,7 +15,6 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -320,54 +323,6 @@ pub fn decide(
     })
 }
 
-/// Asks a person to pick one of `options`. The question goes to `output` —
-/// stderr, because stdout carries the one JSON envelope — and the answer is
-/// read from `input`. An empty answer takes the first option.
-pub fn ask_which(
-    options: &[Found],
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> Res<Selection> {
-    let _ = writeln!(
-        output,
-        "cahoots can read how much of each plan is used from more than one tool here:"
-    );
-    for (n, found) in options.iter().enumerate() {
-        let _ = writeln!(
-            output,
-            "  {}) {:<12} {}",
-            n + 1,
-            found.meter,
-            found.meter.summary()
-        );
-        let _ = writeln!(output, "     {:<12} {}", "", found.binary.display());
-    }
-    let refused = || {
-        Fail::new(
-            Exit::Usage,
-            "no meter chosen — `cahoots install --meter <agent-usage|ccusage|none>` chooses without asking",
-        )
-    };
-    for _ in 0..3 {
-        let _ = write!(output, "Which one should it use? [1]: ");
-        let _ = output.flush();
-        let mut line = String::new();
-        match input.read_line(&mut line) {
-            Ok(0) | Err(_) => return Err(refused()),
-            Ok(_) => {}
-        }
-        if let Some(selection) = answer(line.trim(), options) {
-            return Ok(selection);
-        }
-        let _ = writeln!(
-            output,
-            "  a number from 1 to {}, a name, or `none`",
-            options.len()
-        );
-    }
-    Err(refused())
-}
-
 /// What a person still has to do before the meter in effect caps anything:
 /// ccusage has no percentage until a limit is declared.
 pub fn still_to_do(
@@ -415,22 +370,6 @@ pub fn picked(selection: Selection, options: &[Found]) -> Res<Decision> {
             })
             .ok_or_else(|| Fail::new(Exit::Usage, format!("{meter} was not one of the choices"))),
     }
-}
-
-fn answer(text: &str, options: &[Found]) -> Option<Selection> {
-    let meter = if text.is_empty() {
-        options.first()?.meter
-    } else if text == "none" {
-        return Some(Selection::NoMeter);
-    } else if let Ok(n) = text.parse::<usize>() {
-        options.get(n.checked_sub(1)?)?.meter
-    } else {
-        options
-            .iter()
-            .find(|found| found.meter.as_str() == text)?
-            .meter
-    };
-    Some(Selection::Meter(meter))
 }
 
 #[cfg(test)]
@@ -654,34 +593,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(fail.message.contains("--meter-binary"), "{}", fail.message);
-    }
-
-    #[test]
-    fn the_question_takes_a_number_a_name_or_nothing() {
-        let options = both();
-        let pick = |typed: &str| {
-            let mut output = Vec::new();
-            let result = ask_which(&options, &mut typed.as_bytes(), &mut output);
-            (result, String::from_utf8(output).unwrap())
-        };
-        let (choice, shown) = pick("\n");
-        assert_eq!(choice.unwrap(), Selection::Meter(MeterId::AgentUsage));
-        assert!(
-            shown.contains("1) agent-usage") && shown.contains("2) ccusage"),
-            "{shown}"
-        );
-        assert_eq!(pick("2\n").0.unwrap(), Selection::Meter(MeterId::Ccusage));
-        assert_eq!(
-            pick("ccusage\n").0.unwrap(),
-            Selection::Meter(MeterId::Ccusage)
-        );
-        assert_eq!(pick("none\n").0.unwrap(), Selection::NoMeter);
-        // A wrong answer is asked again; three of them, or no answer at all, is no choice.
-        assert_eq!(
-            pick("7\n2\n").0.unwrap(),
-            Selection::Meter(MeterId::Ccusage)
-        );
-        assert_eq!(pick("7\n8\n9\n1\n").0.unwrap_err().exit, Exit::Usage);
-        assert_eq!(pick("").0.unwrap_err().exit, Exit::Usage);
     }
 }

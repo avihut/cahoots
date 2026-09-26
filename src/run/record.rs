@@ -5,7 +5,7 @@
 //! brief           what the callee was asked
 //! events.jsonl    the callee's stdout, verbatim
 //! final.md        the callee's answer
-//! supervisor.log  the supervisor's and the callee's stderr
+//! supervisor.log  what the supervisor saw, and the callee's stderr
 //! lock            held exclusively for the supervisor's lifetime — liveness
 //! cancel          a marker the supervisor polls
 //! ```
@@ -177,6 +177,19 @@ impl RunDir {
     pub fn log_path(&self) -> PathBuf {
         self.path.join("supervisor.log")
     }
+
+    /// The run's log, to append a line to: what the supervisor saw, for a
+    /// person reading it later. The supervisor runs detached and speaks to no
+    /// terminal; `spawn_supervisor` points its stdout and stderr here too, so a
+    /// panic lands in the same place. A log that can't be opened takes the line
+    /// and drops it: not worth failing a run over.
+    pub fn log(&self) -> Box<dyn Write> {
+        match fs::OpenOptions::new().append(true).open(self.log_path()) {
+            Ok(file) => Box::new(file),
+            Err(_) => Box::new(std::io::sink()),
+        }
+    }
+
     pub fn cancel_path(&self) -> PathBuf {
         self.path.join("cancel")
     }

@@ -5,6 +5,13 @@
 //! So the verbs come in tiers. Agent verbs are the only ones the printed
 //! allow-rules name. Human verbs change what cahoots may do, and refuse to run
 //! without a terminal on stdin. Inspect verbs read and report.
+//!
+//! This is the command layer, the one place the logic and the interface meet
+//! (hard rule 11). It calls the logic, puts the logic's questions to a person
+//! (`questions`, on `crate::tui`), hands the answers back, and prints the one
+//! JSON envelope.
+
+mod questions;
 
 use clap::{Parser, Subcommand};
 
@@ -20,6 +27,7 @@ use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
 use crate::run::client::{self, ResumeArgs, RunArgs};
 use crate::run::supervise;
+use crate::tui;
 
 pub const VERSION: &str = if cfg!(cahoots_dev_build) {
     concat!(
@@ -448,9 +456,10 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
     }
 }
 
-/// `install`'s usage meter: what is here, and which one to use — asking the
-/// person when there is a choice to make, never under `--dry-run`. Nothing is
-/// written here; the caller records the decision once the files are in.
+/// `install`'s usage meter: what is here, and which one to use, asking the
+/// person when the logic says there is a choice to make (never under
+/// `--dry-run`). Nothing is written here; the caller records the decision once
+/// the files are in.
 fn choose_meter(
     dirs: &Dirs,
     config: &crate::config::MeterConfig,
@@ -485,16 +494,36 @@ fn choose_meter(
     )?;
     let decision = match decision {
         Decision::Ask { options } if !dry_run => {
-            let selection = detect::ask_which(
-                &options,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stderr(),
-            )?;
+            let selection = {
+                let Some(mut terminal) = person_at_terminal() else {
+                    return Err(questions::no_terminal_for_meter());
+                };
+                questions::which_meter(&options, &mut terminal, &mut std::io::stderr(), colors())?
+                // The terminal is given back here, before install says more.
+            };
             detect::picked(selection, &options)?
         }
         other => other,
     };
     Ok((found, decision))
+}
+
+/// The person's terminal, set up for a question. `None` when there is no
+/// terminal to ask at, or it cannot move its cursor (`TERM=dumb`).
+fn person_at_terminal() -> Option<tui::Terminal> {
+    if crate::env::dumb_terminal() {
+        return None;
+    }
+    tui::Terminal::open()
+}
+
+/// The rail in color, unless `NO_COLOR` says otherwise.
+fn colors() -> tui::Colors {
+    if crate::env::no_color() {
+        tui::Colors::OFF
+    } else {
+        tui::Colors::ON
+    }
 }
 
 /// Prints the envelope and turns it into the process's exit status. A closed
