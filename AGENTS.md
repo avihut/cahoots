@@ -51,8 +51,9 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
    fingerprints the real paths around the whole suite and fails on any
    change. `mise run smoke` is the one exception to "no real harness", is
    local only, and says what it costs.
-9. **The dependency list is closed** (`Cargo.toml`, held by `guard.sh`). A new
-   crate is a change to this file first.
+9. **The dependency list is closed** (`Cargo.toml`, held to the list in
+   `scripts/guard.sh`). A new crate is a change to that list first, and its
+   PR says so up front.
 10. **`#![forbid(unsafe_code)]`**, synchronous code (`std::process`, threads,
     one channel — no async runtime), Unix only.
 11. **The interface and the logic are separate layers.** The logic (the

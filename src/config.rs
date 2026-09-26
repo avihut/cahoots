@@ -6,6 +6,8 @@
 //! Never read from the working directory. A repository cannot configure the
 //! tool that is about to run on it.
 
+pub mod edit;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

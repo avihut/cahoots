@@ -67,7 +67,7 @@ fi
 
 # 6. The dependency list is closed. deny.toml holds the transitive graph;
 #    this holds what Cargo.toml itself names.
-allowed_crates="clap anyhow thiserror serde serde_json toml nix ctrlc uuid rusqlite fs2 assert_cmd predicates tempfile serial_test insta"
+allowed_crates="clap anyhow thiserror serde serde_json toml toml_edit nix ctrlc uuid rusqlite fs2 assert_cmd predicates tempfile serial_test insta"
 crates=$(text_of Cargo.toml | awk '
     /^\[/ {
         on = ($0 ~ /dependencies\]$/)
@@ -80,7 +80,7 @@ crates=$(text_of Cargo.toml | awk '
 for crate in $crates; do
     case " $allowed_crates " in
     *" $crate "*) ;;
-    *) fail "Cargo.toml depends on '$crate' (AGENTS.md: the dependency list is closed — amend it there first)" ;;
+    *) fail "Cargo.toml depends on '$crate' (AGENTS.md rule 9: the dependency list is closed — add it to allowed_crates here first, and say so in the PR)" ;;
     esac
 done
 

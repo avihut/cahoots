@@ -30,6 +30,9 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
+# Edits config.toml in place (`cahoots settings`, `enable`, `install`), so a
+# person's comments and layout survive. It shares toml's parser and writer.
+toml_edit = "0.25"
 nix = { version = "0.31", features = ["user", "fs", "signal", "process", "term", "poll"] }
 uuid = { version = "1", features = ["v7"] }
 
