@@ -678,3 +678,20 @@ fn with_no_terminal_to_ask_at_install_names_the_flag_instead() {
     );
     assert!(!world.config.join("meter.json").exists());
 }
+
+#[test]
+fn a_dry_run_says_it_would_ask_and_draws_nothing() {
+    let world = World::bare();
+    two_meters(&world);
+    let after = world.at_terminal(&["install", "--dry-run"]).finish();
+    assert_eq!(after.code, 0, "{}", after.screen);
+    assert!(
+        after.json["message"].as_str().unwrap().starts_with(
+            "Usage meter: more than one was found, and a real install asks which to use."
+        ),
+        "{}",
+        after.json
+    );
+    assert!(!after.screen.contains("◆"), "{:?}", after.screen);
+    assert!(!world.config.join("meter.json").exists());
+}
