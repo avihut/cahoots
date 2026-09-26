@@ -722,6 +722,29 @@ mod tests {
     }
 
     #[test]
+    fn a_table_can_gain_a_key_above_the_tables_inside_it() {
+        let text = format!("{DOTTED}\n[meter.ccusage]\nclaude_block_tokens = 300_000_000\n");
+        assert!(edited(&text, &[set("meter.use", "ccusage")]).ends_with(
+            "\n[meter]\nuse = \"ccusage\"\n\n[meter.ccusage]\nclaude_block_tokens = 300_000_000\n"
+        ));
+        // A person who wrote `meter.use` as a dotted key keeps it one.
+        let dotted =
+            format!("{DOTTED}meter.use = \"none\"\n\n[meter.ccusage]\nbinary = \"/b/ccusage\"\n");
+        assert_eq!(
+            edited(&dotted, &[set("meter.use", "ccusage")]),
+            dotted.replace("\"none\"", "\"ccusage\"")
+        );
+    }
+
+    #[test]
+    fn enabling_a_harness_among_dotted_keys_is_one_more_line() {
+        assert_eq!(
+            edited(DOTTED, &[set("harness.codex.enabled", true)]),
+            DOTTED.replace("codex\"\n", "codex\"\nharness.codex.enabled = true\n")
+        );
+    }
+
+    #[test]
     fn a_new_file_starts_with_the_schema_and_is_private() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("config").join("config.toml");

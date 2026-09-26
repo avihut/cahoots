@@ -5,6 +5,7 @@
 //! directory overrides.
 #![allow(dead_code)]
 
+use std::cell::RefCell;
 use std::fs;
 use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
@@ -29,6 +30,10 @@ pub struct World {
     /// Stands in for the user's home, where the agent homes live.
     pub home: PathBuf,
     pub work: PathBuf,
+    /// The targets `enable` last named, and what `configure` was last given:
+    /// config.toml is written from both.
+    enabled: RefCell<Vec<String>>,
+    extra: RefCell<String>,
 }
 
 /// The `fake_harness` example, which cargo builds next to the test binaries.
@@ -95,6 +100,8 @@ impl World {
             state: base.join("state"),
             home: base.join("home"),
             work: base.join("work"),
+            enabled: RefCell::new(Vec::new()),
+            extra: RefCell::new(String::new()),
             _root: root,
         };
         for dir in [
@@ -146,32 +153,47 @@ impl World {
         world
     }
 
+    /// Turns these targets on, and every other one off, in config.toml.
     pub fn enable(&self, harnesses: &[&str]) {
-        let json = serde_json::json!({ "v": 1, "enabled": harnesses });
-        fs::write(self.config.join("enabled.json"), json.to_string()).unwrap();
+        *self.enabled.borrow_mut() = harnesses.iter().map(|h| h.to_string()).collect();
+        self.write_config();
     }
 
-    /// Writes config.toml: the fake binaries, a fast kill ladder, then `extra` —
-    /// dotted keys (`harness.codex.cap = 80`) first, new tables after.
+    /// Writes config.toml: the fake binaries, the targets `enable` named, a
+    /// fast kill ladder, then `extra` — dotted keys (`harness.codex.cap = 80`)
+    /// first, new tables after.
     pub fn configure(&self, extra: &str) {
+        *self.extra.borrow_mut() = extra.to_string();
+        self.write_config();
+    }
+
+    fn write_config(&self) {
+        let enabled: String = self
+            .enabled
+            .borrow()
+            .iter()
+            .map(|id| format!("harness.{id}.enabled = true\n"))
+            .collect();
         let text = format!(
-            "schema = 1\nharness.claude.binary = {:?}\nharness.codex.binary = {:?}\n\
-             limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{extra}\n",
+            "schema = 1\nharness.claude.binary = {:?}\nharness.codex.binary = {:?}\n{enabled}\
+             limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n",
             self.bin.join("claude"),
             self.bin.join("codex"),
+            self.extra.borrow(),
         );
         fs::write(self.config.join("config.toml"), text).unwrap();
     }
 
-    /// Installs a fake `usage-cli` and points the config at it. `plan` says how
-    /// it answers: `{"guarded": {"code": 21}, "unguarded": {"code": 0, "percent": 40}}`
-    /// — `guarded` is the call that carries `--max-data-age`.
+    /// Installs a fake `usage-cli`, chooses it as the meter and points the
+    /// config at it. `plan` says how it answers:
+    /// `{"guarded": {"code": 21}, "unguarded": {"code": 0, "percent": 40}}` —
+    /// `guarded` is the call that carries `--max-data-age`.
     pub fn meter(&self, plan: serde_json::Value, extra: &str) {
         let path = self.bin.join("usage-cli");
         fake_at(&path);
         fs::write(self.bin.join("usage-cli.plan"), plan.to_string()).unwrap();
         self.configure(&format!(
-            "{extra}\n[meter.agent-usage]\nbinary = {path:?}\n"
+            "meter.use = \"agent-usage\"\n{extra}\n[meter.agent-usage]\nbinary = {path:?}\n"
         ));
     }
 
@@ -182,15 +204,16 @@ impl World {
 
     /// Installs a fake `ccusage` beside the harnesses and writes its `plan`
     /// (`{"claude": [{"tokens": 40}], "codex": […]}` — see the fake). With
-    /// `table` it is turned on in the config, as `[meter.ccusage]` plus
-    /// `table`; with `None` it is only there to be found.
+    /// `table` it is chosen in the config (`meter.use`), with
+    /// `[meter.ccusage]` plus `table`; with `None` it is only there to be
+    /// found.
     pub fn ccusage(&self, plan: Value, extra: &str, table: Option<&str>) -> PathBuf {
         let path = self.bin.join("ccusage");
         fake_at(&path);
         fs::write(self.bin.join("ccusage.plan"), plan.to_string()).unwrap();
         match table {
             Some(table) => self.configure(&format!(
-                "{extra}\n[meter.ccusage]\nbinary = {path:?}\n{table}\n"
+                "meter.use = \"ccusage\"\n{extra}\n[meter.ccusage]\nbinary = {path:?}\n{table}\n"
             )),
             None => self.configure(extra),
         }

@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use crate::dirs::Dirs;
 use crate::exit::{self, Envelope, Exit, Fail, Res};
 use crate::meter::detect::{self, Decision, Found};
-use crate::meter::{self, MeterFile, Selection};
+use crate::meter::{MeterFile, MeterId, Selection};
 use crate::model::{HarnessId, Role};
 use crate::registry::Registry;
 use crate::run::client::{self, ResumeArgs, RunArgs};
@@ -384,11 +384,14 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 dry_run,
             )?;
             let files = crate::install::files::install(&dirs, harness, dry_run)?;
+            let mut config = config;
             if !dry_run {
-                match decision.record() {
-                    detect::Record::Write(file) => file.save(&dirs)?,
-                    detect::Record::Remove => MeterFile::remove(&dirs)?,
-                    detect::Record::Leave => {}
+                // What was found is cahoots' own record; a choice is the
+                // person's, and goes where their other settings are.
+                MeterFile::of(&found).save(&dirs)?;
+                let changes = decision.config_changes(meter_binary.is_some());
+                if !changes.is_empty() {
+                    config = crate::config::edit::apply(&dirs.config_file(), &changes)?;
                 }
             }
             let in_effect = decision.in_effect();
@@ -396,7 +399,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                 "found": found,
                 "decision": decision,
                 "in_effect": in_effect,
-                "still_to_do": detect::still_to_do(in_effect, &config.meter, &dirs.config_file()),
+                "still_to_do": detect::still_to_do(in_effect, &config.meter, &found, &dirs.config_file()),
             });
             let rules: serde_json::Map<String, serde_json::Value> = HarnessId::ALL
                 .into_iter()
@@ -473,12 +476,24 @@ fn choose_meter(
             "--meter-binary names a meter's binary, and --meter none names no meter",
         ));
     }
-    let previous = MeterFile::load(dirs)?;
-    let first = previous
-        .as_ref()
-        .and_then(|file| Some((file.meter?, file.binary.as_deref()?)));
+    // Where config.toml says each meter is, then where it was found last
+    // time. A file an older cahoots wrote only loses its hints: this run
+    // writes it again.
+    let previous = MeterFile::load(dirs).ok().flatten();
+    let mut first: Vec<(MeterId, &std::path::Path)> = MeterId::ALL
+        .into_iter()
+        .filter_map(|id| Some((id, config.binary(id)?)))
+        .collect();
+    if let Some(previous) = &previous {
+        first.extend(
+            previous
+                .found
+                .iter()
+                .map(|(id, binary)| (*id, binary.as_path())),
+        );
+    }
     let path = crate::env::path_var();
-    let mut found = detect::detect(&detect::Places::of(&dirs.home, path.as_deref()), first);
+    let mut found = detect::detect(&detect::Places::of(&dirs.home, path.as_deref()), &first);
     if let (Some(Selection::Meter(meter)), Some(binary)) = (selection, binary) {
         // A path a person gives replaces the search for that meter.
         let binary = std::path::absolute(binary)
@@ -486,12 +501,7 @@ fn choose_meter(
         found.retain(|found| found.meter != meter);
         found.push(detect::probe(meter, &binary));
     }
-    let decision = detect::decide(
-        meter::configured(config),
-        previous.as_ref(),
-        selection,
-        &found,
-    )?;
+    let decision = detect::decide(config.use_, selection, &found)?;
     let decision = match decision {
         Decision::Ask { options } if !dry_run => {
             let selection = {

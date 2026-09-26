@@ -34,6 +34,8 @@ mkdir -p "$tmp/config" "$tmp/state" "$tmp/home" .cache
 
 cat >"$tmp/config/config.toml" <<'TOML'
 schema = 1
+harness.claude.enabled = true
+harness.codex.enabled = true
 [roles.explore]
 candidates = [
   { harness = "codex", model = "gpt-5.6-luna", effort = "low" },
@@ -45,7 +47,6 @@ candidates = [
   { harness = "claude", model = "haiku", effort = "low" },
 ]
 TOML
-printf '{"v":1,"enabled":["claude","codex"]}' >"$tmp/config/enabled.json"
 
 cahoots() {
     env -u CLAUDECODE -u CODEX_THREAD_ID -u CODEX_SANDBOX -u CAHOOTS_DEPTH \

@@ -1,8 +1,8 @@
 //! The usage meters beyond the tracker's `headroom` contract (tests/gate.rs
-//! holds that one): ccusage behind the gate and the watchdog, the meter
-//! `install` chose, how `install` finds one and picks, and how it asks a
-//! person at a terminal — against fake binaries in throwaway directories,
-//! never the real ones.
+//! holds that one): ccusage behind the gate and the watchdog, which meter is
+//! on (a person's `[meter] use`, else the only one `install` found), how
+//! `install` finds one and picks, and how it asks a person at a terminal —
+//! against fake binaries in throwaway directories, never the real ones.
 
 mod common;
 
@@ -10,8 +10,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use cahoots::meter::detect::{self, Because, Decision, Found, Places, Record};
-use cahoots::meter::{MeterId, Selection};
+use cahoots::meter::detect::{self, Because, Decision, Found, Places};
+use cahoots::meter::{MeterFile, MeterId, Selection};
 use common::{Finished, World, fake_at};
 use nix::sys::termios::LocalFlags;
 use serde_json::{Value, json};
@@ -142,17 +142,31 @@ fn a_ccusage_that_does_not_answer_is_a_refusal() {
         assert_eq!(answer.code, 13, "{plan}: {}", answer.json);
     }
     let world = World::new();
-    world.configure("[meter.ccusage]\nbinary = \"/nonexistent/ccusage\"");
+    world.configure("meter.use = \"ccusage\"\n[meter.ccusage]\nbinary = \"/nonexistent/ccusage\"");
     assert_eq!(world.run("hello", &TO_CLAUDE).code, 13);
 }
 
 #[test]
+fn a_table_of_limits_turns_no_meter_on() {
+    // The flaw this closes: declaring ccusage's limits used to switch the
+    // gate to ccusage. A table only configures its meter; `use` chooses.
+    let world = World::new();
+    world.ccusage(json!({"claude": [{"tokens": 280_000_000}]}), "", None);
+    world.configure(&format!("[meter.ccusage]\n{LIMITS}"));
+    let answer = world.run("hello", &TO_CLAUDE);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(world.ccusage_calls().is_empty(), "no meter is on");
+}
+
+#[test]
 fn a_meter_runs_only_from_a_pinned_path_and_never_on_the_callers_path() {
-    // Turned on without a path, and install never recorded one: no PATH
-    // lookup — the caller sets PATH, and could put its own `ccusage` first.
+    // Chosen without a path, and install never recorded one: no PATH lookup
+    // — the caller sets PATH, and could put its own `ccusage` first.
     let world = World::new();
     world.ccusage(json!({"claude": [{"tokens": 1_000}]}), "", None);
-    world.configure(&format!("[meter.ccusage]\n{LIMITS}"));
+    world.configure(&format!(
+        "meter.use = \"ccusage\"\n[meter.ccusage]\n{LIMITS}"
+    ));
     let path = format!("{}:{}", world.bin.display(), std::env::var("PATH").unwrap());
     let unpinned = common::answer(
         world
@@ -195,7 +209,7 @@ fn a_meter_runs_only_from_a_pinned_path_and_never_on_the_callers_path() {
 }
 
 #[test]
-fn the_meter_install_chose_is_on_until_the_config_names_one() {
+fn the_only_meter_install_found_is_on_until_a_person_chooses() {
     let world = World::new();
     let ccusage = world.ccusage(
         json!({"claude": [{"tokens": 5_000_000, "limit_notice": "2099-01-01T00:00:00.000Z"}]}),
@@ -204,30 +218,40 @@ fn the_meter_install_chose_is_on_until_the_config_names_one() {
     );
     fs::write(
         world.config.join("meter.json"),
-        json!({"v": 1, "meter": "ccusage", "binary": ccusage}).to_string(),
+        json!({"v": 2, "found": {"ccusage": ccusage}}).to_string(),
     )
     .unwrap();
     let refused = world.run("hello", &TO_CLAUDE);
     assert_eq!(
         refused.code, 24,
-        "the meter install chose is on: {}",
+        "the only meter install found is on: {}",
         refused.json
     );
 
-    // A table in the config outranks what install chose.
+    // A person's `use` outranks what install found.
     world.meter(json!({"guarded": {"code": 0, "percent": 10}}), "");
     let admitted = world.run("hello", &TO_CLAUDE);
     assert_eq!(admitted.code, 0, "{}", admitted.json);
     assert_eq!(world.meter_calls().len(), 1);
 
     // "No meter" is a choice too.
+    world.configure("meter.use = \"none\"");
+    assert_eq!(world.run("hello", &TO_CLAUDE).code, 0);
+
+    // A file an older cahoots wrote is not guessed at.
     world.configure("");
     fs::write(
         world.config.join("meter.json"),
-        json!({"v": 1, "meter": null, "binary": null}).to_string(),
+        json!({"v": 1, "meter": "ccusage", "binary": ccusage}).to_string(),
     )
     .unwrap();
-    assert_eq!(world.run("hello", &TO_CLAUDE).code, 0);
+    let old = world.run("hello", &TO_CLAUDE);
+    assert_eq!(old.code, 34, "{}", old.json);
+    assert!(
+        old.message().contains("cahoots install"),
+        "{}",
+        old.message()
+    );
 }
 
 #[test]
@@ -293,7 +317,7 @@ fn doctor_says_what_ccusage_measures_and_what_it_cannot() {
     assert_eq!(check(&report, "meter: ccusage")["status"], "ok", "{report}");
     let detail = |name| check(&report, name)["detail"].as_str().unwrap().to_string();
     assert!(detail("meter: ccusage").contains("20.0.23"));
-    assert!(detail("meter: ccusage").contains("config file"));
+    assert!(detail("meter: ccusage").contains("chosen in config.toml"));
     assert_eq!(check(&report, "meter: claude")["status"], "ok");
     assert!(
         detail("meter: claude").contains("50% of the 300M tokens"),
@@ -354,7 +378,7 @@ impl Machine {
     }
 
     fn detect(&self) -> Vec<Found> {
-        detect::detect(&self.places(), None)
+        detect::detect(&self.places(), &[])
     }
 
     /// The fake, named `name`, in `dir`; `plan` is written beside it.
@@ -400,7 +424,7 @@ fn install_finds_ccusage_on_path_and_agent_usage_in_its_app() {
     );
     assert_eq!(found[1].version.as_deref(), Some("20.0.23"));
     // Two that could be used: a person picks.
-    match detect::decide(None, None, None, &found).unwrap() {
+    match detect::decide(None, None, &found).unwrap() {
         Decision::Ask { options } => assert_eq!(options.len(), 2),
         other => panic!("expected a question, got {other:?}"),
     }
@@ -421,7 +445,7 @@ fn a_usage_cli_without_headroom_is_found_but_not_offered() {
         "{tracker:?}"
     );
     assert_eq!(
-        detect::decide(None, None, None, &found).unwrap(),
+        detect::decide(None, None, &found).unwrap(),
         Decision::Use {
             meter: MeterId::Ccusage,
             binary: ccusage,
@@ -435,23 +459,28 @@ fn a_usage_cli_that_gains_headroom_brings_the_question() {
     let machine = Machine::new();
     machine.fake(&machine.bin, "ccusage", None);
     machine.tracker_app(19);
-    let Record::Write(first) = detect::decide(None, None, None, &machine.detect())
-        .unwrap()
-        .record()
-    else {
-        panic!("the only one found is recorded");
-    };
-    assert_eq!(first.meter, Some(MeterId::Ccusage));
+    let found = machine.detect();
+    let first = MeterFile::of(&found);
+    assert_eq!(first.only(), Some(MeterId::Ccusage));
+    assert!(
+        detect::decide(None, None, &found)
+            .unwrap()
+            .config_changes(false)
+            .is_empty(),
+        "the only one found is only found: nobody chose it"
+    );
 
-    // The tracker's next release answers `headroom`. ccusage was only ever
-    // the only one found, so the next install asks rather than keeping it.
+    // The tracker's next release answers `headroom`. No one ever chose
+    // ccusage, so the next install asks.
     machine.tracker_app(0);
-    let chosen = first
-        .binary
-        .as_deref()
-        .map(|binary| (MeterId::Ccusage, binary));
-    let found = detect::detect(&machine.places(), chosen);
-    match detect::decide(None, Some(&first), None, &found).unwrap() {
+    let hints: Vec<(MeterId, &Path)> = first
+        .found
+        .iter()
+        .map(|(id, binary)| (*id, binary.as_path()))
+        .collect();
+    let found = detect::detect(&machine.places(), &hints);
+    assert_eq!(MeterFile::of(&found).only(), None, "two found: none is on");
+    match detect::decide(None, None, &found).unwrap() {
         Decision::Ask { options } => assert_eq!(
             options.iter().map(|found| found.meter).collect::<Vec<_>>(),
             MeterId::ALL
@@ -461,24 +490,31 @@ fn a_usage_cli_that_gains_headroom_brings_the_question() {
 }
 
 #[test]
-fn a_gone_meter_with_nothing_in_its_place_is_forgotten() {
+fn a_chosen_meter_that_is_gone_is_kept_and_install_says_it_is_missing() {
     let machine = Machine::new();
     let ccusage = machine.fake(&machine.bin, "ccusage", None);
-    let named = detect::decide(
-        None,
-        None,
-        Some(Selection::Meter(MeterId::Ccusage)),
-        &machine.detect(),
+    fs::remove_file(&ccusage).unwrap();
+    let found = detect::detect(&machine.places(), &[(MeterId::Ccusage, &ccusage)]);
+    let chosen = Some(Selection::Meter(MeterId::Ccusage));
+    let decision = detect::decide(chosen, None, &found).unwrap();
+    assert_eq!(
+        decision,
+        Decision::Keep {
+            meter: Some(MeterId::Ccusage)
+        }
+    );
+    let config = cahoots::config::UserConfig::parse("schema = 1\nmeter.use = \"ccusage\"").unwrap();
+    let to_do = detect::still_to_do(
+        decision.in_effect(),
+        &config.meter,
+        &found,
+        Path::new("/c/config.toml"),
     )
     .unwrap();
-    let Record::Write(chosen) = named.record() else {
-        panic!("{named:?} is recorded");
-    };
-    fs::remove_file(&ccusage).unwrap();
-    let found = detect::detect(&machine.places(), Some((MeterId::Ccusage, &ccusage)));
-    let decision = detect::decide(None, Some(&chosen), None, &found).unwrap();
-    assert_eq!(decision, Decision::NoneFound);
-    assert_eq!(decision.record(), Record::Remove);
+    assert!(
+        to_do.contains("no ccusage was found") && to_do.contains("every run is refused"),
+        "{to_do}"
+    );
 }
 
 #[test]
@@ -497,7 +533,7 @@ fn an_old_ccusage_is_found_but_not_offered() {
         "{found:?}"
     );
     assert_eq!(
-        detect::decide(None, None, None, &found).unwrap(),
+        detect::decide(None, None, &found).unwrap(),
         Decision::NoneFound
     );
 }
@@ -551,16 +587,21 @@ fn the_copy_chosen_last_time_is_looked_at_first() {
     let machine = Machine::new();
     machine.fake(&machine.bin, "ccusage", None);
     let chosen = machine.fake(&machine.root.join("elsewhere"), "ccusage", None);
-    let found = detect::detect(&machine.places(), Some((MeterId::Ccusage, &chosen)));
+    let found = detect::detect(&machine.places(), &[(MeterId::Ccusage, &chosen)]);
     assert_eq!(found[0].binary, chosen);
 }
 
 // ── install: asking at a terminal ──
 
+/// A config.toml a person wrote, with nothing in it about meters.
+const MINE: &str = "# Mine, by hand.\nschema = 1\n";
+
 /// Two meters `install` can use, both on this world's PATH: ccusage, and a
 /// `usage-cli` that answers `headroom`. Each is found on PATH before any
-/// Applications folder is looked in, so nothing outside the world is.
+/// Applications folder is looked in, so nothing outside the world is. The
+/// config is the person's own (`MINE`).
 fn two_meters(world: &World) {
+    fs::write(world.config.join("config.toml"), MINE).unwrap();
     fake_at(&world.bin.join("ccusage"));
     fake_at(&world.bin.join("usage-cli"));
     fs::write(
@@ -618,11 +659,17 @@ fn install_asks_at_the_terminal_and_the_arrow_keys_answer() {
             after.screen
         );
     }
-    let chosen: Value =
+    // The answer is the person's, so it goes in their config; what was
+    // found goes in cahoots' own record.
+    let text = fs::read_to_string(world.config.join("config.toml")).unwrap();
+    assert_eq!(text, format!("{MINE}\n[meter]\nuse = \"ccusage\"\n"));
+    let found: Value =
         serde_json::from_str(&fs::read_to_string(world.config.join("meter.json")).unwrap())
             .unwrap();
-    assert_eq!(chosen["meter"], "ccusage");
-    assert_eq!(chosen["only_one_found"], false, "a person's answer");
+    assert_eq!(found["v"], 2);
+    for meter in ["agent-usage", "ccusage"] {
+        assert!(found["found"][meter].is_string(), "{found}");
+    }
     given_back(&after);
 }
 
@@ -651,6 +698,10 @@ fn leaving_the_question_writes_nothing_and_names_the_flag() {
         after.screen
     );
     assert!(!world.config.join("meter.json").exists());
+    assert_eq!(
+        fs::read_to_string(world.config.join("config.toml")).unwrap(),
+        MINE
+    );
     assert!(
         !world.state.join("install-manifest.json").exists(),
         "asked before anything was written"
@@ -677,6 +728,10 @@ fn with_no_terminal_to_ask_at_install_names_the_flag_instead() {
         after.screen
     );
     assert!(!world.config.join("meter.json").exists());
+    assert_eq!(
+        fs::read_to_string(world.config.join("config.toml")).unwrap(),
+        MINE
+    );
 }
 
 #[test]
@@ -694,4 +749,8 @@ fn a_dry_run_says_it_would_ask_and_draws_nothing() {
     );
     assert!(!after.screen.contains("◆"), "{:?}", after.screen);
     assert!(!world.config.join("meter.json").exists());
+    assert_eq!(
+        fs::read_to_string(world.config.join("config.toml")).unwrap(),
+        MINE
+    );
 }
