@@ -73,6 +73,29 @@ pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
         .find(|candidate| is_executable_file(candidate))
 }
 
+/// Every executable `name` in the directories of `path`, in PATH's order and
+/// as found, once each: a second directory that leads to the same file adds
+/// nothing.
+pub fn find_all_on_path(name: &str, path: Option<&OsStr>) -> Vec<PathBuf> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let mut seen = Vec::new();
+    let mut found = Vec::new();
+    for candidate in std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .filter(|candidate| is_executable_file(candidate))
+    {
+        let canonical = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if !seen.contains(&canonical) {
+            seen.push(canonical);
+            found.push(candidate);
+        }
+    }
+    found
+}
+
 fn is_executable_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }

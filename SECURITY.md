@@ -31,6 +31,10 @@ vulnerability — for example:
 - **the installer:** writing outside its manifest, following a symlink out of
   an agent home, editing a harness's settings or permission files, or
   `uninstall` removing something it did not write;
+- **config.toml edited in place** (`settings`, `enable`, `install`): a change
+  reaching more of the file than the setting asked for, a value written that
+  the config's own checks refuse, or any of it reachable from an agent-tier
+  verb;
 - a credential file being read, anything token-shaped being logged or
   recorded, or any network access at all;
 - run records or learned state being readable by another user.

@@ -55,6 +55,7 @@ mod tests {
         for human in [
             "install",
             "uninstall",
+            "settings",
             "enable",
             "learn",
             "registry",

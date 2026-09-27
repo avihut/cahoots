@@ -120,6 +120,54 @@ fn nothing_runs_until_a_human_enables_a_target() {
 }
 
 #[test]
+fn enable_turns_a_target_on_in_config_toml_and_off_again() {
+    let world = World::bare();
+    world.configure("# Codex, but carefully.\nharness.codex.cap = 60");
+    let on = world.at_terminal(&["enable", "codex"]).finish();
+    assert_eq!(on.code, 0, "{}", on.json);
+    assert_eq!(on.json["data"]["enabled"], serde_json::json!(["codex"]));
+    let text = fs::read_to_string(world.config.join("config.toml")).unwrap();
+    assert!(
+        text.contains("harness.codex.enabled = true\n")
+            && text.contains("# Codex, but carefully.\nharness.codex.cap = 60\n"),
+        "{text}"
+    );
+    assert_eq!(world.run("hello", &["--to", "codex"]).code, 0);
+
+    let off = world.at_terminal(&["enable", "codex", "--off"]).finish();
+    assert_eq!(off.json["data"]["enabled"], serde_json::json!([]));
+    assert!(
+        !fs::read_to_string(world.config.join("config.toml"))
+            .unwrap()
+            .contains("enabled"),
+        "off is the default, so nothing is written for it"
+    );
+    assert_eq!(world.run("hello", &["--to", "codex"]).code, 31);
+}
+
+#[test]
+fn doctor_says_enabled_json_is_no_longer_read() {
+    let world = World::new();
+    fs::write(
+        world.config.join("enabled.json"),
+        r#"{"v":1,"enabled":["codex"]}"#,
+    )
+    .unwrap();
+    let report = world.ask(&["doctor"]).json;
+    let check = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "enabled.json")
+        .unwrap_or_else(|| panic!("no enabled.json check in {report}"));
+    assert_eq!(check["status"], "warn");
+    assert!(
+        check["detail"].as_str().unwrap().contains("cahoots enable"),
+        "{check}"
+    );
+}
+
+#[test]
 fn the_callee_gets_a_scrubbed_environment() {
     let world = World::new();
     let brief = world.brief("FAKE: dump");
@@ -168,7 +216,7 @@ fn the_callee_gets_a_scrubbed_environment() {
 fn an_api_key_passes_only_when_billing_says_api() {
     let world = World::new();
     let text = format!(
-        "schema = 1\n[harness.codex]\nbinary = {:?}\nbilling = \"api\"\n",
+        "schema = 1\n[harness.codex]\nenabled = true\nbinary = {:?}\nbilling = \"api\"\n",
         world.bin.join("codex")
     );
     fs::write(world.config.join("config.toml"), text).unwrap();

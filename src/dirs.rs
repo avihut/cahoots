@@ -76,13 +76,8 @@ impl Dirs {
         self.config.join("config.toml")
     }
 
-    /// Which targets a human has enabled. Its own file, written only by the
-    /// `enable` verb, so the hand-written config is never rewritten.
-    pub fn enabled_file(&self) -> PathBuf {
-        self.config.join("enabled.json")
-    }
-
-    /// Which usage meter `install` chose. Its own file for the same reason.
+    /// Where `install` found each usage meter: cahoots' record of this
+    /// machine, beside the person's own config.
     pub fn meter_file(&self) -> PathBuf {
         self.config.join("meter.json")
     }

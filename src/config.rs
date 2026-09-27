@@ -6,13 +6,17 @@
 //! Never read from the working directory. A repository cannot configure the
 //! tool that is about to run on it.
 
+pub mod edit;
+
 use std::collections::BTreeMap;
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::exit::{Fail, Res};
+use crate::meter::{MeterId, Selection};
 use crate::model::{Candidate, HarnessId, Role};
 
 pub const SCHEMA: u32 = 1;
@@ -36,6 +40,9 @@ pub struct UserConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessConfig {
+    /// Whether cahoots may delegate to it. Off unless a person turns it on
+    /// (`cahoots enable`): a run sends repository content to that vendor.
+    pub enabled: Option<bool>,
     /// Absolute path to the harness CLI. Default: found on PATH.
     pub binary: Option<PathBuf>,
     /// Percent of the plan cahoots may see used and still delegate.
@@ -69,11 +76,16 @@ pub struct RoleConfig {
     pub calibrate: Option<bool>,
 }
 
-/// `[meter.<id>]` turns that usage meter on — one at a time — and holds its
-/// knobs. Without one, the meter `install` chose is on (`meter.rs`).
+/// `[meter]`: which usage meter judges the gate (`use`), and each meter's
+/// knobs in a table of its own. A table only configures its meter; `use` is
+/// what turns one on. Without `use`, the meter is the only one `install`
+/// found, if it found just one (`meter.rs`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeterConfig {
+    /// `agent-usage`, `ccusage`, or `none` for none at all.
+    #[serde(rename = "use")]
+    pub use_: Option<Selection>,
     #[serde(rename = "agent-usage")]
     pub agent_usage: Option<AgentUsageConfig>,
     pub ccusage: Option<CcusageConfig>,
@@ -103,9 +115,34 @@ pub struct CcusageConfig {
     pub codex_day_tokens: Option<u64>,
 }
 
+impl MeterConfig {
+    /// The binary its table names for a meter, if it names one.
+    pub fn binary(&self, id: MeterId) -> Option<&Path> {
+        match id {
+            MeterId::AgentUsage => self.agent_usage.as_ref()?.binary.as_deref(),
+            MeterId::Ccusage => self.ccusage.as_ref()?.binary.as_deref(),
+        }
+    }
+}
+
 /// A declared limit below this is a unit slip (millions meant), not a plan:
 /// one delegated run can take more than that.
 pub const MIN_TOKEN_LIMIT: u64 = 100_000;
+
+// The values each knob may take. `validate` holds a file to them, and the
+// settings page offers nothing outside them.
+pub const CAP: RangeInclusive<u8> = 1..=100;
+pub const MAX_CONCURRENT: RangeInclusive<u32> = 1..=8;
+pub const MAX_ACTIVE_RUNS: RangeInclusive<u32> = 1..=16;
+pub const MAX_DEPTH: RangeInclusive<u32> = 0..=3;
+pub const TIMEOUT_SECS: RangeInclusive<u64> = 30..=14_400;
+pub const WAIT_SECS: RangeInclusive<u64> = 0..=540;
+pub const GRACE_SECS: RangeInclusive<u64> = 1..=60;
+pub const WATCHDOG_SECS: RangeInclusive<u64> = 1..=3600;
+pub const MAX_DATA_AGE_SECS: RangeInclusive<u64> = 60..=86_400;
+/// 0 is a real setting: no runs at all.
+pub const MAX_RUNS_PER_HOUR: RangeInclusive<u32> = 0..=600;
+pub const SAMPLE_RATE: RangeInclusive<f64> = 0.0..=1.0;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,12 +220,8 @@ impl UserConfig {
 
     fn validate(&self) -> Res<()> {
         for (id, harness) in &self.harness {
-            if let Some(cap) = harness.cap
-                && !(1..=100).contains(&cap)
-            {
-                return Err(Fail::config(format!(
-                    "harness.{id}.cap = {cap}: must be 1–100"
-                )));
+            if let Some(cap) = harness.cap {
+                in_range(&format!("harness.{id}.cap"), cap, &CAP)?;
             }
             if let Some(abort_at) = harness.abort_at {
                 let cap = harness.cap.unwrap_or(crate::registry::DEFAULT_CAP);
@@ -198,12 +231,8 @@ impl UserConfig {
                     )));
                 }
             }
-            if let Some(n) = harness.max_concurrent
-                && !(1..=8).contains(&n)
-            {
-                return Err(Fail::config(format!(
-                    "harness.{id}.max_concurrent = {n}: must be 1–8"
-                )));
+            if let Some(n) = harness.max_concurrent {
+                in_range(&format!("harness.{id}.max_concurrent"), n, &MAX_CONCURRENT)?;
             }
             if let Some(binary) = &harness.binary
                 && !binary.is_absolute()
@@ -221,73 +250,95 @@ impl UserConfig {
             }
         }
         let meter = &self.meter;
-        if meter.agent_usage.is_some() && meter.ccusage.is_some() {
-            return Err(Fail::config(
-                "[meter.agent-usage] and [meter.ccusage]: one usage meter at a time — keep the one you want",
-            ));
-        }
-        let binaries = [
-            (
-                "agent-usage",
-                meter.agent_usage.as_ref().and_then(|m| m.binary.as_ref()),
-            ),
-            (
-                "ccusage",
-                meter.ccusage.as_ref().and_then(|m| m.binary.as_ref()),
-            ),
-        ];
-        for (id, binary) in binaries {
-            if binary.is_some_and(|binary| !binary.is_absolute()) {
+        for id in MeterId::ALL {
+            if meter.binary(id).is_some_and(|binary| !binary.is_absolute()) {
                 return Err(Fail::config(format!(
                     "meter.{id}.binary must be an absolute path"
                 )));
             }
         }
-        if let Some(ccusage) = &meter.ccusage {
-            for (name, limit) in [
-                ("claude_block_tokens", ccusage.claude_block_tokens),
-                ("codex_day_tokens", ccusage.codex_day_tokens),
-            ] {
-                if let Some(limit) = limit
-                    && limit < MIN_TOKEN_LIMIT
-                {
-                    return Err(Fail::config(format!(
-                        "meter.ccusage.{name} = {limit}: a limit is at least {MIN_TOKEN_LIMIT} tokens — did you mean {}?",
-                        limit.saturating_mul(1_000_000)
-                    )));
-                }
+        if let Some(age) = meter.agent_usage.as_ref().and_then(|t| t.max_data_age_secs) {
+            in_range(
+                "meter.agent-usage.max_data_age_secs",
+                age,
+                &MAX_DATA_AGE_SECS,
+            )?;
+        }
+        let token_limits = [
+            (
+                "meter.ccusage.claude_block_tokens",
+                meter.ccusage.as_ref().and_then(|t| t.claude_block_tokens),
+            ),
+            (
+                "meter.ccusage.codex_day_tokens",
+                meter.ccusage.as_ref().and_then(|t| t.codex_day_tokens),
+            ),
+            (
+                "meter.ledger.max_tokens_per_day",
+                meter.ledger.as_ref().and_then(|t| t.max_tokens_per_day),
+            ),
+        ];
+        for (name, limit) in token_limits {
+            if let Some(limit) = limit
+                && limit < MIN_TOKEN_LIMIT
+            {
+                return Err(Fail::config(format!(
+                    "{name} = {limit}: a limit is at least {MIN_TOKEN_LIMIT} tokens — did you mean {}?",
+                    limit.saturating_mul(1_000_000)
+                )));
             }
         }
-        if let Some(rate) = self.review.sample_rate
-            && !(0.0..=1.0).contains(&rate)
-        {
-            return Err(Fail::config(format!(
-                "review.sample_rate = {rate}: must be 0.0–1.0"
-            )));
+        if let Some(runs) = meter.ledger.as_ref().and_then(|t| t.max_runs_per_hour) {
+            in_range("meter.ledger.max_runs_per_hour", runs, &MAX_RUNS_PER_HOUR)?;
+        }
+        if let Some(rate) = self.review.sample_rate {
+            in_range("review.sample_rate", rate, &SAMPLE_RATE)?;
         }
         let limits = &self.limits;
-        let in_range =
-            |name: &str, value: Option<u64>, range: std::ops::RangeInclusive<u64>| match value {
-                Some(v) if !range.contains(&v) => Err(Fail::config(format!(
-                    "limits.{name} = {v}: must be {}–{}",
-                    range.start(),
-                    range.end()
-                ))),
-                _ => Ok(()),
-            };
-        in_range(
-            "max_active_runs",
-            limits.max_active_runs.map(u64::from),
-            1..=16,
-        )?;
-        in_range("max_depth", limits.max_depth.map(u64::from), 0..=3)?;
-        in_range("timeout_secs", limits.timeout_secs, 30..=14_400)?;
-        in_range("wait_secs", limits.wait_secs, 0..=540)?;
-        in_range("int_grace_secs", limits.int_grace_secs, 1..=60)?;
-        in_range("term_grace_secs", limits.term_grace_secs, 1..=60)?;
-        in_range("watchdog_secs", limits.watchdog_secs, 1..=3600)?;
+        let checks = [
+            (
+                "max_active_runs",
+                limits.max_active_runs.map(u64::from),
+                widen(&MAX_ACTIVE_RUNS),
+            ),
+            (
+                "max_depth",
+                limits.max_depth.map(u64::from),
+                widen(&MAX_DEPTH),
+            ),
+            ("timeout_secs", limits.timeout_secs, TIMEOUT_SECS),
+            ("wait_secs", limits.wait_secs, WAIT_SECS),
+            ("int_grace_secs", limits.int_grace_secs, GRACE_SECS),
+            ("term_grace_secs", limits.term_grace_secs, GRACE_SECS),
+            ("watchdog_secs", limits.watchdog_secs, WATCHDOG_SECS),
+        ];
+        for (name, value, range) in checks {
+            if let Some(value) = value {
+                in_range(&format!("limits.{name}"), value, &range)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// `name = value: must be low–high`, when it is not.
+fn in_range<T: PartialOrd + std::fmt::Display>(
+    name: &str,
+    value: T,
+    range: &RangeInclusive<T>,
+) -> Res<()> {
+    if range.contains(&value) {
+        return Ok(());
+    }
+    Err(Fail::config(format!(
+        "{name} = {value}: must be {}–{}",
+        range.start(),
+        range.end()
+    )))
+}
+
+fn widen(range: &RangeInclusive<u32>) -> RangeInclusive<u64> {
+    u64::from(*range.start())..=u64::from(*range.end())
 }
 
 #[cfg(test)]
@@ -366,23 +417,61 @@ mod tests {
     }
 
     #[test]
-    fn one_usage_meter_at_a_time() {
+    fn use_chooses_the_meter_and_a_table_only_configures_one() {
         let config = UserConfig::parse(
             "schema = 1\n[meter.ccusage]\nclaude_block_tokens = 300_000_000\ncodex_day_tokens = 60_000_000",
         )
         .unwrap();
+        assert_eq!(config.meter.use_, None, "limits alone choose nothing");
         let ccusage = config.meter.ccusage.unwrap();
         assert_eq!(ccusage.claude_block_tokens, Some(300_000_000));
-        assert_eq!(ccusage.binary, None, "install's choice, or PATH");
-        assert!(UserConfig::parse("schema = 1\n[meter.agent-usage]").is_ok());
+        assert_eq!(ccusage.binary, None, "where install found it");
+        // Both tables at once is fine now: `use` says which is on.
         let both = UserConfig::parse(
-            "schema = 1\n[meter.agent-usage]\n[meter.ccusage]\nclaude_block_tokens = 300_000_000",
+            "schema = 1\n[meter]\nuse = \"agent-usage\"\n[meter.agent-usage]\n[meter.ccusage]\nclaude_block_tokens = 300_000_000",
         )
-        .unwrap_err();
-        assert!(
-            both.message.contains("one usage meter at a time"),
-            "{}",
-            both.message
+        .unwrap();
+        assert_eq!(both.meter.use_, Some(Selection::Meter(MeterId::AgentUsage)));
+        // `use` as a dotted key, with the meters' tables after it.
+        let dotted = UserConfig::parse(
+            "schema = 1\nmeter.use = \"none\"\n[meter.ccusage]\nbinary = \"/opt/homebrew/bin/ccusage\"",
+        )
+        .unwrap();
+        assert_eq!(dotted.meter.use_, Some(Selection::NoMeter));
+        assert_eq!(
+            dotted.meter.binary(MeterId::Ccusage),
+            Some(Path::new("/opt/homebrew/bin/ccusage"))
         );
+        let unknown = UserConfig::parse("schema = 1\n[meter]\nuse = \"codexbar\"").unwrap_err();
+        assert!(unknown.message.contains("codexbar"), "{}", unknown.message);
+    }
+
+    #[test]
+    fn a_harness_is_enabled_in_its_table() {
+        let config = UserConfig::parse(
+            "schema = 1\nharness.codex.enabled = true\n[harness.claude]\ncap = 60",
+        )
+        .unwrap();
+        assert_eq!(config.harness[&HarnessId::Codex].enabled, Some(true));
+        assert_eq!(config.harness[&HarnessId::Claude].enabled, None);
+    }
+
+    #[test]
+    fn the_newer_knobs_are_held_in_range_too() {
+        for text in [
+            "schema = 1\n[meter.agent-usage]\nmax_data_age_secs = 30",
+            "schema = 1\n[meter.agent-usage]\nmax_data_age_secs = 90_000",
+            "schema = 1\n[meter.ledger]\nmax_runs_per_hour = 601",
+            "schema = 1\n[meter.ledger]\nmax_tokens_per_day = 50",
+        ] {
+            assert!(UserConfig::parse(text).is_err(), "{text:?}");
+        }
+        for text in [
+            "schema = 1\n[meter.agent-usage]\nmax_data_age_secs = 60",
+            "schema = 1\n[meter.ledger]\nmax_runs_per_hour = 0",
+            "schema = 1\n[meter.ledger]\nmax_tokens_per_day = 2_000_000",
+        ] {
+            assert!(UserConfig::parse(text).is_ok(), "{text:?}");
+        }
     }
 }

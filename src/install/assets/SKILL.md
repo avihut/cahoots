@@ -126,6 +126,6 @@ user told you to.
 - A refusal is an answer. If cahoots says no, tell the user why (the
   `message` says) and carry on without the other agent — never work around it
   by calling another harness's CLI directly.
-- `install`, `uninstall`, `enable`, `learn` and `registry` are the user's
-  verbs, not yours. They refuse to run without a terminal.
+- `install`, `uninstall`, `settings`, `enable`, `learn` and `registry` are
+  the user's verbs, not yours. They refuse to run without a terminal.
 - You cannot delegate from inside a delegated run.

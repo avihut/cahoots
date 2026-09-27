@@ -79,6 +79,18 @@ pub fn depth() -> u32 {
         .unwrap_or(0)
 }
 
+/// `NO_COLOR` (no-color.org): set, and a question is drawn without color.
+/// Advisory: its shapes carry the meaning either way.
+pub fn no_color() -> bool {
+    var("NO_COLOR").is_some()
+}
+
+/// `TERM=dumb`: a terminal that cannot move its cursor, so a question cannot
+/// be drawn on it, and the flag that answers it is named instead.
+pub fn dumb_terminal() -> bool {
+    var("TERM").as_deref() == Some("dumb")
+}
+
 pub fn path_var() -> Option<OsString> {
     std::env::var_os("PATH").filter(|value| !value.is_empty())
 }

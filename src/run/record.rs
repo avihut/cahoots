@@ -5,7 +5,7 @@
 //! brief           what the callee was asked
 //! events.jsonl    the callee's stdout, verbatim
 //! final.md        the callee's answer
-//! supervisor.log  the supervisor's and the callee's stderr
+//! supervisor.log  what the supervisor saw, and the callee's stderr
 //! lock            held exclusively for the supervisor's lifetime — liveness
 //! cancel          a marker the supervisor polls
 //! ```
@@ -177,6 +177,19 @@ impl RunDir {
     pub fn log_path(&self) -> PathBuf {
         self.path.join("supervisor.log")
     }
+
+    /// The run's log, to append a line to: what the supervisor saw, for a
+    /// person reading it later. The supervisor runs detached and speaks to no
+    /// terminal; `spawn_supervisor` points its stdout and stderr here too, so a
+    /// panic lands in the same place. A log that can't be opened takes the line
+    /// and drops it: not worth failing a run over.
+    pub fn log(&self) -> Box<dyn Write> {
+        match fs::OpenOptions::new().append(true).open(self.log_path()) {
+            Ok(file) => Box::new(file),
+            Err(_) => Box::new(std::io::sink()),
+        }
+    }
+
     pub fn cancel_path(&self) -> PathBuf {
         self.path.join("cancel")
     }
@@ -192,12 +205,7 @@ impl RunDir {
     pub fn save(&self, record: &RunRecord) -> Res<()> {
         let json = serde_json::to_vec_pretty(record)
             .map_err(|error| Fail::internal(format!("cannot encode a run record: {error}")))?;
-        let tmp = self
-            .path
-            .join(format!("run.json.{}.tmp", std::process::id()));
-        write_private(&tmp, &json)?;
-        fs::rename(&tmp, self.record_path())
-            .map_err(|error| Fail::internal(format!("cannot replace a run record: {error}")))
+        write_private_atomic(&self.record_path(), &json)
     }
 
     /// The liveness lock. `Ok(Some(_))`: nobody held it, and the caller now
@@ -235,6 +243,38 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Res<()> {
         .map_err(|error| Fail::internal(format!("cannot write {}: {error}", path.display())))?;
     file.write_all(bytes)
         .map_err(|error| Fail::internal(format!("cannot write {}: {error}", path.display())))
+}
+
+/// `write_private`, all at once: a reader sees the old file or the new one,
+/// never half of one, and a crash leaves the old one. The new one is written
+/// beside the file and renamed over it. When `path` is a link, the file it
+/// points at is the one replaced, and the link stays a link.
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Res<()> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target
+        .file_name()
+        .ok_or_else(|| Fail::internal(format!("{} names no file", path.display())))?;
+    let tmp = target.with_file_name(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    // One left by a writer that died is not reused: a new file is made 0600.
+    let _ = fs::remove_file(&tmp);
+    let written = File::options()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&tmp, &target));
+    written.map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        Fail::internal(format!("cannot write {}: {error}", target.display()))
+    })
 }
 
 /// Every run on record, oldest first (ids are time-sortable). A directory

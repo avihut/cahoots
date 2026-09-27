@@ -83,7 +83,7 @@ pub fn supervise(dirs: &Dirs, id: &str) -> Res<()> {
     });
     if let Err(fail) = crate::history::append(dirs, &crate::history::finished(&record, sample_rate))
     {
-        eprintln!("[supervisor] {}", fail.message);
+        let _ = writeln!(dir.log(), "[supervisor] {}", fail.message);
     }
     outcome
 }
@@ -235,6 +235,7 @@ fn attend(
         });
     }
     drop(sender);
+    let mut log = dir.log();
     let mut over_readings = 0u32;
 
     let mut events = File::options()
@@ -269,7 +270,7 @@ fn attend(
                 }
             }
             Ok(Line::Err(line)) => {
-                eprintln!("[callee] {line}");
+                let _ = writeln!(log, "[callee] {line}");
                 stderr_tail.push_str(&line);
                 stderr_tail.push('\n');
                 if stderr_tail.len() > 2 * STDERR_TAIL {
@@ -286,7 +287,10 @@ fn attend(
             }
             Ok(Line::Reading(Watch::Over { percent })) => {
                 over_readings += 1;
-                eprintln!("[watchdog] over the abort threshold ({over_readings} in a row)");
+                let _ = writeln!(
+                    log,
+                    "[watchdog] over the abort threshold ({over_readings} in a row)"
+                );
                 if over_readings >= OVER_READINGS_TO_STOP && stop.is_none() && !exited {
                     stop = Some(Stop::OverBudget(percent));
                     ladder = Some(Ladder::start(pid, record));

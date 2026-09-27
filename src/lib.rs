@@ -26,4 +26,6 @@ pub mod registry;
 pub mod report;
 pub mod review;
 pub mod run;
+pub mod settings;
 pub mod spawn;
+pub mod tui;

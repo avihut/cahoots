@@ -85,10 +85,10 @@ pub fn rows(stories: &[Story]) -> BTreeMap<String, (Candidate, Row)> {
 fn routing(dirs: &Dirs) -> Res<serde_json::Value> {
     use crate::calibrate::{MIN_GAP, MIN_SAMPLE, WINDOW_DAYS, evidence};
     use crate::config::UserConfig;
-    use crate::registry::{EnabledFile, Registry};
+    use crate::registry::Registry;
 
     let config = UserConfig::load(&dirs.config_file())?;
-    let unlearned = Registry::effective(&config, &EnabledFile::load(dirs)?.enabled);
+    let unlearned = Registry::effective(&config);
     let learned = unlearned.learned(dirs);
     let stories = history::stories(&history::read(dirs));
     let since = now().saturating_sub(WINDOW_DAYS * 24 * 3600);

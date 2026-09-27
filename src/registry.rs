@@ -6,14 +6,14 @@
 //! run time, which is why one definition serves every direction.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
+use crate::config::edit::{self, Change, KeyPath};
 use crate::config::{Billing, UserConfig};
 use crate::dirs::Dirs;
-use crate::exit::{Fail, Res};
+use crate::exit::Res;
 use crate::meter::{self, Chosen, MeterFile, UsageMeter};
 use crate::model::{Candidate, Effort, HarnessId, ModelName, Role};
 
@@ -26,8 +26,9 @@ pub enum Origin {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessEntry {
-    /// Off until a human runs `cahoots enable <harness>`: a run sends
-    /// repository content to that vendor.
+    /// Off until a person turns it on (`enabled = true` in its table, which
+    /// `cahoots enable <harness>` writes): a run sends repository content to
+    /// that vendor.
     pub enabled: bool,
     pub binary: Option<PathBuf>,
     pub cap: u8,
@@ -92,7 +93,7 @@ pub const DEFAULT_MAX_DATA_AGE_SECS: u64 = 900;
 
 /// Ten points above the cap, never at 100 if it can be helped (a plan that is
 /// fully used has already cut the user off), and always above the cap.
-fn default_abort_at(cap: u8) -> u8 {
+pub fn default_abort_at(cap: u8) -> u8 {
     cap.saturating_add(10)
         .min(99)
         .max(cap.saturating_add(1))
@@ -133,59 +134,35 @@ fn default_candidates(role: Role) -> Vec<Candidate> {
     }
 }
 
-/// What `enabled.json` holds. Written only by the `enable` verb.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnabledFile {
-    pub v: u32,
-    pub enabled: Vec<HarnessId>,
-}
-
-impl EnabledFile {
-    pub fn load(dirs: &Dirs) -> Res<EnabledFile> {
-        let path = dirs.enabled_file();
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|error| Fail::config(format!("{}: {error}", path.display()))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(EnabledFile {
-                v: 1,
-                enabled: Vec::new(),
-            }),
-            Err(error) => Err(Fail::config(format!(
-                "cannot read {}: {error}",
-                path.display()
-            ))),
-        }
-    }
-}
-
-/// Turns a target on or off. Only the `enable` verb calls this, and that verb
-/// only runs from a terminal: sending a repository's content to another
-/// vendor is a person's decision.
+/// Turns a target on or off, in config.toml: `enabled = true`, or no
+/// `enabled` at all, which is off. Only human verbs call this, and those only
+/// run from a terminal: sending a repository's content to another vendor is
+/// a person's decision. Returns the targets now on.
 pub fn set_enabled(dirs: &Dirs, harness: HarnessId, on: bool) -> Res<Vec<HarnessId>> {
-    let mut file = EnabledFile::load(dirs)?;
-    file.v = 1;
-    file.enabled.retain(|id| *id != harness);
-    if on {
-        file.enabled.push(harness);
-    }
-    file.enabled.sort();
-    crate::dirs::ensure_private_dir(&dirs.config)?;
-    let json = serde_json::to_vec_pretty(&file)
-        .map_err(|error| Fail::internal(format!("cannot encode the enabled list: {error}")))?;
-    crate::run::record::write_private(&dirs.enabled_file(), &json)?;
-    Ok(file.enabled)
+    let path = KeyPath::of(&format!("harness.{harness}.enabled"));
+    let change = if on {
+        Change::Set {
+            path,
+            value: true.into(),
+        }
+    } else {
+        Change::Remove { path }
+    };
+    let config = edit::apply(&dirs.config_file(), &[change])?;
+    Ok(HarnessId::ALL
+        .into_iter()
+        .filter(|id| config.harness.get(id).and_then(|h| h.enabled) == Some(true))
+        .collect())
 }
 
 impl Registry {
     pub fn load(dirs: &Dirs) -> Res<Registry> {
         let config = UserConfig::load(&dirs.config_file())?;
-        let enabled = EnabledFile::load(dirs)?;
-        let mut registry = Registry::effective(&config, &enabled.enabled);
-        // The meter `install` chose counts only where the config file names
-        // none; its recorded path also serves a table that gives no binary.
-        let chosen = MeterFile::load(dirs)?;
-        let usage = meter::effective(&config.meter, chosen.as_ref());
+        let mut registry = Registry::effective(&config);
+        // What `install` found: the meter on when config.toml chooses none,
+        // and where each meter is when its table names no binary.
+        let found = MeterFile::load(dirs)?;
+        let usage = meter::effective(&config.meter, found.as_ref());
         registry.meters.usage_chosen_by = usage.as_ref().map(|(_, by)| *by);
         registry.meters.usage = usage.map(|(meter, _)| meter);
         if registry.review.enabled && registry.review.apply_routing {
@@ -228,7 +205,7 @@ impl Registry {
         crate::calibrate::LearnedAdjustments { swaps }
     }
 
-    pub fn effective(config: &UserConfig, enabled: &[HarnessId]) -> Registry {
+    pub fn effective(config: &UserConfig) -> Registry {
         let mut harnesses = BTreeMap::new();
         for id in HarnessId::ALL {
             let user = config.harness.get(&id);
@@ -243,6 +220,7 @@ impl Registry {
                     },
                 );
             };
+            pick("enabled", user.is_some_and(|u| u.enabled.is_some()));
             pick("cap", user.is_some_and(|u| u.cap.is_some()));
             pick("binary", user.is_some_and(|u| u.binary.is_some()));
             pick(
@@ -255,7 +233,7 @@ impl Registry {
             harnesses.insert(
                 id,
                 HarnessEntry {
-                    enabled: enabled.contains(&id),
+                    enabled: user.and_then(|u| u.enabled).unwrap_or(false),
                     binary: user.and_then(|u| u.binary.clone()),
                     cap,
                     abort_at: user
@@ -326,7 +304,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabling_is_idempotent_and_reversible() {
+    fn enabling_writes_config_toml_and_is_idempotent_and_reversible() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = Dirs {
             home: tmp.path().to_path_buf(),
@@ -334,13 +312,12 @@ mod tests {
             state: tmp.path().join("state"),
             overridden: true,
         };
+        let enabled = |on| set_enabled(&dirs, HarnessId::Codex, on).unwrap();
+        assert_eq!(enabled(true), [HarnessId::Codex]);
+        assert_eq!(enabled(true), [HarnessId::Codex]);
         assert_eq!(
-            set_enabled(&dirs, HarnessId::Codex, true).unwrap(),
-            [HarnessId::Codex]
-        );
-        assert_eq!(
-            set_enabled(&dirs, HarnessId::Codex, true).unwrap(),
-            [HarnessId::Codex]
+            std::fs::read_to_string(dirs.config_file()).unwrap(),
+            "schema = 1\n\n[harness.codex]\nenabled = true\n"
         );
         assert!(
             Registry::load(&dirs)
@@ -348,16 +325,17 @@ mod tests {
                 .harness(HarnessId::Codex)
                 .enabled
         );
-        assert!(
-            set_enabled(&dirs, HarnessId::Codex, false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(enabled(false).is_empty());
         assert!(
             !Registry::load(&dirs)
                 .unwrap()
                 .harness(HarnessId::Codex)
                 .enabled
+        );
+        assert_eq!(
+            std::fs::read_to_string(dirs.config_file()).unwrap(),
+            "schema = 1\n",
+            "off is the default, so it is written as nothing at all"
         );
     }
 
@@ -377,16 +355,17 @@ mod tests {
 
     #[test]
     fn nothing_is_enabled_until_a_human_says_so() {
-        let registry = Registry::effective(&UserConfig::default(), &[]);
+        let registry = Registry::effective(&UserConfig::default());
         assert!(registry.harnesses.values().all(|h| !h.enabled));
-        let registry = Registry::effective(&UserConfig::default(), &[HarnessId::Codex]);
+        let config = UserConfig::parse("schema = 1\nharness.codex.enabled = true").unwrap();
+        let registry = Registry::effective(&config);
         assert!(registry.harness(HarnessId::Codex).enabled);
         assert!(!registry.harness(HarnessId::Claude).enabled);
     }
 
     #[test]
     fn every_role_has_a_candidate_on_every_harness_by_default() {
-        let registry = Registry::effective(&UserConfig::default(), &[]);
+        let registry = Registry::effective(&UserConfig::default());
         for role in Role::ALL {
             for harness in HarnessId::ALL {
                 assert!(
@@ -407,7 +386,7 @@ mod tests {
             "schema = 1\n[harness.codex]\ncap = 80\n[roles.explore]\ncandidates = [{ harness = \"claude\", model = \"haiku\", effort = \"low\" }]",
         )
         .unwrap();
-        let registry = Registry::effective(&config, &[]);
+        let registry = Registry::effective(&config);
         let codex = registry.harness(HarnessId::Codex);
         assert_eq!((codex.cap, codex.origin["cap"]), (80, Origin::User));
         assert_eq!(codex.origin["billing"], Origin::Default);
