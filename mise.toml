@@ -39,6 +39,25 @@ shellcheck = "0.11.0"
 description = "Build a dev binary (CAHOOTS_*_DIR overrides honoured)"
 run = "cargo build --locked"
 
+[tasks.cahoots]
+description = "Build a dev binary and run it on this worktree's sandbox, .cache/sandbox — never your real config, state or agent homes (args pass through: mise run cahoots -- settings)"
+depends = ["build"]
+# The settings page and install's question need the terminal itself, and
+# `raw` hands it over whatever output mode mise is set to.
+raw = true
+quiet = true
+# Run where you are, so a path you pass means what it says there.
+dir = "{{cwd}}"
+# mise appends the task's arguments to this.
+run = "exec '{{config_root}}/target/debug/cahoots'"
+
+# A dev build runs only once all three are set (`Dirs::resolve`). They are this
+# worktree's own, because branches can disagree about cahoots' files.
+[tasks.cahoots.env]
+CAHOOTS_CONFIG_DIR = "{{config_root}}/.cache/sandbox/config"
+CAHOOTS_STATE_DIR = "{{config_root}}/.cache/sandbox/state"
+CAHOOTS_HOME_DIR = "{{config_root}}/.cache/sandbox/home"
+
 [tasks.test]
 description = "The whole suite — no real harness is ever called, no network is touched"
 # GIT_DIR and friends are unset: git exports them to hooks, and a test that

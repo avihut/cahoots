@@ -20,6 +20,10 @@ overrides the tests use, and they refuse to touch your real config, state and
 agent homes unless you set `CAHOOTS_DEV_REAL_DIRS=1` on purpose. Nothing a
 person installs honours any of those variables.
 
+To try a change by hand, `mise run cahoots -- <verb>` builds one and runs it
+on your checkout's own sandbox, `.cache/sandbox`. For the settings page, that
+is `mise run cahoots -- settings`. Delete the folder to start over.
+
 The git hooks (lefthook) format what you stage, check the commit message, and
 run the suite before a push. Two of them validate `daft.yml`, so a push — or a
 commit touching the hook/mise configuration — needs
