@@ -54,11 +54,25 @@ pub fn fake_harness() -> PathBuf {
 }
 
 /// Puts the fake at `path` as a new file, the way an update replaces a
-/// binary. Rewritten in place just after it ran, a binary's next run on macOS
-/// failed now and then.
+/// binary, written by `cp` rather than by this process. Rewritten in place
+/// just after it ran, a binary's next run on macOS failed now and then.
+/// Written here, it is open for writing while other tests start processes;
+/// each of those children holds the handle until its own exec, and Linux
+/// refuses to run a file anything has open for writing ("Text file busy"),
+/// so the fake's first run failed now and then too. In `cp`, the handle is in
+/// no process another test can fork, and it is closed once `cp` exits.
 pub fn fake_at(path: &Path) {
     let _ = fs::remove_file(path);
-    fs::copy(fake_harness(), path).unwrap();
+    let copied = StdCommand::new("cp")
+        .arg(fake_harness())
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(
+        copied.success(),
+        "cp could not put a fake at {}",
+        path.display()
+    );
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
