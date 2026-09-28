@@ -284,7 +284,7 @@ impl World {
     }
 
     /// `cahoots <args>` as a person runs it: stdout on the terminal too, so a
-    /// human verb ends in words, and there is no JSON to read.
+    /// verb a person reads ends in words, and there is no JSON to read.
     pub fn as_a_person(&self, args: &[&str]) -> AtTerminal {
         self.as_a_person_with(args, &[])
     }
@@ -296,6 +296,44 @@ impl World {
             Duration::ZERO,
             Stdout::Terminal,
         )
+    }
+
+    /// `cahoots <args>` with stdout and stderr on a terminal, and nothing on
+    /// stdin: a terminal on stdout alone, which proves no person is there.
+    pub fn with_stdin_elsewhere(&self, args: &[&str]) -> AtTerminal {
+        AtTerminal::start_with(
+            self.terminal_command(args, &[]),
+            Duration::ZERO,
+            Stdin::Nothing,
+            Stdout::Terminal,
+        )
+    }
+
+    /// Writes a history in which, for `advise`, codex (the default first
+    /// choice) kept being thrown away and claude (second) kept being
+    /// accepted: `each` runs of each.
+    pub fn history_where_the_second_choice_does_better(&self, each: usize) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut lines = String::new();
+        for (harness, model, outcome) in [
+            ("codex", "gpt-6-astra", "discarded"),
+            ("claude", "opus", "accepted"),
+        ] {
+            for n in 0..each {
+                let run = format!("0198c0de-0000-7000-8000-{harness:0>6}{n:06}");
+                lines.push_str(&format!(
+                    "{{\"kind\":\"finished\",\"t\":{now},\"run\":\"{run}\",\"role\":\"advise\",\"caller\":null,\
+                     \"target\":{{\"harness\":\"{harness}\",\"model\":\"{model}\",\"effort\":\"high\"}},\
+                     \"dir\":\"/w\",\"state\":\"done\",\"exit\":0,\"tokens_in\":1,\"tokens_out\":1,\"secs\":1,\"sampled\":false}}\n\
+                     {{\"kind\":\"outcome\",\"t\":{now},\"run\":\"{run}\",\"outcome\":\"{outcome}\"}}\n"
+                ));
+            }
+        }
+        fs::create_dir_all(&self.state).unwrap();
+        fs::write(self.state.join("history.jsonl"), lines).unwrap();
     }
 
     fn terminal_command(&self, args: &[&str], env: &[(&str, &str)]) -> StdCommand {
@@ -404,12 +442,21 @@ pub fn path_str(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+/// Where a command at a terminal reads its stdin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdin {
+    /// The terminal, as a person types at it.
+    Terminal,
+    /// Nothing at all (`/dev/null`).
+    Nothing,
+}
+
 /// Where a command at a terminal writes its stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stdout {
     /// Piped apart, as in `cahoots install | jq`: the JSON envelope.
     Piped,
-    /// On the terminal, as a person runs it: a human verb's words.
+    /// On the terminal, as a person runs it: the words of a verb a person reads.
     Terminal,
 }
 
@@ -486,7 +533,17 @@ pub fn plain(text: &str) -> String {
 impl AtTerminal {
     /// Starts `command` at the terminal, which answers a size question after
     /// `delay`, with its stdout piped apart or on the terminal too.
-    pub fn start(mut command: StdCommand, delay: Duration, stdout: Stdout) -> AtTerminal {
+    pub fn start(command: StdCommand, delay: Duration, stdout: Stdout) -> AtTerminal {
+        AtTerminal::start_with(command, delay, Stdin::Terminal, stdout)
+    }
+
+    /// `start`, with stdin on the terminal or on nothing at all.
+    pub fn start_with(
+        mut command: StdCommand,
+        delay: Duration,
+        stdin: Stdin,
+        stdout: Stdout,
+    ) -> AtTerminal {
         let size = Winsize {
             ws_row: 24,
             ws_col: 100,
@@ -495,7 +552,10 @@ impl AtTerminal {
         };
         let pty = openpty(&size, None::<&Termios>).expect("a pseudo-terminal");
         command
-            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdin(match stdin {
+                Stdin::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
+                Stdin::Nothing => Stdio::null(),
+            })
             .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
             .stdout(match stdout {
                 Stdout::Piped => Stdio::piped(),

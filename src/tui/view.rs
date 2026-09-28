@@ -71,6 +71,7 @@ const HIGHLIGHTED: &str = "●";
 const NOT_HIGHLIGHTED: &str = "○";
 const INFO: &str = "●";
 const WARNING: &str = "▲";
+const FAILED: &str = "■";
 
 /// `┌  title`, and the rail's first stretch.
 pub fn intro(title: &str, colors: Colors) -> Vec<String> {

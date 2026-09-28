@@ -5,9 +5,9 @@
 //! was written by an agent, and a byte like ESC could move the cursor or
 //! retitle the terminal.
 
-use super::super::ending::{Block, Ending, Item, Last, Mark};
+use super::super::ending::{Block, Checked, Ending, Item, Last, Mark};
 use super::super::page::Origin;
-use super::{ANSWERED, BAR, BAR_END, Colors, INFO, WARNING, intro};
+use super::{ANSWERED, BAR, BAR_END, Colors, FAILED, INFO, WARNING, intro};
 
 /// The columns an ending is wrapped at. Reading the terminal's own width
 /// takes unsafe code or a question to the terminal; 80 fits any terminal.
@@ -39,14 +39,8 @@ pub fn lines(ending: &Ending, colors: Colors) -> Vec<String> {
     for block in &ending.blocks {
         match block {
             Block::Said { mark, text, lines } => {
-                let mark = match mark {
-                    Mark::Done => colors.green(ANSWERED),
-                    Mark::Info => colors.blue(INFO),
-                    Mark::Warning => colors.yellow(WARNING),
-                };
-                hang(&mut out, &format!("{mark}  "), &bar, text, |text| {
-                    text.to_string()
-                });
+                let mark = format!("{}  ", painted(*mark, colors));
+                hang(&mut out, &mark, &bar, text, |text| text.to_string());
                 for line in lines {
                     hang(&mut out, &bar, &bar, line, |text| text.to_string());
                 }
@@ -61,6 +55,7 @@ pub fn lines(ending: &Ending, colors: Colors) -> Vec<String> {
                 hang(&mut out, &mark, &bar, title, |text| text.to_string());
                 listing(&mut out, &bar, items, label_width, colors);
             }
+            Block::Checks(rows) => checks(&mut out, &bar, rows, colors),
         }
         out.push(colors.gray(BAR));
     }
@@ -122,6 +117,44 @@ fn listing(out: &mut Vec<String>, bar: &str, items: &[Item], label_width: usize,
             } else {
                 format!("{bar}{}{}", " ".repeat(before_value), paint(piece))
             });
+        }
+    }
+}
+
+/// A mark in its color.
+fn painted(mark: Mark, colors: Colors) -> String {
+    match mark {
+        Mark::Done => colors.green(ANSWERED),
+        Mark::Info => colors.blue(INFO),
+        Mark::Warning => colors.yellow(WARNING),
+        Mark::Failed => colors.red(FAILED),
+    }
+}
+
+/// A mark, a label and a text on each line: the texts in a column of their
+/// own, after the widest label, and a long one wrapped under itself.
+fn checks(out: &mut Vec<String>, bar: &str, rows: &[Checked], colors: Colors) {
+    let labels: Vec<String> = rows.iter().map(|row| printable(&row.label)).collect();
+    let label_width = labels
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    // The label and two spaces.
+    let before_text = label_width + 2;
+    let room = (WIDTH - INDENT).saturating_sub(before_text).max(NARROWEST);
+    for (row, label) in rows.iter().zip(&labels) {
+        let first = format!("{}  {label}", painted(row.mark, colors));
+        let pieces = wrap(&printable(&row.text), room);
+        match pieces.split_first() {
+            None => out.push(first),
+            Some((head, rest)) => {
+                let pad = " ".repeat(before_text - label.chars().count());
+                out.push(format!("{first}{pad}{head}"));
+                for piece in rest {
+                    out.push(format!("{bar}{}{piece}", " ".repeat(before_text)));
+                }
+            }
         }
     }
 }
@@ -357,6 +390,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checks_put_each_mark_by_its_label_and_every_text_in_one_column() {
+        let row = |mark, label: &str, text: &str| Checked {
+            mark,
+            label: label.into(),
+            text: text.into(),
+        };
+        let rows = vec![
+            row(Mark::Done, "build", "1.2.3"),
+            row(
+                Mark::Warning,
+                "first: caller rules",
+                "to let first delegate without a prompt, add the rules below, which a person \
+                 pastes by hand",
+            ),
+            row(Mark::Failed, "config", ""),
+        ];
+        let last = "3 checks: 1 passed, 1 warning, 1 failed";
+        // The widest label, then two spaces: the texts start 21 columns in.
+        let column = |label: &str| " ".repeat(21 - label.chars().count());
+        assert_eq!(
+            said(
+                Some("cahoots doctor"),
+                vec![Block::Checks(rows.clone())],
+                Last::Refused(last.into())
+            ),
+            [
+                "┌  cahoots doctor".to_string(),
+                "│".to_string(),
+                format!("◇  build{}1.2.3", column("build")),
+                format!(
+                    "▲  first: caller rules{}to let first delegate without a prompt, add the rules",
+                    column("first: caller rules")
+                ),
+                format!("│  {}below, which a person pastes by hand", column("")),
+                "■  config".to_string(),
+                "│".to_string(),
+                format!("└  {last}"),
+            ]
+        );
+        let colored = said_colored(vec![Block::Checks(rows)]);
+        assert!(colored[0].starts_with("\x1b[32m◇\x1b[0m  build"));
+        assert!(colored[1].starts_with("\x1b[33m▲\x1b[0m  first: caller rules"));
+        assert_eq!(colored[3], "\x1b[31m■\x1b[0m  config");
+    }
+
     fn said_colored(blocks: Vec<Block>) -> Vec<String> {
         lines(
             &Ending {
@@ -420,6 +499,11 @@ mod tests {
                         origin: Origin::Set,
                     }],
                 },
+                Block::Checks(vec![Checked {
+                    mark: Mark::Failed,
+                    label: evil.into(),
+                    text: evil.into(),
+                }]),
             ],
             last: Last::Refused(evil.into()),
             paste: vec![Paste {

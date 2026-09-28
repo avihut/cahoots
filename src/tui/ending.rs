@@ -44,6 +44,9 @@ pub enum Block {
     /// `◇  title`, then a label and a value on each line, `•` where the
     /// value is set.
     Listing { title: String, items: Vec<Item> },
+    /// A mark, a label and a text on each line, the texts in one column:
+    /// what was checked, and how it went.
+    Checks(Vec<Checked>),
 }
 
 impl Block {
@@ -83,6 +86,16 @@ pub enum Mark {
     Info,
     /// `▲`, yellow.
     Warning,
+    /// `■`, red.
+    Failed,
+}
+
+/// One line of `Block::Checks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    pub mark: Mark,
+    pub label: String,
+    pub text: String,
 }
 
 /// A value in a listing, and where it comes from: `•` when it is set,

@@ -3,35 +3,7 @@
 
 mod common;
 
-use std::fs;
-
 use common::World;
-
-/// Writes a history in which, for `advise`, codex (the default first choice)
-/// kept being thrown away and claude (second) kept being accepted.
-fn history_where_the_second_choice_does_better(world: &World, each: usize) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let mut lines = String::new();
-    for (harness, model, outcome) in [
-        ("codex", "gpt-6-astra", "discarded"),
-        ("claude", "opus", "accepted"),
-    ] {
-        for n in 0..each {
-            let run = format!("0198c0de-0000-7000-8000-{harness:0>6}{n:06}");
-            lines.push_str(&format!(
-                "{{\"kind\":\"finished\",\"t\":{now},\"run\":\"{run}\",\"role\":\"advise\",\"caller\":null,\
-                 \"target\":{{\"harness\":\"{harness}\",\"model\":\"{model}\",\"effort\":\"high\"}},\
-                 \"dir\":\"/w\",\"state\":\"done\",\"exit\":0,\"tokens_in\":1,\"tokens_out\":1,\"secs\":1,\"sampled\":false}}\n\
-                 {{\"kind\":\"outcome\",\"t\":{now},\"run\":\"{run}\",\"outcome\":\"{outcome}\"}}\n"
-            ));
-        }
-    }
-    fs::create_dir_all(&world.state).unwrap();
-    fs::write(world.state.join("history.jsonl"), lines).unwrap();
-}
 
 fn first_choice(world: &World) -> String {
     // No caller: nobody is left out, so the first candidate is the role's first.
@@ -47,7 +19,7 @@ fn first_choice(world: &World) -> String {
 fn in_shadow_mode_the_suggestion_is_shown_and_nothing_changes() {
     let world = World::new();
     world.configure("[review]\nenabled = true");
-    history_where_the_second_choice_does_better(&world, 8);
+    world.history_where_the_second_choice_does_better(8);
 
     let report = world.ask(&["report", "--suggest"]);
     assert_eq!(report.code, 0, "{}", report.json);
@@ -73,7 +45,7 @@ fn in_shadow_mode_the_suggestion_is_shown_and_nothing_changes() {
 fn when_a_person_turns_it_on_the_order_moves_by_one_place() {
     let world = World::new();
     world.configure("[review]\nenabled = true\napply_routing = true");
-    history_where_the_second_choice_does_better(&world, 8);
+    world.history_where_the_second_choice_does_better(8);
     assert_eq!(first_choice(&world), "claude");
     let report = world.ask(&["report", "--suggest"]);
     assert_eq!(
@@ -89,12 +61,12 @@ fn when_a_person_turns_it_on_the_order_moves_by_one_place() {
 fn seven_runs_each_is_not_enough_and_review_off_means_off() {
     let world = World::new();
     world.configure("[review]\nenabled = true\napply_routing = true");
-    history_where_the_second_choice_does_better(&world, 7);
+    world.history_where_the_second_choice_does_better(7);
     assert_eq!(first_choice(&world), "codex");
 
     let world = World::new();
     world.configure("[review]\napply_routing = true"); // enabled is still false
-    history_where_the_second_choice_does_better(&world, 20);
+    world.history_where_the_second_choice_does_better(20);
     assert_eq!(
         first_choice(&world),
         "codex",
@@ -109,7 +81,7 @@ fn an_order_a_person_wrote_is_left_alone_unless_they_say_otherwise() {
     world.configure(&format!(
         "[review]\nenabled = true\napply_routing = true\n[roles.advise]\n{list}"
     ));
-    history_where_the_second_choice_does_better(&world, 12);
+    world.history_where_the_second_choice_does_better(12);
     assert_eq!(
         first_choice(&world),
         "codex",
@@ -133,7 +105,7 @@ fn an_order_a_person_wrote_is_left_alone_unless_they_say_otherwise() {
 fn what_is_learned_never_touches_a_cap_a_model_or_an_effort() {
     let world = World::new();
     world.configure("harness.codex.cap = 61\n[review]\nenabled = true\napply_routing = true");
-    history_where_the_second_choice_does_better(&world, 30);
+    world.history_where_the_second_choice_does_better(30);
     // `registry` is a person's verb; read the same thing through `pick` and `doctor`.
     let picked = world.ask(&["pick", "--role", "advise"]);
     assert_eq!(picked.data()["target"]["model"], "opus");

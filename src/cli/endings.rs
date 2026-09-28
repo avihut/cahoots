@@ -1,18 +1,21 @@
-//! How the human verbs end when a person reads them: their words, as
-//! `tui::Ending`s, made from what the logic returned. The settings' words
-//! (the page, `set`, `reset`, `enable` and `registry`) live in `settings.rs`
-//! with the rest of them. Nothing here decides anything or prints anything:
-//! `cli::emit` draws what these say, on stdout, when stdout is a terminal.
+//! How a verb a person reads ends: the human verbs, `doctor` and `report`,
+//! in words, as `tui::Ending`s, made from what the logic returned. The
+//! settings' words (the page, `set`, `reset`, `enable` and `registry`) live
+//! in `settings.rs` with the rest of them. Nothing here decides anything or
+//! prints anything: `cli::emit` draws what these say, on stdout, when a
+//! person reads it (`cli::reader`).
 
 use std::path::Path;
 
 use serde_json::Value;
 
 use super::settings::tilde;
+use crate::doctor::{Check, Status};
 use crate::install::files::{Outcome, Report};
 use crate::install::rules::rules_file;
+use crate::meter::tokens;
 use crate::model::HarnessId;
-use crate::tui::{Block, Ending, Last, Paste};
+use crate::tui::{Block, Checked, Ending, Last, Mark, Paste};
 
 /// What `install` did, for its words.
 pub struct Installed<'a> {
@@ -42,10 +45,7 @@ pub fn installed(done: Installed<'_>) -> Ending {
         .rules
         .iter()
         .filter(|(_, rules)| !rules.is_empty())
-        .map(|(harness, rules)| Paste {
-            heading: format!("Add to {}:", rules_file(*harness)),
-            lines: pasteable(*harness, rules),
-        })
+        .map(|(harness, rules)| to_paste(*harness, rules))
         .collect();
     let last = match (done.dry_run, paste.is_empty()) {
         (true, true) => "A dry run: nothing was written.",
@@ -148,6 +148,210 @@ pub fn learned(title: String, data: &Value, home: &Path) -> Ending {
     }
 }
 
+/// `doctor`: every check with its mark, and the rules a harness still
+/// needs, to paste under the file each belongs in. The last word counts the
+/// checks, in red when one failed.
+pub fn checked(title: String, checks: &[Check], home: &Path) -> Ending {
+    let rows = checks
+        .iter()
+        .map(|check| Checked {
+            mark: match check.status {
+                Status::Ok => Mark::Done,
+                Status::Warn => Mark::Warning,
+                Status::Fail => Mark::Failed,
+            },
+            label: check.check.clone(),
+            // The label names the harness, and the heading over its rules
+            // names the file.
+            text: match &check.rules {
+                Some(_) => "to delegate without a prompt, add the rules below".to_string(),
+                None => home_as_tilde(&check.detail, home),
+            },
+        })
+        .collect();
+    let paste = checks
+        .iter()
+        .filter_map(|check| check.rules.as_ref())
+        .map(|(harness, rules)| to_paste(*harness, rules))
+        .collect();
+    let with = |status| checks.iter().filter(|check| check.status == status).count() as u64;
+    let (warned, failed) = (with(Status::Warn), with(Status::Fail));
+    let mut counted = vec![format!("{} passed", with(Status::Ok))];
+    if warned > 0 {
+        counted.push(count(warned, "warning", "warnings"));
+    }
+    if failed > 0 {
+        counted.push(format!("{failed} failed"));
+    }
+    let all = count(checks.len() as u64, "check", "checks");
+    let last = match (warned, failed) {
+        (0, 0) => Last::Said(format!("All {all} passed")),
+        (_, 0) => Last::Said(format!("{all}: {}", counted.join(", "))),
+        _ => Last::Refused(format!("{all}: {}", counted.join(", "))),
+    };
+    Ending {
+        title: Some(title),
+        blocks: vec![Block::Checks(rows)],
+        last,
+        paste,
+    }
+}
+
+/// `report`, from its envelope's data: for each role and target, how its
+/// runs ended, what became of their results and what they cost; then, with
+/// `--suggest`, what those outcomes say about each role's order.
+pub fn reported(title: String, data: &Value) -> Ending {
+    let mut blocks = Vec::new();
+    for (key, row) in data["by_role_and_target"].as_object().into_iter().flatten() {
+        let n = |field: &str| row[field].as_u64().unwrap_or(0);
+        let said = |fields: &[(&str, &str)]| -> Vec<String> {
+            fields
+                .iter()
+                .filter(|(field, _)| n(field) > 0)
+                .map(|(field, words)| format!("{} {words}", n(field)))
+                .collect()
+        };
+        let ends = [
+            ("done", "done"),
+            ("failed", "failed"),
+            ("timed_out", "timed out"),
+            ("cancelled", "cancelled"),
+            ("stopped_by_budget", "stopped by budget"),
+        ];
+        let mut ended = said(&ends);
+        let not_ended = n("runs").saturating_sub(ends.iter().map(|(field, _)| n(field)).sum());
+        if not_ended > 0 {
+            ended.push(format!("{not_ended} not ended"));
+        }
+        let mut lines = vec![format!(
+            "{}: {}",
+            count(n("runs"), "run", "runs"),
+            ended.join(", ")
+        )];
+        let outcomes = said(&[
+            ("accepted", "accepted"),
+            ("reworked", "reworked"),
+            ("discarded", "discarded"),
+            ("outcome_unknown", "unknown"),
+        ]);
+        if !outcomes.is_empty() {
+            lines.push(format!("Outcomes: {}", outcomes.join(", ")));
+        }
+        let mut cost = format!("Median time {}", duration(n("median_secs")));
+        if n("tokens_in") + n("tokens_out") > 0 {
+            cost.push_str(&format!(
+                " · {} tokens in, {} out",
+                tokens(n("tokens_in")),
+                tokens(n("tokens_out"))
+            ));
+        }
+        lines.push(cost);
+        blocks.push(Block::done(key.clone(), lines));
+    }
+    if let Some(routing) = data.get("routing") {
+        blocks.extend(routed(routing));
+    }
+    let within = match data["days"].as_u64().unwrap_or(0) {
+        1 => "the last day".to_string(),
+        days => format!("the last {days} days"),
+    };
+    let last = match data["runs"].as_u64().unwrap_or(0) {
+        0 => format!("No runs in {within}"),
+        runs => format!("{} in {within}", count(runs, "run", "runs")),
+    };
+    Ending {
+        title: Some(title),
+        blocks,
+        last: Last::Said(last),
+        paste: Vec::new(),
+    }
+}
+
+/// `report --suggest`: whether the suggestions are in effect and the rule
+/// they follow, then each role's order with its evidence, and the one swap
+/// it supports, or why none.
+fn routed(routing: &Value) -> Vec<Block> {
+    let mode = match routing["mode"].as_str().unwrap_or_default() {
+        "applying" => "in effect",
+        mode => mode,
+    };
+    let mut blocks = vec![Block::info(
+        format!("Routing: {mode}"),
+        vec![format!(
+            "The rule: {}",
+            routing["rule"].as_str().unwrap_or_default()
+        )],
+    )];
+    for (role, said) in routing["roles"].as_object().into_iter().flatten() {
+        let mut lines: Vec<String> = said["order"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(n, entry)| {
+                format!(
+                    "{}. {}: {}",
+                    n + 1,
+                    candidate(&entry["candidate"]),
+                    evidence(&entry["evidence"])
+                )
+            })
+            .collect();
+        let swap = &said["suggested_swap"];
+        if swap.is_object() {
+            lines.push(format!(
+                "{} moves up past {}: {}",
+                candidate(&swap["move_up"]),
+                candidate(&swap["past"]),
+                if swap["in_effect"] == true {
+                    "in effect"
+                } else {
+                    "shown, not used"
+                }
+            ));
+        } else if let Some(why) = said["no_swap_because"].as_str() {
+            lines.push(format!("No change: {why}"));
+        }
+        blocks.push(Block::done(role.clone(), lines));
+    }
+    blocks
+}
+
+/// A candidate as the registry lists it: `codex gpt-5 high`.
+fn candidate(candidate: &Value) -> String {
+    ["harness", "model", "effort"]
+        .map(|field| candidate[field].as_str().unwrap_or_default())
+        .join(" ")
+}
+
+/// What a candidate's rated and failed runs say.
+fn evidence(evidence: &Value) -> String {
+    let Some(score) = evidence["score"].as_f64() else {
+        return "nothing to judge by yet".to_string();
+    };
+    let counted: Vec<String> = ["accepted", "reworked", "discarded", "failed"]
+        .into_iter()
+        .filter_map(|field| match evidence[field].as_u64().unwrap_or(0) {
+            0 => None,
+            n => Some(format!("{n} {field}")),
+        })
+        .collect();
+    format!(
+        "score {score:.2} from {} ({})",
+        count(evidence["n"].as_u64().unwrap_or(0), "run", "runs"),
+        counted.join(", ")
+    )
+}
+
+/// Seconds as a person says them: `45s`, `4m 12s`, `1h 3m`.
+fn duration(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 /// `learn reset`.
 pub fn forgot(title: String) -> Ending {
     Ending::just(
@@ -217,6 +421,14 @@ fn files(reports: &[Report], dry_run: bool, home: &Path) -> Vec<Block> {
     }
     blocks.extend(skipped);
     blocks
+}
+
+/// A harness's rules under the file they go in.
+fn to_paste(harness: HarnessId, rules: &[String]) -> Paste {
+    Paste {
+        heading: format!("Add to {}:", rules_file(harness)),
+        lines: pasteable(harness, rules),
+    }
 }
 
 /// A harness's rules as they go into its file: Claude Code's are entries
@@ -350,6 +562,191 @@ mod tests {
             expected,
             "a harness with no rules missing gets no block to paste"
         );
+    }
+
+    fn check(name: &str, status: Status, detail: &str) -> Check {
+        Check {
+            check: name.into(),
+            status,
+            detail: detail.into(),
+            rules: None,
+        }
+    }
+
+    #[test]
+    fn doctor_marks_each_check_and_puts_the_rules_a_harness_needs_under_its_file() {
+        let rules = vec![
+            "\"Bash(cahoots pick:*)\"".to_string(),
+            "\"Bash(cahoots run:*)\"".to_string(),
+        ];
+        let checks = [
+            check(
+                "directories",
+                Status::Ok,
+                &format!("config {HOME}/config · state {HOME}/state"),
+            ),
+            Check {
+                rules: Some((HarnessId::Claude, rules)),
+                ..check(
+                    "claude: caller rules",
+                    Status::Warn,
+                    "to let claude delegate without a prompt, a person adds to its file: …",
+                )
+            },
+            check("meter", Status::Warn, "no usage meter"),
+        ];
+        // The widest label and two spaces: every text starts in one column.
+        let column = |label: &str| " ".repeat(22 - label.chars().count());
+        let expected = format!(
+            "┌  cahoots doctor\n\
+             │\n\
+             ◇  directories{}config ~/config · state ~/state\n\
+             ▲  claude: caller rules{}to delegate without a prompt, add the rules below\n\
+             ▲  meter{}no usage meter\n\
+             │\n\
+             └  3 checks: 1 passed, 2 warnings\n\
+             \n\
+             Add to {}:\n\
+             \"Bash(cahoots pick:*)\",\n\
+             \"Bash(cahoots run:*)\"\n",
+            column("directories"),
+            column("claude: caller rules"),
+            column("meter"),
+            rules_file(HarnessId::Claude)
+        );
+        assert_eq!(
+            shown(&checked("cahoots doctor".into(), &checks, Path::new(HOME))),
+            expected
+        );
+    }
+
+    #[test]
+    fn doctor_s_last_word_counts_the_checks_and_is_red_when_one_failed() {
+        let last = |statuses: &[Status]| {
+            let checks: Vec<Check> = statuses
+                .iter()
+                .map(|status| check("a check", *status, "what it found"))
+                .collect();
+            checked("cahoots doctor".into(), &checks, Path::new(HOME)).last
+        };
+        assert_eq!(
+            last(&[Status::Ok, Status::Ok]),
+            Last::Said("All 2 checks passed".into())
+        );
+        assert_eq!(
+            last(&[Status::Ok, Status::Warn]),
+            Last::Said("2 checks: 1 passed, 1 warning".into())
+        );
+        assert_eq!(
+            last(&[Status::Ok, Status::Warn, Status::Warn, Status::Fail]),
+            Last::Refused("4 checks: 1 passed, 2 warnings, 1 failed".into())
+        );
+    }
+
+    #[test]
+    fn report_says_how_each_role_and_target_did_and_what_it_cost() {
+        let data = serde_json::json!({
+            "days": 1,
+            "runs": 12,
+            "by_role_and_target": {
+                "review · codex · gpt-6-astra · high": {
+                    "runs": 9, "done": 5, "failed": 1, "timed_out": 1, "cancelled": 1,
+                    "stopped_by_budget": 1, "accepted": 2, "reworked": 1, "discarded": 1,
+                    "outcome_unknown": 1, "tokens_in": 2_015_100, "tokens_out": 95_910,
+                    "median_secs": 190
+                },
+                "advise · claude · opus · high": {
+                    "runs": 3, "done": 2, "failed": 0, "timed_out": 0, "cancelled": 0,
+                    "stopped_by_budget": 0, "accepted": 0, "reworked": 0, "discarded": 0,
+                    "outcome_unknown": 0, "tokens_in": 0, "tokens_out": 0, "median_secs": 3700
+                }
+            }
+        });
+        assert_eq!(
+            shown(&reported("cahoots report".into(), &data)),
+            "┌  cahoots report\n\
+             │\n\
+             ◇  advise · claude · opus · high\n\
+             │  3 runs: 2 done, 1 not ended\n\
+             │  Median time 1h 1m\n\
+             │\n\
+             ◇  review · codex · gpt-6-astra · high\n\
+             │  9 runs: 5 done, 1 failed, 1 timed out, 1 cancelled, 1 stopped by budget\n\
+             │  Outcomes: 2 accepted, 1 reworked, 1 discarded, 1 unknown\n\
+             │  Median time 3m 10s · 2.0M tokens in, 95k out\n\
+             │\n\
+             └  12 runs in the last day\n",
+            "no outcomes and no tokens: no words for them"
+        );
+    }
+
+    #[test]
+    fn report_suggest_shows_each_role_s_order_its_evidence_and_the_one_swap() {
+        let codex =
+            serde_json::json!({ "harness": "codex", "model": "gpt-6-astra", "effort": "high" });
+        let claude = serde_json::json!({ "harness": "claude", "model": "opus", "effort": "high" });
+        let none = serde_json::json!({
+            "n": 0, "accepted": 0, "reworked": 0, "discarded": 0, "failed": 0, "score": null
+        });
+        let data = serde_json::json!({
+            "days": 30,
+            "runs": 0,
+            "by_role_and_target": {},
+            "routing": {
+                "mode": "applying",
+                "rule": "a candidate moves up ONE place past its neighbour",
+                "roles": {
+                    "advise": {
+                        "order": [
+                            { "candidate": codex, "evidence": {
+                                "n": 4, "accepted": 1, "reworked": 0, "discarded": 0, "failed": 3,
+                                "score": 0.25
+                            } },
+                            { "candidate": claude, "evidence": none }
+                        ],
+                        "suggested_swap": { "move_up": claude, "past": codex, "in_effect": true },
+                        "no_swap_because": null
+                    },
+                    "review": {
+                        "order": [ { "candidate": codex, "evidence": none } ],
+                        "suggested_swap": null,
+                        "no_swap_because": "the evidence does not support a change"
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            shown(&reported("cahoots report".into(), &data)),
+            "┌  cahoots report\n\
+             │\n\
+             ●  Routing: in effect\n\
+             │  The rule: a candidate moves up ONE place past its neighbour\n\
+             │\n\
+             ◇  advise\n\
+             │  1. codex gpt-6-astra high: score 0.25 from 4 runs (1 accepted, 3 failed)\n\
+             │  2. claude opus high: nothing to judge by yet\n\
+             │  claude opus high moves up past codex gpt-6-astra high: in effect\n\
+             │\n\
+             ◇  review\n\
+             │  1. codex gpt-6-astra high: nothing to judge by yet\n\
+             │  No change: the evidence does not support a change\n\
+             │\n\
+             └  No runs in the last 30 days\n"
+        );
+    }
+
+    #[test]
+    fn a_duration_is_said_in_the_two_largest_units() {
+        for (secs, said) in [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m 0s"),
+            (3599, "59m 59s"),
+            (3600, "1h 0m"),
+            (3700, "1h 1m"),
+        ] {
+            assert_eq!(duration(secs), said);
+        }
     }
 
     #[test]

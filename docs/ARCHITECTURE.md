@@ -38,8 +38,9 @@ hard rule 11, held by `scripts/guard.sh`):
   scripts get one JSON envelope and an exit code that means something
   (`src/exit.rs`, printed by `cli::emit`). A person at a terminal gets the
   Clack rail for a command's questions, the settings page on the whole
-  screen, and, for a human verb, how it ended in words on the rail, printed
-  where the envelope would go (`src/tui`, designed in `docs/TUI.md`). It
+  screen, and, for a human verb, `doctor` or `report`, how it ended in words
+  on the rail, printed where the envelope would go (`src/tui`, designed in
+  `docs/TUI.md`). It
   presents what it is given, returns answers as plain data (which choice,
   which number, what order), and knows nothing of meters, gates, runs or
   settings.
@@ -50,8 +51,8 @@ hard rule 11, held by `scripts/guard.sh`):
   on the page changes. It hands the answers back to the logic and prints
   what the verb said: the envelope, or for a person, the same in words
   (`src/cli/endings.rs`). Which one is `cli::reader`'s to decide: a person
-  reads a human verb whose stdout is a terminal, and a program reads
-  everything else.
+  reads a human verb whose stdout is a terminal, and `doctor` or `report`
+  when stdin is a terminal too; a program reads everything else.
 
 The TUI is layered the same way inside: the terminal itself, what its bytes
 mean, each way of answering (a choice, a number, an order), the page's
@@ -204,10 +205,11 @@ JSON envelope on stdout: `v`, `code`, `class`, `retry` (`never | later |
 after_reset | other_target | fix_config`), and optionally `message` and
 `data`. The exceptions are for a person at a terminal, with the same exit
 code: a human verb whose stdout is a terminal ends in words on the rail
-instead (`docs/TUI.md`), and a command line clap refuses ends in clap's own
-words, unless it names an agent or inspect verb. Piped, as in
+instead (`docs/TUI.md`), as do `doctor` and `report` when stdin is a
+terminal too, and a command line clap refuses ends in clap's own words,
+unless it names a verb that prints the envelope there. Piped, as in
 `cahoots install | jq`, everything prints the envelope, byte for byte, and
-an agent or inspect verb prints it at a terminal too. The envelope for a
+every other verb prints it at a terminal too. The envelope for a
 refused command line says what was wrong: clap's first paragraph, or for a
 command group given no command, which group needs one.
 

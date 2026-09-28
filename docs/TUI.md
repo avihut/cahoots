@@ -12,9 +12,9 @@ implementation.
   setting on one list, which will only grow. It takes the whole screen, lets
   a person change one setting at a time in a box, and gives the screen back
   as it was.
-- **How a human verb ends**, when a person reads it: what it did, in words on
-  the same rail, where a program gets the JSON envelope
-  ([below](#how-a-human-verb-ends)).
+- **How a command ends**, when a person reads it: what a human verb did, or
+  what `doctor` and `report` found, in words on the same rail, where a
+  program gets the JSON envelope ([below](#how-a-command-ends-in-words)).
 
 ```text
 ┌  cahoots install
@@ -60,9 +60,10 @@ on from the answer instead.
    nothing is drawn, and the command names the flag. How a human verb ends is
    printed on stdout: in words when stdout is a terminal, and as the one JSON
    envelope, byte for byte, when it is piped, so `cahoots install | jq` still
-   works. Agent and inspect verbs print the envelope even at a terminal: for
-   them a terminal proves nothing, since an agent may run a command under a
-   pseudo-terminal.
+   works. `doctor` and `report`, which anyone may run, end in words only when
+   stdin is a terminal too, the evidence a human verb has. Every other verb
+   prints the envelope even at a terminal: for it a terminal proves nothing,
+   since an agent may run a command under a pseudo-terminal.
 5. **Give the terminal back.** Key-by-key input, the hidden cursor, the
    turned-off line wrap and, for the page, the alternate screen are restored
    however it ends: Enter, Esc, Ctrl-C, or a panic. A release build aborts on
@@ -89,7 +90,8 @@ on from the answer instead.
 | `●  message` | worth knowing | the `●` blue |
 | `▲  message` | something left to do | the `▲` yellow |
 | `label   • value` | a value in a listing, `•` where config.toml sets it | the value dim unless it is set |
-| `└  message` | the conversation's end: what was decided | the `└` gray, the message red if nothing was |
+| `◇ ▲ ■  label   text` | a check and what it found: passed, a warning, or failed, the texts in one column | the `◇` green, the `▲` yellow, the `■` red |
+| `└  message` | the conversation's end: what was decided | the `└` gray, the message red if nothing was, or if a check failed |
 | lines after `└` | what to copy, under where it goes, flush left | none |
 
 Text is left in the terminal's own color unless the table says otherwise.
@@ -101,12 +103,12 @@ A kind of question cahoots doesn't have yet is added to `src/tui` in the same
 vocabulary, as Clack draws it: a yes/no question as `● Yes / ○ No`, a
 multi-select with `◻` and `◼`, and an error on the rail as `■`.
 
-## How a human verb ends
+## How a command ends in words
 
 A person who runs a human verb (`install`, `uninstall`, `settings`,
-`enable`, `learn`, `registry`) at a terminal reads how it ended in words, on
-the rail, printed where a program gets the JSON envelope. The exit code is
-the same either way.
+`enable`, `learn`, `registry`), `doctor` or `report` at a terminal reads
+how it ended in words, on the rail, printed where a program gets the JSON
+envelope. The exit code is the same either way.
 
 ```text
 ┌  cahoots install
@@ -137,10 +139,13 @@ prefix_rule(pattern=["cahoots", "pick"], decision="allow")
 …
 ```
 
-- **Who reads is decided by the verb and stdout alone** (`cli::reader`): a
-  person, for a human verb (whose tier already needs a terminal on stdin)
-  with stdout at a terminal too. Piped, stdout is the envelope byte for byte,
-  and stderr carries only what it carried before.
+- **Who reads is decided by the verb and where stdin and stdout go**
+  (`cli::reader`): a person, for a human verb (whose tier already needs a
+  terminal on stdin) with stdout at a terminal too, and for `doctor` or
+  `report` with both at a terminal. No allow rule names those two, so an
+  agent runs one only when a person lets it, and nothing promises their
+  output to a program but a pipe. Piped, stdout is the envelope byte for
+  byte, and stderr carries only what it carried before.
 - **One rail per command.** A question the command asked opens it, and the
   words go on from the answer. With no question, the words open it with
   `┌  cahoots <verb>`. A verb with one thing to say still draws the whole
@@ -152,12 +157,33 @@ prefix_rule(pattern=["cahoots", "pick"], decision="allow")
 - **A refusal is the rail closing in red**, on `└`, in the logic's own
   sentence: the question's rail when a question was left, and a new one
   otherwise.
+- **A check is one line:** its mark, its name and what was found, every
+  text in one column after the widest name. The last line counts the checks,
+  in red when one failed, and the rules a harness still needs come after
+  the rail, as install's do.
+
+```text
+┌  cahoots doctor
+│
+◇  build                 0.4.0
+◇  config                parses, and every value is in range
+◇  claude: binary        ~/.local/bin/claude 2.1.3
+▲  claude: caller rules  to delegate without a prompt, add the rules below
+■  codex: binary         …
+…
+│
+└  13 checks: 10 passed, 2 warnings, 1 failed
+
+Add to ~/.claude/settings.json (permissions.allow):
+…
+```
+
 - **A command line clap refuses keeps clap's own words** at a terminal, and
-  nothing follows them, when it names a human verb or no verb this build
-  knows (`cli::refused_reader`). A bare `cahoots` shows its help, and a
-  mistyped verb gets clap's tip. A line that names an agent or inspect verb
-  still gets the envelope after clap's words, since an agent may be the one
-  that typed it.
+  nothing follows them, when it names a verb a person reads there, or no
+  verb this build knows (`cli::refused_reader`). A bare `cahoots` shows its
+  help, and a mistyped verb gets clap's tip. A line that names any other
+  verb still gets the envelope after clap's words, since an agent may be
+  the one that typed it.
 - **What a person copies comes after the rail, flush left,** under the file
   it goes in: no rail, no color and no wrapping, so a selected block pastes
   as it is. Codex's rules file is Starlark, where an indented line does not
@@ -168,14 +194,15 @@ prefix_rule(pattern=["cahoots", "pick"], decision="allow")
   `~`.
 - **A control character is shown as its escape** (`\u{1b}`), never sent.
   Some of this text was written by an agent, such as what reviewers wrote in
-  `learn list`, and a byte like ESC could move the cursor or retitle the
+  `learn list`, or by another program, such as the versions and errors
+  `doctor` shows, and a byte like ESC could move the cursor or retitle the
   terminal.
 
 The words are data. The command layer builds a `tui::Ending` from what the
 logic returned (`src/cli/endings.rs`, and `src/cli/settings.rs` for the
-settings' own), and `Rail::end` draws it. A new human verb gets its words
-there, tested as text with `Colors::OFF`, and once end to end as a person
-runs it (`World::as_a_person`, with stdout on the terminal too).
+settings' own), and `Rail::end` draws it. A new verb a person reads gets its
+words there, tested as text with `Colors::OFF`, and once end to end as a
+person runs it (`World::as_a_person`, with stdout on the terminal too).
 
 ## The settings page
 
@@ -267,7 +294,7 @@ The TUI is the interface, and only the interface (`AGENTS.md`, hard rule 11):
 - **The command layer** words the question or the settings and says what
   each answer means (`src/cli/questions.rs`, `src/cli/settings.rs`). It puts
   them on the rail or the page, and hands the answers to the logic. It words
-  how each human verb ends, too (`src/cli/endings.rs`).
+  how each verb a person reads ends, too (`src/cli/endings.rs`).
 - **The TUI** draws what it is given and says what was answered. It knows
   nothing of meters, gates, runs or settings, and uses nothing else in the
   crate.

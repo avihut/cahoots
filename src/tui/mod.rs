@@ -1,6 +1,7 @@
 //! The interface cahoots shows a person at a terminal: questions on the
-//! Clack rail, the settings page on the whole screen, and how a human verb
-//! ends, in words on the rail. `docs/TUI.md` is the design and its rules.
+//! Clack rail, the settings page on the whole screen, and how a command a
+//! person reads ends, in words on the rail. `docs/TUI.md` is the design and
+//! its rules.
 //!
 //! This is an interface and nothing more. It draws the text it is given, reads
 //! keys, and answers with plain data (which choice, which number, what order,
@@ -40,7 +41,7 @@ mod stepper;
 mod terminal;
 mod view;
 
-pub use ending::{Block, Ending, Item, Last, Mark, Paste};
+pub use ending::{Block, Checked, Ending, Item, Last, Mark, Paste};
 pub use keys::{Key, Keys};
 pub use page::{Answer, Edit, Event, Origin, Page, Row};
 pub use rail::Rail;

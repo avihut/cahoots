@@ -10,7 +10,8 @@
 //! (hard rule 11). It calls the logic, puts the logic's questions to a person
 //! (`questions`, on `crate::tui`), hands the answers back, and prints what
 //! the verb said: the one JSON envelope, or, for a person reading a human
-//! verb at a terminal, the same in words (`endings`, `settings`).
+//! verb, `doctor` or `report` at a terminal, the same in words (`endings`,
+//! `settings`).
 
 mod endings;
 mod questions;
@@ -323,37 +324,57 @@ pub enum Reader {
     Person,
 }
 
-/// Who reads stdout. PURE, like `refusal`, so it is tested without running
-/// a verb. A person only for a human verb, which already needs a terminal on
-/// stdin, and only while stdout is a terminal too: piped (`| jq`), it is
-/// the envelope, byte for byte. For every other tier a terminal proves
-/// nothing, since an agent may run a command under a pseudo-terminal, and
-/// it is always owed the envelope.
-pub fn reader(tier: Tier, stdout_is_terminal: bool) -> Reader {
-    if tier == Tier::Human && stdout_is_terminal {
+/// The inspect verbs a person reads: `doctor`'s checks and `report`'s
+/// numbers. No allow rule names them, so an agent runs one only when a
+/// person lets it, and nothing promises their output to a program but a
+/// pipe.
+const READ_BY_A_PERSON: [&str; 2] = ["doctor", "report"];
+
+/// Who reads stdout, by the verb's name. PURE, like `refusal`, so it is
+/// tested without running a verb. A person only while stdout is a terminal:
+/// piped (`| jq`), it is the envelope, byte for byte. That is enough for a
+/// human verb, whose tier already needs a terminal on stdin. `doctor` and
+/// `report` run anywhere, so they need the evidence a human verb has: stdin
+/// at a terminal too. For every other verb a terminal proves nothing, since
+/// an agent may run a command under a pseudo-terminal, and it is always owed
+/// the envelope.
+pub fn reader(name: &str, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Reader {
+    let person = match tier_of(name) {
+        Some(Tier::Human) => stdout_is_terminal,
+        Some(Tier::Inspect) if READ_BY_A_PERSON.contains(&name) => {
+            stdin_is_terminal && stdout_is_terminal
+        }
+        _ => false,
+    };
+    if person {
         Reader::Person
     } else {
         Reader::Program
     }
 }
 
-/// The tier of the verb a command line names, for one clap refused, which
-/// has no `Verb`: its first word that is not a flag, if clap knows it.
-pub fn tier_named(args: impl IntoIterator<Item = OsString>) -> Option<Tier> {
+/// The verb a command line names, for one clap refused, which has no
+/// `Verb`: its first word that is not a flag, if clap knows it.
+pub fn verb_named(args: impl IntoIterator<Item = OsString>) -> Option<String> {
     args.into_iter()
         .skip(1)
-        .find(|arg| !arg.to_string_lossy().starts_with('-'))
-        .and_then(|name| tier_of(&name.to_string_lossy()))
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .find(|arg| !arg.starts_with('-'))
+        .filter(|name| tier_of(name).is_some())
 }
 
-/// Who reads what is printed for a command line clap refused, by the tier
-/// of the verb it names (`tier_named`). PURE, like `reader`. A line that
-/// names a verb reads as that verb does. A line that names no verb this
-/// build knows, or none at all, is a person's at a terminal: no agent is
-/// told to type one, so clap's own words are the answer, with the same exit.
-pub fn refused_reader(named: Option<Tier>, stdout_is_terminal: bool) -> Reader {
+/// Who reads what is printed for a command line clap refused, by the verb
+/// it names (`verb_named`). PURE, like `reader`. A line that names a verb
+/// reads as that verb does. A line that names no verb this build knows, or
+/// none at all, is a person's at a terminal: no agent is told to type one,
+/// so clap's own words are the answer, with the same exit.
+pub fn refused_reader(
+    named: Option<&str>,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Reader {
     match named {
-        Some(tier) => reader(tier, stdout_is_terminal),
+        Some(name) => reader(name, stdin_is_terminal, stdout_is_terminal),
         None if stdout_is_terminal => Reader::Person,
         None => Reader::Program,
     }
@@ -436,7 +457,7 @@ fn title(verb: &Verb) -> String {
 /// Runs a parsed command line and returns what to print and exit with: the
 /// envelope, and for a person reading stdout, the same in words.
 pub fn dispatch(cli: Cli, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Said {
-    let reader = reader(cli.verb.tier(), stdout_is_terminal);
+    let reader = reader(cli.verb.name(), stdin_is_terminal, stdout_is_terminal);
     let title = title(&cli.verb);
     let stopped = match refusal(&cli.verb, stdin_is_terminal) {
         Some(fail) => Stopped::from(fail),
@@ -525,7 +546,17 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
                 words,
             })
         }
-        Verb::Doctor => Ok(crate::doctor::doctor()?.into()),
+        Verb::Doctor => {
+            let checks = crate::doctor::checks()?;
+            let words = match person {
+                true => Some(endings::checked(title, &checks, &Dirs::resolve()?.home)),
+                false => None,
+            };
+            Ok(Said {
+                envelope: crate::doctor::envelope(&checks),
+                words,
+            })
+        }
         Verb::Notes { role, to, caller } => Ok(crate::learn::notes(role, to, caller)?.into()),
         Verb::Review {
             action: ReviewAction::Next { caller },
@@ -559,7 +590,14 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             words: person.then(|| endings::forgot(title)),
         }),
         Verb::Outcome { run, outcome } => Ok(client::outcome(&run, outcome)?.into()),
-        Verb::Report { days, suggest } => Ok(crate::report::report(days, suggest)?.into()),
+        Verb::Report { days, suggest } => {
+            let envelope = crate::report::report(days, suggest)?;
+            let words = person.then(|| {
+                let data = envelope.data.clone().unwrap_or_default();
+                endings::reported(title, &data)
+            });
+            Ok(Said { envelope, words })
+        }
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
         Verb::Install {
             harness,
@@ -888,57 +926,76 @@ mod tests {
     /// Who reads is decided, never found out by running a verb: `reader`,
     /// like `refusal`, is tested without `dispatch`.
     #[test]
-    fn only_a_human_verb_with_stdout_at_a_terminal_is_read_by_a_person() {
+    fn a_person_reads_a_human_verb_doctor_and_report_at_a_terminal_and_nothing_else() {
         for sub in Cli::command().get_subcommands() {
             let name = sub.get_name();
-            let tier = tier_of(name).unwrap();
-            assert_eq!(
-                reader(tier, false),
-                Reader::Program,
-                "{name}: a pipe is read by a program"
-            );
-            let expected = match tier {
-                Tier::Human => Reader::Person,
-                Tier::Agent | Tier::Inspect | Tier::Internal => Reader::Program,
+            for stdin in [false, true] {
+                assert_eq!(
+                    reader(name, stdin, false),
+                    Reader::Program,
+                    "{name}: a pipe is read by a program"
+                );
+            }
+            let (both, stdout_only) = match tier_of(name).unwrap() {
+                Tier::Human => (Reader::Person, Reader::Person),
+                Tier::Inspect if ["doctor", "report"].contains(&name) => {
+                    (Reader::Person, Reader::Program)
+                }
+                Tier::Agent | Tier::Inspect | Tier::Internal => (Reader::Program, Reader::Program),
             };
-            assert_eq!(reader(tier, true), expected, "{name}");
+            assert_eq!(reader(name, true, true), both, "{name}");
+            assert_eq!(
+                reader(name, false, true),
+                stdout_only,
+                "{name}: stdin is not a terminal"
+            );
         }
     }
 
     #[test]
     fn a_command_line_clap_refused_still_names_its_verb() {
-        let named = |argv: &[&str]| tier_named(argv.iter().map(OsString::from));
-        assert_eq!(named(&["cahoots", "enable", "gemini"]), Some(Tier::Human));
-        assert_eq!(
-            named(&["cahoots", "settings", "set", "harness.codex.cap"]),
-            Some(Tier::Human)
-        );
-        assert_eq!(named(&["cahoots", "--bogus", "install"]), Some(Tier::Human));
-        assert_eq!(
-            named(&["cahoots", "run", "--role", "deploy"]),
-            Some(Tier::Agent)
-        );
+        let named = |argv: &[&str]| verb_named(argv.iter().map(OsString::from));
+        for (argv, verb) in [
+            (vec!["cahoots", "enable", "gemini"], "enable"),
+            (
+                vec!["cahoots", "settings", "set", "harness.codex.cap"],
+                "settings",
+            ),
+            (vec!["cahoots", "--bogus", "install"], "install"),
+            (vec!["cahoots", "run", "--role", "deploy"], "run"),
+            (vec!["cahoots", "report", "--days", "abc"], "report"),
+        ] {
+            assert_eq!(named(&argv).as_deref(), Some(verb), "{argv:?}");
+        }
         assert_eq!(named(&["cahoots", "conspire"]), None);
         assert_eq!(named(&["cahoots"]), None);
     }
 
     #[test]
     fn a_refused_line_is_a_persons_at_a_terminal_unless_it_names_a_verb_a_program_runs() {
-        assert_eq!(refused_reader(None, true), Reader::Person, "no verb at all");
-        assert_eq!(refused_reader(None, false), Reader::Program, "piped");
-        assert_eq!(refused_reader(Some(Tier::Human), true), Reader::Person);
-        for tier in [Tier::Agent, Tier::Inspect, Tier::Internal] {
+        assert_eq!(
+            refused_reader(None, true, true),
+            Reader::Person,
+            "no verb at all"
+        );
+        assert_eq!(refused_reader(None, false, true), Reader::Person);
+        assert_eq!(refused_reader(None, true, false), Reader::Program, "piped");
+        for name in ["enable", "doctor", "report"] {
+            assert_eq!(refused_reader(Some(name), true, true), Reader::Person);
+        }
+        assert_eq!(refused_reader(Some("report"), false, true), Reader::Program);
+        for name in ["run", "status", "exit-codes", "skill", "__supervise"] {
             assert_eq!(
-                refused_reader(Some(tier), true),
+                refused_reader(Some(name), true, true),
                 Reader::Program,
-                "{tier:?}"
+                "{name}"
             );
         }
-        for tier in [Tier::Agent, Tier::Human, Tier::Inspect, Tier::Internal] {
+        for name in ["run", "enable", "doctor", "exit-codes", "__supervise"] {
             assert_eq!(
-                refused_reader(Some(tier), false),
+                refused_reader(Some(name), true, false),
                 Reader::Program,
-                "{tier:?}"
+                "{name}"
             );
         }
     }

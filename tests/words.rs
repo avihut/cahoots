@@ -1,9 +1,10 @@
-//! The human verbs as a person runs them: stdin, stdout and stderr on one
-//! terminal, so each ends in words on the rail, and nothing on the screen is
-//! JSON. Piped, the same verbs print the envelope byte for byte, and
-//! `tests/cli.rs`, `tests/meters.rs` and `tests/settings.rs` hold that side.
-//! The settings page and install's question are run this way beside their
-//! other tests.
+//! The verbs a person reads, as a person runs them: the human verbs,
+//! `doctor` and `report`, with stdin, stdout and stderr on one terminal, so
+//! each ends in words on the rail, and nothing on the screen is JSON. Piped,
+//! the same verbs print the envelope byte for byte, and `tests/cli.rs`,
+//! `tests/meters.rs`, `tests/settings.rs` and the tests that ask `doctor` and
+//! `report` hold that side. The settings page and install's question are run
+//! this way beside their other tests.
 
 mod common;
 
@@ -165,14 +166,26 @@ fn a_refusal_closes_the_rail_in_red_with_the_same_exit_code() {
 }
 
 #[test]
-fn a_bad_command_line_for_a_human_verb_is_clap_s_own_words_and_nothing_more() {
+fn a_bad_command_line_for_a_verb_a_person_reads_is_clap_s_own_words_and_nothing_more() {
     let world = World::new();
-    let after = world.as_a_person(&["enable", "gemini"]).finish();
-    assert_eq!(after.code, 2, "{}", after.text());
-    let text = after.text();
-    assert!(text.starts_with("error: invalid value 'gemini'"), "{text}");
-    assert!(!text.contains('┌'), "{text}");
-    no_json(&after);
+    for (args, says) in [
+        (vec!["enable", "gemini"], "error: invalid value 'gemini'"),
+        (
+            vec!["report", "--days", "abc"],
+            "error: invalid value 'abc'",
+        ),
+        (
+            vec!["doctor", "--bogus"],
+            "error: unexpected argument '--bogus'",
+        ),
+    ] {
+        let after = world.as_a_person(&args).finish();
+        assert_eq!(after.code, 2, "{args:?}: {}", after.text());
+        let text = after.text();
+        assert!(text.starts_with(says), "{args:?}: {text}");
+        assert!(!text.contains('┌'), "{args:?}: {text}");
+        no_json(&after);
+    }
 }
 
 #[test]
@@ -225,9 +238,9 @@ fn a_bad_command_line_for_an_agent_verb_keeps_the_envelope_at_a_terminal() {
 }
 
 #[test]
-fn agent_and_inspect_verbs_keep_the_envelope_even_at_a_terminal() {
+fn agent_verbs_and_the_other_inspect_verbs_keep_the_envelope_even_at_a_terminal() {
     let world = World::new();
-    for args in [vec!["status"], vec!["exit-codes"]] {
+    for args in [vec!["status"], vec!["exit-codes"], vec!["skill"]] {
         let after = world.as_a_person(&args).finish();
         assert_eq!(after.code, 0, "{args:?}: {}", after.text());
         let text = after.text();
@@ -267,4 +280,160 @@ fn registry_lists_every_setting_in_effect_under_its_section() {
     assert!(advise.contains(", then "), "{advise:?}");
     assert!(text.contains("└  • set in"), "{text}");
     no_json(&after);
+}
+
+/// The line of `text` that starts with `start`.
+fn line<'a>(text: &'a str, start: &str) -> &'a str {
+    text.lines()
+        .find(|line| line.starts_with(start))
+        .unwrap_or_else(|| panic!("no line starts with {start:?} in:\n{text}"))
+}
+
+#[test]
+fn doctor_marks_every_check_and_ends_with_the_rules_to_paste() {
+    let world = World::new();
+    let after = world.as_a_person(&["doctor"]).finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    assert!(text.starts_with("┌  cahoots doctor\n│\n"), "{text}");
+    assert!(
+        line(&text, "◇  config ").ends_with("  parses, and every value is in range"),
+        "{text}"
+    );
+    for harness in ["claude", "codex"] {
+        let rules = line(&text, &format!("▲  {harness}: caller rules "));
+        assert!(
+            rules.ends_with("  to delegate without a prompt, add the rules below"),
+            "{rules:?}"
+        );
+    }
+    // Every text starts in one column, after the widest label.
+    let column = |start: &str| {
+        line(&text, start)
+            .find("  ")
+            .map(|at| at + line(&text, start)[at..].find(|c: char| c != ' ').unwrap())
+    };
+    assert_eq!(column("◇  config "), column("▲  claude: caller rules "));
+    // A dev build warns that it honours its overrides, so the count has a warning.
+    let last = line(&text, "└  ");
+    assert!(
+        last.contains(" checks: ") && last.contains(" warning"),
+        "{last:?}"
+    );
+    for shown in [
+        "\n\nAdd to ~/.claude/settings.json (permissions.allow):\n\"Bash(cahoots pick:*)\",\n",
+        "\"Bash(cahoots review:*)\"\n\nAdd to ~/.codex/rules/default.rules:\n\
+         prefix_rule(pattern=[\"cahoots\", \"pick\"], decision=\"allow\")\n",
+    ] {
+        assert!(text.contains(shown), "{shown:?} in:\n{text}");
+    }
+    assert!(
+        text.ends_with("prefix_rule(pattern=[\"cahoots\", \"review\"], decision=\"allow\")\n"),
+        "the rules end it, flush left:\n{text}"
+    );
+    no_json(&after);
+}
+
+#[test]
+fn a_failed_check_ends_doctor_in_red_with_its_exit_code() {
+    let world = World::new();
+    fs::write(
+        world.config.join("config.toml"),
+        "schema = 1\n[harness.codex\n",
+    )
+    .unwrap();
+    let after = world
+        .as_a_person_with(&["doctor"], &[("NO_COLOR", "")])
+        .finish();
+    assert_eq!(after.code, 34, "{}", after.text());
+    let text = after.text();
+    assert!(line(&text, "■  config ").contains("config.toml"), "{text}");
+    let last = "3 checks: 1 passed, 1 warning, 1 failed";
+    assert!(text.ends_with(&format!("│\n└  {last}\n")), "{text}");
+    assert!(
+        after.screen.contains("\u{1b}[31m■\u{1b}[0m")
+            && after.screen.contains(&format!("\u{1b}[31m{last}\u{1b}[0m")),
+        "{:?}",
+        after.screen
+    );
+    no_json(&after);
+}
+
+#[test]
+fn report_says_how_each_role_and_target_did() {
+    let world = World::new();
+    world.run("one", &[]);
+    world.run("FAKE: fail", &[]);
+    let after = world.as_a_person(&["report"]).finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    assert!(
+        text.starts_with(
+            "┌  cahoots report\n│\n◇  advise · codex · gpt-6-astra · high\n\
+             │  2 runs: 1 done, 1 failed\n│  Outcomes: 1 unknown\n│  Median time "
+        ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("│\n└  2 runs in the last 30 days\n"),
+        "{text}"
+    );
+    no_json(&after);
+
+    let empty = World::new()
+        .as_a_person(&["report", "--days", "1"])
+        .finish();
+    assert_eq!(
+        empty.text(),
+        "┌  cahoots report\n│\n└  No runs in the last day\n"
+    );
+}
+
+#[test]
+fn report_suggest_shows_each_role_s_order_with_its_evidence_and_the_swap() {
+    let world = World::new();
+    world.configure("[review]\nenabled = true");
+    world.history_where_the_second_choice_does_better(8);
+    let after = world.as_a_person(&["report", "--suggest"]).finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    for shown in [
+        "●  Routing: shadow — shown, not used (review.apply_routing = true to use it)\n\
+         │  The rule: a candidate moves up ONE place",
+        "◇  advise\n\
+         │  1. codex gpt-6-astra high: score 0.00 from 8 runs (8 discarded)\n\
+         │  2. claude opus high: score 1.00 from 8 runs (8 accepted)\n\
+         │  claude opus high moves up past codex gpt-6-astra high: shown, not used\n",
+        "◇  review\n│  1. ",
+        "│  No change: the evidence does not support a change\n",
+        "└  16 runs in the last 30 days\n",
+    ] {
+        assert!(text.contains(shown), "{shown:?} in:\n{text}");
+    }
+    no_json(&after);
+}
+
+#[test]
+fn doctor_and_report_keep_the_envelope_when_stdin_is_not_a_terminal() {
+    // A terminal on stdout alone proves nothing: an agent may run a
+    // command with one.
+    let world = World::new();
+    for args in [vec!["doctor"], vec!["report"]] {
+        let after = world.with_stdin_elsewhere(&args).finish();
+        assert_eq!(after.code, 0, "{args:?}: {}", after.text());
+        let text = after.text();
+        let json: serde_json::Value = serde_json::from_str(text.trim())
+            .unwrap_or_else(|error| panic!("{args:?}: {error}\n{text}"));
+        assert_eq!(json["v"], 1, "{args:?}");
+    }
+    let refused = world
+        .with_stdin_elsewhere(&["report", "--days", "abc"])
+        .finish();
+    assert_eq!(refused.code, 2, "{}", refused.text());
+    let text = refused.text();
+    let at = text
+        .find('{')
+        .unwrap_or_else(|| panic!("no envelope after clap's words: {text}"));
+    let json: serde_json::Value = serde_json::from_str(text[at..].trim()).unwrap();
+    assert_eq!(json["class"], "usage_error");
 }

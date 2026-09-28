@@ -57,9 +57,9 @@ reasonable thing to allow, and a PR that bends one needs to say so up front
   never a typed-in answer, and a flag answers it too. The settings page
   (`cahoots settings`) is chosen with the keys the same way, and
   `settings set` / `settings reset` do without it (`docs/TUI.md`).
-- **A human verb at a terminal ends in words on the rail;** piped, it prints
-  the envelope byte for byte. Agent and inspect verbs always print the
-  envelope.
+- **A human verb at a terminal ends in words on the rail,** and so do
+  `doctor` and `report` when stdin is a terminal too; piped, they print the
+  envelope byte for byte. Every other verb always prints the envelope.
 
 ## Pull requests
 
