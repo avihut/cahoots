@@ -1,6 +1,7 @@
 //! The interface cahoots shows a person at a terminal: questions on the
-//! Clack rail, and the settings page on the whole screen. `docs/TUI.md` is
-//! the design and its rules.
+//! Clack rail, the settings page on the whole screen, and how a command a
+//! person reads ends, in words on the rail. `docs/TUI.md` is the design and
+//! its rules.
 //!
 //! This is an interface and nothing more. It draws the text it is given, reads
 //! keys, and answers with plain data (which choice, which number, what order,
@@ -16,16 +17,20 @@
 //!   choice, a number, an order — and what a key does to it.
 //! - `page` holds the settings page: its rows, the highlighted one, the box
 //!   open to change one, and the events it sends out.
+//! - `ending` holds how a command ends: its blocks, its last word, and the
+//!   lines to copy.
 //! - `view` says how things look: the rail's symbols and colors and a
-//!   prompt's frame; `view::canvas`, a grid to draw a whole screen on; and
-//!   `view::page`, the page drawn on it.
+//!   prompt's frame; `view::ending`, a command's end; `view::canvas`, a grid
+//!   to draw a whole screen on; and `view::page`, the page drawn on it.
 //! - `rail` holds a conversation on the rail, and `screen` the page on the
 //!   whole screen, each drawn and redrawn as keys come.
 //!
 //! Only `terminal` touches a terminal, so the rest is data in, text out, and the
-//! tests drive it with scripted keys. Everything is drawn on stderr, because
-//! stdout carries the one JSON envelope.
+//! tests drive it with scripted keys. Questions and the page are drawn on
+//! stderr, and a command's end on whatever it is given: the command layer
+//! gives it stdout, where the JSON envelope would go if a program were reading.
 
+mod ending;
 mod keys;
 mod order;
 mod page;
@@ -36,6 +41,7 @@ mod stepper;
 mod terminal;
 mod view;
 
+pub use ending::{Block, Checked, Ending, Item, Last, Mark, Paste};
 pub use keys::{Key, Keys};
 pub use page::{Answer, Edit, Event, Origin, Page, Row};
 pub use rail::Rail;

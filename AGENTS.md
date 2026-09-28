@@ -86,6 +86,13 @@ design and its rules, and `src/tui` is its one implementation. A new
 question starts as data the logic returns, and its words live in
 `src/cli/questions.rs`; a new setting starts in config.toml and the catalog
 (`src/settings.rs`), and its words live in `src/cli/settings.rs`.
+A human verb whose stdout is a terminal ends in words on the rail, printed
+where the envelope would go, with the same exit code, and so do `doctor`
+and `report` when stdin is a terminal too. Piped, they print the envelope
+byte for byte, and every other verb prints the envelope even at a
+terminal. Those words live in `src/cli/endings.rs`. A command line clap
+refuses is read the same way, by the verb it names; one that names no
+verb, like a bare `cahoots`, is a person's at a terminal.
 
 ## Working here
 

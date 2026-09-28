@@ -77,6 +77,54 @@ fn the_page_changes_a_setting_in_place_and_gives_the_terminal_back() {
 }
 
 #[test]
+fn closed_as_a_person_the_page_says_each_change_it_saved_or_that_nothing_changed() {
+    let world = World::new();
+    let terminal = world.as_a_person(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.press(DOWN);
+    terminal.wait_for("❯ Usage cap");
+    terminal.press(ENTER);
+    terminal.wait_for("◀  75%  ▶");
+    terminal.press(LEFT);
+    terminal.wait_for("◀  70%  ▶");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [harness.claude] cap = 70");
+    terminal.press(TAB);
+    terminal.wait_for("Runs go to Codex only while this is on.");
+    terminal.press(ENTER);
+    terminal.wait_for("Took [harness.codex] enabled out of config.toml: back to off");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    assert!(after.json.is_null(), "no JSON on a person's stdout");
+    assert!(
+        after.text().ends_with(
+            "┌  cahoots settings\n│\n\
+             │  Saved to config.toml: [harness.claude] cap = 70\n\
+             │  Took [harness.codex] enabled out of config.toml: back to off\n\
+             │\n└  2 settings changed\n"
+        ),
+        "{}",
+        after.text()
+    );
+    given_back(&after);
+
+    let terminal = world.as_a_person(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0);
+    assert!(
+        after
+            .text()
+            .ends_with("┌  cahoots settings\n│\n└  Nothing changed\n"),
+        "{}",
+        after.text()
+    );
+    given_back(&after);
+}
+
+#[test]
 fn closing_the_page_without_a_change_changes_nothing() {
     let world = World::new();
     let file = world.config.join("config.toml");

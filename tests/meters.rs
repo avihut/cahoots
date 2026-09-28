@@ -710,6 +710,68 @@ fn leaving_the_question_writes_nothing_and_names_the_flag() {
 }
 
 #[test]
+fn as_a_person_the_question_and_installs_words_share_one_rail() {
+    let world = World::bare();
+    two_meters(&world);
+    let terminal = world.as_a_person(&["install"]);
+    terminal.wait_for("◆  Which usage meter should cahoots use?");
+    terminal.press(b"\x1b[B");
+    terminal.wait_for("● ccusage (token counts");
+    terminal.press(b"\r");
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    assert_eq!(text.matches("┌  cahoots install").count(), 1, "{text}");
+    assert!(
+        !text.contains("└  Usage meter: ccusage"),
+        "the question closed the rail the words go on from: {text}"
+    );
+    assert!(
+        text.contains("◇  Which usage meter should cahoots use?\n│  ccusage\n│\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "●  Usage meter: ccusage (you chose it).\n\
+             │  Saved to config.toml: [meter] use = \"ccusage\"\n"
+        ),
+        "{text}"
+    );
+    let config = fs::read_to_string(world.config.join("config.toml")).unwrap();
+    assert_eq!(config, format!("{MINE}\n[meter]\nuse = \"ccusage\"\n"));
+    given_back(&after);
+}
+
+#[test]
+fn as_a_person_leaving_the_question_closes_its_rail_once_naming_the_flag() {
+    let world = World::bare();
+    two_meters(&world);
+    let terminal = world.as_a_person(&["install"]);
+    terminal.wait_for("◆  Which usage meter should cahoots use?");
+    terminal.press(b"\x1b");
+    let after = terminal.finish();
+    assert_eq!(after.code, 2, "{}", after.text());
+    let text = after.text();
+    assert!(
+        text.contains(
+            "■  Which usage meter should cahoots use?\n│  agent-usage\n│\n\
+             └  no meter chosen — `cahoots install --meter <agent-usage|ccusage|none>`\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("No meter chosen, and nothing written"),
+        "closed once, not twice: {text}"
+    );
+    assert!(!world.config.join("meter.json").exists());
+    assert_eq!(
+        fs::read_to_string(world.config.join("config.toml")).unwrap(),
+        MINE
+    );
+    given_back(&after);
+}
+
+#[test]
 fn with_no_terminal_to_ask_at_install_names_the_flag_instead() {
     let world = World::bare();
     two_meters(&world);

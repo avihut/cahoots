@@ -189,6 +189,10 @@ So **nothing a reviewer writes is ever shown to another agent.**
   showing the text at all is the fence that holds.
 - The detail is still short and free of flags, code, paths, URLs and this
   tool's name, because a person reads it in a terminal next to a prompt.
+  `review submit` refuses a control character in it, and `learn list` shows
+  any that reached the record anyway as its escape (`\u{1b}`), as it does
+  for every word it prints at a terminal: no text on record can move the
+  cursor, retitle the terminal, or hide a line from the person reading.
 - A note appears only once reviews of **two different runs in two different
   directories** agree — one run, or one poisoned repository, cannot write the
   notes by itself — and notes are few (five per role and target) and expire

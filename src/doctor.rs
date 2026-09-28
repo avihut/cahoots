@@ -1,6 +1,8 @@
 //! `cahoots doctor` — a read-only look at everything a run depends on, so that
 //! "why was I refused" has an answer before the run is attempted. It changes
-//! nothing: not the config, not a harness's permission rules.
+//! nothing: not the config, not a harness's permission rules. It returns the
+//! checks, and `envelope` makes them the one JSON envelope; a person at a
+//! terminal reads the same checks in words (`cli::endings`).
 
 use serde::Serialize;
 use serde_json::json;
@@ -28,6 +30,11 @@ pub struct Check {
     pub check: String,
     pub status: Status,
     pub detail: String,
+    /// The rules a harness still needs, one to a line, for a person to
+    /// paste into its file. `detail` names them on one line, for the
+    /// envelope, which never carries this.
+    #[serde(skip)]
+    pub rules: Option<(HarnessId, Vec<String>)>,
 }
 
 fn check(name: impl Into<String>, status: Status, detail: impl Into<String>) -> Check {
@@ -35,10 +42,12 @@ fn check(name: impl Into<String>, status: Status, detail: impl Into<String>) -> 
         check: name.into(),
         status,
         detail: detail.into(),
+        rules: None,
     }
 }
 
-pub fn doctor() -> Res<Envelope> {
+/// Every check, in order.
+pub fn checks() -> Res<Vec<Check>> {
     let mut checks = Vec::new();
     checks.push(check(
         "build",
@@ -95,7 +104,7 @@ pub fn doctor() -> Res<Envelope> {
         }
         Err(fail) => {
             checks.push(check("config", Status::Fail, fail.message));
-            return Ok(finish(checks));
+            return Ok(checks);
         }
     };
 
@@ -151,15 +160,15 @@ pub fn doctor() -> Res<Envelope> {
             )
         } else {
             let lines: Vec<String> = missing.iter().map(|verb| rules::rule(id, verb)).collect();
-            check(
-                format!("{id}: caller rules"),
-                Status::Warn,
-                format!(
-                    "to let {id} delegate without a prompt, a person adds to {}: {}",
-                    rules::rules_file(id),
-                    lines.join("  ")
-                ),
-            )
+            let detail = format!(
+                "to let {id} delegate without a prompt, a person adds to {}: {}",
+                rules::rules_file(id),
+                lines.join("  ")
+            );
+            Check {
+                rules: Some((id, lines)),
+                ..check(format!("{id}: caller rules"), Status::Warn, detail)
+            }
         });
     }
 
@@ -197,7 +206,7 @@ pub fn doctor() -> Res<Envelope> {
             registry.meters.ledger_max_runs_per_hour
         ),
     ));
-    Ok(finish(checks))
+    Ok(checks)
 }
 
 /// The usage meter: is it there and usable, and what does it say about each
@@ -324,9 +333,47 @@ fn ccusage_health(meter: &Ccusage, harness: HarnessId, answer: &Answer) -> (Stat
     }
 }
 
-fn finish(checks: Vec<Check>) -> Envelope {
+/// The checks as the one JSON envelope: exit 34 when one failed.
+pub fn envelope(checks: &[Check]) -> Envelope {
     let failed = checks.iter().filter(|c| c.status == Status::Fail).count();
     let exit = if failed == 0 { Exit::Ok } else { Exit::Config };
     let message = (failed > 0).then(|| format!("{failed} check(s) failed"));
     Envelope::new(exit, message).with_data(json!({ "checks": checks }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rules_to_paste_never_reach_the_envelope() {
+        let rules = Check {
+            rules: Some((HarnessId::Claude, vec!["a rule".to_string()])),
+            ..check(
+                "claude: caller rules",
+                Status::Warn,
+                "a person adds: a rule",
+            )
+        };
+        let envelope = envelope(&[rules]);
+        assert_eq!(envelope.code, 0);
+        assert_eq!(
+            envelope.data,
+            Some(json!({ "checks": [{
+                "check": "claude: caller rules",
+                "status": "warn",
+                "detail": "a person adds: a rule",
+            }] }))
+        );
+    }
+
+    #[test]
+    fn one_failed_check_is_exit_34() {
+        let envelope = envelope(&[
+            check("build", Status::Ok, "1.2.3"),
+            check("config", Status::Fail, "unclosed table"),
+        ]);
+        assert_eq!(envelope.code, 34);
+        assert_eq!(envelope.message.as_deref(), Some("1 check(s) failed"));
+    }
 }

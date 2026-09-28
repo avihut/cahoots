@@ -3,44 +3,53 @@
 //! setting is and how it is written is `crate::settings`; the page is
 //! `crate::tui`. This is where they meet (hard rule 11): the words for each
 //! setting, its row on the page, and what each answer changes in config.toml.
+//! The words a change to config.toml is said with live here too, for every
+//! verb that makes one (`enable`, and `install`'s meter), and so do
+//! `registry`'s, which lists every setting as the page does.
 
 use std::path::Path;
 
 use serde_json::json;
 
-use super::SettingsAction;
 use super::questions::NO_METER;
+use super::{Said, SettingsAction};
 use crate::config::UserConfig;
+use crate::config::edit::Change;
 use crate::dirs::Dirs;
 use crate::exit::{Envelope, Exit, Fail, Res};
 use crate::meter::{MeterFile, MeterId};
 use crate::model::{HarnessId, Role};
+use crate::registry::{Registry, RoleEntry};
 use crate::settings::{self, Key, Kind, Origin, Section, Setting, Source, Unit, Value};
-use crate::tui::{self, Answer, Choice, Edit, Event, Row};
+use crate::tui::{self, Answer, Block, Choice, Edit, Ending, Event, Item, Last, Row};
 
-pub fn settings(action: Option<SettingsAction>) -> Res<Envelope> {
+/// `cahoots settings`, and with `person`, its end in words, under `title`.
+pub fn settings(action: Option<SettingsAction>, person: bool, title: String) -> Res<Said> {
     let dirs = Dirs::resolve()?;
     let file = dirs.config_file();
-    let key = match action {
-        None => return page(&dirs),
+    let (key, said) = match action {
+        None => return page(&dirs, person, title),
         Some(SettingsAction::Set { key, value }) => {
             let now = current(&dirs)?;
             let setting = settings::find(&now, &key)?;
             let value = setting.parse(&value)?;
             settings::set(&file, setting.key, &value)?;
-            setting.key
+            (setting.key, said_set(setting.key, &value))
         }
         Some(SettingsAction::Reset { key: name }) => {
             // The file must be good to change it at all.
-            current(&dirs)?;
+            let now = current(&dirs)?;
             let key = Key::parse(&name)
                 .ok_or_else(|| Fail::new(Exit::Usage, format!("no setting is called {name:?}")))?;
             settings::reset(&file, key)?;
-            key
+            (key, said_reset(key, now.iter().find(|s| s.key == key)))
         }
     };
     let after = current(&dirs)?;
-    Ok(changed(&[key], &after))
+    Ok(Said {
+        envelope: changed(&[key], &after),
+        words: person.then(|| Ending::just(Some(title), Last::Said(said))),
+    })
 }
 
 /// Every setting as the files say now.
@@ -83,8 +92,9 @@ fn no_page() -> Fail {
 
 /// The page: each answer is saved to config.toml as it is given, and the
 /// settings are read again after each, so a change made by hand meanwhile
-/// shows too. Closing it lists what changed.
-fn page(dirs: &Dirs) -> Res<Envelope> {
+/// shows too. Closing it lists what changed, and for a person reading
+/// stdout, says it: the line each setting's last save showed on the page.
+fn page(dirs: &Dirs, person: bool, title: String) -> Res<Said> {
     let file = dirs.config_file();
     // A file that does not parse is said so before any page is drawn.
     let mut now = current(dirs)?;
@@ -94,7 +104,7 @@ fn page(dirs: &Dirs) -> Res<Envelope> {
     let Some(mut terminal) = tui::Terminal::full_screen() else {
         return Err(no_page());
     };
-    let mut keys: Vec<Key> = Vec::new();
+    let mut saved: Vec<(Key, String)> = Vec::new();
     {
         let mut stderr = std::io::stderr();
         let mut screen = tui::Screen::new(&mut stderr, super::colors(), terminal.size());
@@ -105,8 +115,9 @@ fn page(dirs: &Dirs) -> Res<Envelope> {
             };
             match carry_out(&file, setting, answer) {
                 Ok(done) => {
-                    if !keys.contains(&setting.key) {
-                        keys.push(setting.key);
+                    match saved.iter_mut().find(|(key, _)| *key == setting.key) {
+                        Some((_, line)) => line.clone_from(&done),
+                        None => saved.push((setting.key, done.clone())),
                     }
                     now = current(dirs)?;
                     page.saved(rows(&now, &dirs.home), done);
@@ -117,7 +128,91 @@ fn page(dirs: &Dirs) -> Res<Envelope> {
     }
     // The terminal is given back before anything more is said.
     drop(terminal);
-    Ok(changed(&keys, &now))
+    let keys: Vec<Key> = saved.iter().map(|(key, _)| *key).collect();
+    let lines: Vec<String> = saved.into_iter().map(|(_, line)| line).collect();
+    Ok(Said {
+        envelope: changed(&keys, &now),
+        words: person.then(|| page_closed(title, lines)),
+    })
+}
+
+/// How the page ends: each setting changed, as its last save said it.
+fn page_closed(title: String, lines: Vec<String>) -> Ending {
+    let last = match lines.len() {
+        0 => return Ending::just(Some(title), Last::Said("Nothing changed".to_string())),
+        1 => "1 setting changed".to_string(),
+        n => format!("{n} settings changed"),
+    };
+    Ending {
+        title: Some(title),
+        blocks: vec![Block::Lines(lines)],
+        last: Last::Said(last),
+        paste: Vec::new(),
+    }
+}
+
+/// `enable`'s words: the line its change to config.toml is said with.
+pub(super) fn enabled(dirs: &Dirs, harness: HarnessId, on: bool, title: String) -> Res<Ending> {
+    let key = Key::Enabled(harness);
+    let said = if on {
+        said_set(key, &Value::Bool(true))
+    } else {
+        let now = current(dirs)?;
+        said_reset(key, now.iter().find(|s| s.key == key))
+    };
+    Ok(Ending::just(Some(title), Last::Said(said)))
+}
+
+/// `registry` in words: every setting in effect, under its section as on
+/// the page, `•` where config.toml sets it, and each role's candidates in
+/// the order runs try them, with the swap learning made, if it made one.
+pub(super) fn registry(dirs: &Dirs, registry: &Registry, title: String) -> Res<Ending> {
+    let now = current(dirs)?;
+    let mut blocks: Vec<Block> = Vec::new();
+    for (setting, row) in now.iter().zip(rows(&now, &dirs.home)) {
+        let value = match setting.key {
+            Key::Candidates(role) => registry.roles.get(&role).map_or(row.value, in_order),
+            _ => row.value,
+        };
+        let item = Item {
+            label: row.label,
+            value,
+            origin: row.origin,
+        };
+        match blocks.last_mut() {
+            Some(Block::Listing { title, items }) if *title == row.section => items.push(item),
+            _ => blocks.push(Block::Listing {
+                title: row.section,
+                items: vec![item],
+            }),
+        }
+    }
+    let file = tilde(&dirs.config_file(), &dirs.home);
+    let last = if now.iter().any(|setting| setting.origin == Origin::Config) {
+        format!("• set in {file}")
+    } else {
+        format!("Nothing is set in {file}: these are the defaults, and what cahoots found")
+    };
+    Ok(Ending {
+        title: Some(title),
+        blocks,
+        last: Last::Said(last),
+        paste: Vec::new(),
+    })
+}
+
+/// A role's candidates as runs try them, each with its effort.
+fn in_order(entry: &RoleEntry) -> String {
+    let list = entry
+        .candidates
+        .iter()
+        .map(|c| format!("{} {} {}", c.harness, c.model.as_str(), c.effort))
+        .collect::<Vec<_>>()
+        .join(", then ");
+    match entry.learned_swap.and_then(|at| entry.candidates.get(at)) {
+        Some(up) => format!("{list} (learned: {} moved up)", candidate(up)),
+        None => list,
+    }
 }
 
 /// Saves an answer, and says what that did to config.toml. An answer that
@@ -139,44 +234,79 @@ fn carry_out(file: &Path, setting: &Setting, answer: Answer) -> Res<String> {
         },
         _ => return Err(Fail::internal("an answer that does not fit its setting")),
     };
-    let (table, key) = split(setting.key);
     // Which meter is used is a choice even when it is the one found: once
     // chosen, a second meter found later does not bring the question.
     let chosen_meter = setting.key == Key::Meter;
     match chosen {
         Some(value) if chosen_meter || Some(&value) != setting.default.as_ref() => {
             settings::set(file, setting.key, &value)?;
-            Ok(match &value {
-                Value::Candidates(list) => format!(
-                    "Saved to config.toml: [{table}] {key}, {} first",
-                    candidate(&list[0])
-                ),
-                _ => format!(
-                    "Saved to config.toml: [{table}] {key} = {}",
-                    value.to_toml()
-                ),
-            })
+            Ok(said_set(setting.key, &value))
         }
         _ => {
             settings::reset(file, setting.key)?;
+            Ok(said_reset(setting.key, Some(setting)))
+        }
+    }
+}
+
+/// What saving `value` as `key` wrote to config.toml: the line the page
+/// shows, and a verb's words say.
+fn said_set(key: Key, value: &Value) -> String {
+    match value {
+        Value::Candidates(list) if !list.is_empty() => {
+            let (table, name) = split(key);
+            format!(
+                "Saved to config.toml: [{table}] {name}, {} first",
+                candidate(&list[0])
+            )
+        }
+        _ => saved(&key.name(), value.to_toml()),
+    }
+}
+
+/// What taking `key` out of config.toml did, and what it is back to: the
+/// setting's default, as it was before (`before`).
+fn said_reset(key: Key, before: Option<&Setting>) -> String {
+    let (table, name) = split(key);
+    match before {
+        Some(setting) => {
             let back = setting
                 .default
                 .as_ref()
                 .map_or("not set".to_string(), |d| shown(Some(d), &setting.kind));
-            Ok(format!(
-                "Took [{table}] {key} out of config.toml: back to {back}"
-            ))
+            format!("Took [{table}] {name} out of config.toml: back to {back}")
+        }
+        None => format!("Took [{table}] {name} out of config.toml"),
+    }
+}
+
+/// A change another verb made to config.toml, said as the page says one.
+pub(super) fn said_change(change: &Change) -> String {
+    match change {
+        Change::Set { path, value } => saved(&path.to_string(), value),
+        Change::Remove { path } => {
+            let (table, name) = split_dotted(&path.to_string());
+            format!("Took [{table}] {name} out of config.toml")
         }
     }
+}
+
+/// `Saved to config.toml: [table] key = value`, for a dotted key.
+fn saved(dotted: &str, value: impl std::fmt::Display) -> String {
+    let (table, key) = split_dotted(dotted);
+    format!("Saved to config.toml: [{table}] {key} = {value}")
 }
 
 /// A key's table, and its own name: `harness.codex.cap` is `harness.codex`
 /// and `cap`.
 fn split(key: Key) -> (String, String) {
-    let name = key.name();
+    split_dotted(&key.name())
+}
+
+fn split_dotted(name: &str) -> (String, String) {
     match name.rsplit_once('.') {
         Some((table, key)) => (table.to_string(), key.to_string()),
-        None => (String::new(), name),
+        None => (String::new(), name.to_string()),
     }
 }
 
@@ -551,7 +681,7 @@ fn choice_hint(key: Key, choice: &str) -> &'static str {
 }
 
 /// A path with the home directory as `~`.
-fn tilde(path: &Path, home: &Path) -> String {
+pub(super) fn tilde(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => path.display().to_string(),
@@ -561,6 +691,151 @@ fn tilde(path: &Path, home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_page_ends_with_the_line_each_change_last_showed_or_with_nothing_changed() {
+        assert_eq!(
+            page_closed("cahoots settings".into(), Vec::new()),
+            Ending::just(
+                Some("cahoots settings".into()),
+                Last::Said("Nothing changed".into())
+            )
+        );
+        let lines = vec![
+            "Saved to config.toml: [harness.claude] cap = 65".to_string(),
+            "Took [harness.codex] enabled out of config.toml: back to off".to_string(),
+        ];
+        let two = page_closed("cahoots settings".into(), lines.clone());
+        assert_eq!(two.blocks, [Block::Lines(lines)]);
+        assert_eq!(two.last, Last::Said("2 settings changed".into()));
+        assert_eq!(
+            page_closed("t".into(), vec!["x".into()]).last,
+            Last::Said("1 setting changed".into())
+        );
+    }
+
+    #[test]
+    fn a_change_another_verb_makes_is_said_as_the_page_says_one() {
+        use crate::config::edit::KeyPath;
+        assert_eq!(
+            said_change(&Change::Set {
+                path: KeyPath::of("meter.use"),
+                value: "ccusage".into(),
+            }),
+            "Saved to config.toml: [meter] use = \"ccusage\""
+        );
+        assert_eq!(
+            said_change(&Change::Set {
+                path: KeyPath::of("meter.ccusage.binary"),
+                value: "/opt/bin/ccusage".into(),
+            }),
+            "Saved to config.toml: [meter.ccusage] binary = \"/opt/bin/ccusage\""
+        );
+        assert_eq!(
+            said_change(&Change::Remove {
+                path: KeyPath::of("harness.codex.enabled"),
+            }),
+            "Took [harness.codex] enabled out of config.toml"
+        );
+        let codex = Key::Enabled(HarnessId::Codex);
+        assert_eq!(
+            said_set(codex, &Value::Bool(true)),
+            "Saved to config.toml: [harness.codex] enabled = true",
+            "what `enable codex` says"
+        );
+        let settings = now("schema = 1\nharness.codex.enabled = true");
+        assert_eq!(
+            said_reset(codex, settings.iter().find(|s| s.key == codex)),
+            "Took [harness.codex] enabled out of config.toml: back to off",
+            "what `enable codex --off` says"
+        );
+    }
+
+    #[test]
+    fn registry_lists_every_setting_with_each_role_in_the_order_runs_try_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            home: tmp.path().join("home"),
+            config: tmp.path().join("config"),
+            state: tmp.path().join("state"),
+            overridden: true,
+        };
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        std::fs::write(dirs.config_file(), "schema = 1\nharness.codex.cap = 60\n").unwrap();
+        let mut registry = Registry::effective(&UserConfig::load(&dirs.config_file()).unwrap());
+        let advise = registry.roles.get_mut(&Role::Advise).unwrap();
+        advise.candidates.swap(0, 1);
+        advise.learned_swap = Some(0);
+        let first = candidate(&advise.candidates[0]);
+        let order: Vec<String> = advise
+            .candidates
+            .iter()
+            .map(|c| format!("{} {} {}", c.harness, c.model.as_str(), c.effort))
+            .collect();
+
+        let ending = super::registry(&dirs, &registry, "cahoots registry".into()).unwrap();
+        assert_eq!(ending.title.as_deref(), Some("cahoots registry"));
+        let listing = |name: &str| {
+            ending
+                .blocks
+                .iter()
+                .find_map(|block| match block {
+                    Block::Listing { title, items } if title == name => Some(items.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {name} section"))
+        };
+        let titles: Vec<&str> = ending
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Listing { title, .. } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "Claude Code",
+                "Codex",
+                "Usage meter",
+                "Runs",
+                "Review",
+                "Roles"
+            ],
+            "the page's sections, in the page's order"
+        );
+        let item = |section: &str, label: &str| {
+            listing(section)
+                .into_iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("no {label} under {section}"))
+        };
+        let cap = item("Codex", "Usage cap");
+        assert_eq!((cap.value.as_str(), cap.origin), ("60%", tui::Origin::Set));
+        let claude = item("Claude Code", "Usage cap");
+        assert_eq!(
+            (claude.value.as_str(), claude.origin),
+            ("75%", tui::Origin::Default)
+        );
+        assert_eq!(
+            item("Roles", "Advise").value,
+            format!("{} (learned: {first} moved up)", order.join(", then ")),
+            "the order runs use, which learning changed"
+        );
+        assert_eq!(
+            ending.last,
+            Last::Said(format!("• set in {}", dirs.config_file().display()))
+        );
+
+        std::fs::write(dirs.config_file(), "schema = 1\n").unwrap();
+        let bare = super::registry(&dirs, &registry, "t".into()).unwrap();
+        assert!(
+            matches!(&bare.last, Last::Said(last) if last.starts_with("Nothing is set in")),
+            "{:?}",
+            bare.last
+        );
+    }
 
     fn now(text: &str) -> Vec<Setting> {
         settings::current(&UserConfig::parse(text).unwrap(), None, None)

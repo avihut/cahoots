@@ -139,7 +139,10 @@ impl Exit {
     }
 }
 
-/// What every non-interactive exit prints on stdout.
+/// What an exit prints on stdout for whoever called: an agent or a script.
+/// That is every exit but one a person reads (`cli::reader`): a human
+/// verb's with stdout at a terminal, or `doctor`'s or `report`'s with stdin
+/// there too, where the same answer is in words instead (`cli::emit`).
 #[derive(Debug, Serialize)]
 pub struct Envelope {
     pub v: u32,

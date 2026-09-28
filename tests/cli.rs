@@ -23,11 +23,28 @@ fn version_names_the_crate_version() {
 
 #[test]
 fn a_bad_command_line_is_exit_2_with_an_envelope_like_any_other_exit() {
-    for argv in [
-        vec!["conspire"],
-        vec![],
-        vec!["run", "--role", "deploy", "--brief", "b.md"],
-        vec!["run", "--role", "review", "--brief", "b.md", "--ungated"],
+    for (argv, says) in [
+        (vec!["conspire"], "unrecognized subcommand 'conspire'"),
+        (
+            vec![],
+            "`cahoots` needs a command: `cahoots --help` lists them",
+        ),
+        (
+            vec!["review"],
+            "`cahoots review` needs a command: `cahoots review --help` lists them",
+        ),
+        (
+            vec!["run", "--role", "review"],
+            "the following required arguments were not provided: --brief <BRIEF>",
+        ),
+        (
+            vec!["run", "--role", "deploy", "--brief", "b.md"],
+            "invalid value 'deploy' for '--role <ROLE>'",
+        ),
+        (
+            vec!["run", "--role", "review", "--brief", "b.md", "--ungated"],
+            "unexpected argument '--ungated' found",
+        ),
     ] {
         let output = cahoots().args(&argv).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{argv:?}");
@@ -35,7 +52,8 @@ fn a_bad_command_line_is_exit_2_with_an_envelope_like_any_other_exit() {
             .unwrap_or_else(|error| panic!("{argv:?}: no envelope on stdout ({error})"));
         assert_eq!(envelope["class"], "usage_error");
         assert_eq!(envelope["retry"], "never");
-        assert!(!envelope["message"].as_str().unwrap().is_empty());
+        let message = envelope["message"].as_str().unwrap();
+        assert!(message.starts_with(says), "{argv:?}: {message}");
     }
     // …while asking for help or the version is an answer, not an error.
     cahoots().arg("--help").assert().success();

@@ -119,7 +119,10 @@ cahoots never commits or merges for you. In a
 
 Each command an agent runs prints one JSON object and exits with a code that
 means something (`cahoots exit-codes` lists them), so neither your agent nor
-your scripts have to parse prose.
+your scripts have to parse prose. The commands you run yourself, such as
+`install`, `settings`, `doctor` and `report`, answer you in words at a
+terminal. Pipe one, as in `cahoots install | jq`, and it prints the same
+JSON instead.
 
 ## Configure
 

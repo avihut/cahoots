@@ -1,8 +1,10 @@
-//! How the rail looks: its symbols and colors, and each prompt's frame for its
-//! state (`docs/TUI.md` has the full vocabulary). Text in, lines out: nothing
-//! here reads a key or knows a terminal.
+//! How the rail looks: its symbols and colors, each prompt's frame for its
+//! state, and (`ending`) how a command ends in words (`docs/TUI.md` has the
+//! full vocabulary). Text in, lines out: nothing here reads a key or knows a
+//! terminal.
 
 mod canvas;
+pub(super) mod ending;
 pub(super) mod page;
 
 use super::Choice;
@@ -41,6 +43,14 @@ impl Colors {
         self.paint("90", text)
     }
 
+    fn blue(self, text: &str) -> String {
+        self.paint("34", text)
+    }
+
+    fn yellow(self, text: &str) -> String {
+        self.paint("33", text)
+    }
+
     fn dim(self, text: &str) -> String {
         self.paint("2", text)
     }
@@ -59,6 +69,9 @@ const ANSWERED: &str = "◇";
 const LEFT: &str = "■";
 const HIGHLIGHTED: &str = "●";
 const NOT_HIGHLIGHTED: &str = "○";
+const INFO: &str = "●";
+const WARNING: &str = "▲";
+const FAILED: &str = "■";
 
 /// `┌  title`, and the rail's first stretch.
 pub fn intro(title: &str, colors: Colors) -> Vec<String> {
