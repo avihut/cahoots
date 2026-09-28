@@ -346,6 +346,46 @@ pub fn tier_named(args: impl IntoIterator<Item = OsString>) -> Option<Tier> {
         .and_then(|name| tier_of(&name.to_string_lossy()))
 }
 
+/// Who reads what is printed for a command line clap refused, by the tier
+/// of the verb it names (`tier_named`). PURE, like `reader`. A line that
+/// names a verb reads as that verb does. A line that names no verb this
+/// build knows, or none at all, is a person's at a terminal: no agent is
+/// told to type one, so clap's own words are the answer, with the same exit.
+pub fn refused_reader(named: Option<Tier>, stdout_is_terminal: bool) -> Reader {
+    match named {
+        Some(tier) => reader(tier, stdout_is_terminal),
+        None if stdout_is_terminal => Reader::Person,
+        None => Reader::Program,
+    }
+}
+
+/// Why clap refused a command line, as one sentence for the envelope: the
+/// first paragraph of clap's error, which names what it is about on the
+/// lines under its first. A command group given no command gets its whole
+/// help from clap instead, whose first line describes the group, so the
+/// sentence says what is missing and where the choices are listed.
+pub fn refused_because(error: &clap::Error) -> String {
+    let text = error.render().to_string();
+    if error.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+        // `Usage: cahoots learn <COMMAND>` names the group.
+        let group = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Usage: "))
+            .and_then(|usage| usage.split(" <").next())
+            .unwrap_or("cahoots");
+        return format!("`{group}` needs a command: `{group} --help` lists them");
+    }
+    let paragraph: Vec<&str> = text
+        .lines()
+        .take_while(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .collect();
+    match paragraph.join(" ").trim_start_matches("error: ") {
+        "" => "bad command line".to_string(),
+        reason => reason.to_string(),
+    }
+}
+
 /// What a verb has to say, and the exit that goes with it.
 #[derive(Debug)]
 pub struct Said {
@@ -880,6 +920,69 @@ mod tests {
         );
         assert_eq!(named(&["cahoots", "conspire"]), None);
         assert_eq!(named(&["cahoots"]), None);
+    }
+
+    #[test]
+    fn a_refused_line_is_a_persons_at_a_terminal_unless_it_names_a_verb_a_program_runs() {
+        assert_eq!(refused_reader(None, true), Reader::Person, "no verb at all");
+        assert_eq!(refused_reader(None, false), Reader::Program, "piped");
+        assert_eq!(refused_reader(Some(Tier::Human), true), Reader::Person);
+        for tier in [Tier::Agent, Tier::Inspect, Tier::Internal] {
+            assert_eq!(
+                refused_reader(Some(tier), true),
+                Reader::Program,
+                "{tier:?}"
+            );
+        }
+        for tier in [Tier::Agent, Tier::Human, Tier::Inspect, Tier::Internal] {
+            assert_eq!(
+                refused_reader(Some(tier), false),
+                Reader::Program,
+                "{tier:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_says_what_is_missing_not_what_the_help_begins_with() {
+        let because = |argv: &[&str]| refused_because(&Cli::try_parse_from(argv).unwrap_err());
+        assert_eq!(
+            because(&["cahoots"]),
+            "`cahoots` needs a command: `cahoots --help` lists them"
+        );
+        assert_eq!(
+            because(&["cahoots", "learn"]),
+            "`cahoots learn` needs a command: `cahoots learn --help` lists them"
+        );
+        assert_eq!(
+            because(&["cahoots", "review"]),
+            "`cahoots review` needs a command: `cahoots review --help` lists them"
+        );
+        assert_eq!(
+            because(&["cahoots", "enable"]),
+            "the following required arguments were not provided: <HARNESS>",
+            "what is missing, not a sentence cut at its colon"
+        );
+        assert_eq!(
+            because(&["cahoots", "run", "--role", "review"]),
+            "the following required arguments were not provided: --brief <BRIEF>"
+        );
+        for (argv, reason) in [
+            (
+                vec!["cahoots", "conspire"],
+                "unrecognized subcommand 'conspire'",
+            ),
+            (
+                vec!["cahoots", "--bogus"],
+                "unexpected argument '--bogus' found",
+            ),
+            (
+                vec!["cahoots", "enable", "gemini"],
+                "invalid value 'gemini' for '<HARNESS>': unknown harness: \"gemini\"",
+            ),
+        ] {
+            assert_eq!(because(&argv), reason, "{argv:?}: one line, as before");
+        }
     }
 
     #[test]

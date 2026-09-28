@@ -151,8 +151,13 @@ prefix_rule(pattern=["cahoots", "pick"], decision="allow")
   page lists each setting it changed that way, or says `Nothing changed`.
 - **A refusal is the rail closing in red**, on `└`, in the logic's own
   sentence: the question's rail when a question was left, and a new one
-  otherwise. A command line clap refuses keeps clap's own words, and nothing
-  follows them.
+  otherwise.
+- **A command line clap refuses keeps clap's own words** at a terminal, and
+  nothing follows them, when it names a human verb or no verb this build
+  knows (`cli::refused_reader`). A bare `cahoots` shows its help, and a
+  mistyped verb gets clap's tip. A line that names an agent or inspect verb
+  still gets the envelope after clap's words, since an agent may be the one
+  that typed it.
 - **What a person copies comes after the rail, flush left,** under the file
   it goes in: no rail, no color and no wrapping, so a selected block pastes
   as it is. Codex's rules file is Starlark, where an indented line does not

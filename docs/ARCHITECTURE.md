@@ -202,11 +202,14 @@ removed when its run ages out; one daft cut is daft's to remove.
 `src/exit.rs`; `cahoots exit-codes` prints them. Every exit also prints one
 JSON envelope on stdout: `v`, `code`, `class`, `retry` (`never | later |
 after_reset | other_target | fix_config`), and optionally `message` and
-`data`. The one exception is a human verb whose stdout is a terminal, where
-a person is reading: it ends in words on the rail instead (`docs/TUI.md`),
-with the same exit code. Piped, as in `cahoots install | jq`, even a human
-verb prints the envelope, byte for byte, and an agent or inspect verb prints
-it at a terminal too.
+`data`. The exceptions are for a person at a terminal, with the same exit
+code: a human verb whose stdout is a terminal ends in words on the rail
+instead (`docs/TUI.md`), and a command line clap refuses ends in clap's own
+words, unless it names an agent or inspect verb. Piped, as in
+`cahoots install | jq`, everything prints the envelope, byte for byte, and
+an agent or inspect verb prints it at a terminal too. The envelope for a
+refused command line says what was wrong: clap's first paragraph, or for a
+command group given no command, which group needs one.
 
 | Code | Meaning |
 |---|---|

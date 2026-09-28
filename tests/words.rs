@@ -176,6 +176,55 @@ fn a_bad_command_line_for_a_human_verb_is_clap_s_own_words_and_nothing_more() {
 }
 
 #[test]
+fn a_command_line_that_names_no_verb_is_clap_s_own_words_at_a_terminal() {
+    let world = World::new();
+    let bare = world.as_a_person(&[]).finish();
+    assert_eq!(bare.code, 2, "{}", bare.text());
+    let text = bare.text();
+    assert!(
+        text.contains("Usage: cahoots <COMMAND>\n\nCommands:\n"),
+        "the help: {text}"
+    );
+    no_json(&bare);
+    for (args, says) in [
+        (vec!["instal"], "tip: some similar subcommands exist"),
+        (
+            vec!["--bogus"],
+            "error: unexpected argument '--bogus' found",
+        ),
+    ] {
+        let after = world.as_a_person(&args).finish();
+        assert_eq!(after.code, 2, "{args:?}: {}", after.text());
+        assert!(after.text().contains(says), "{args:?}: {}", after.text());
+        no_json(&after);
+    }
+}
+
+#[test]
+fn a_bad_command_line_for_an_agent_verb_keeps_the_envelope_at_a_terminal() {
+    let world = World::new();
+    for (args, says) in [
+        (
+            vec!["run", "--role", "deploy", "--brief", "b.md"],
+            "invalid value 'deploy'",
+        ),
+        (vec!["review"], "`cahoots review` needs a command"),
+    ] {
+        let after = world.as_a_person(&args).finish();
+        assert_eq!(after.code, 2, "{args:?}: {}", after.text());
+        let text = after.text();
+        let at = text
+            .find('{')
+            .unwrap_or_else(|| panic!("{args:?}: no envelope after clap's words: {text}"));
+        let json: serde_json::Value = serde_json::from_str(text[at..].trim())
+            .unwrap_or_else(|error| panic!("{args:?}: {error}\n{text}"));
+        assert_eq!(json["class"], "usage_error", "{args:?}");
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains(says), "{args:?}: {message}");
+    }
+}
+
+#[test]
 fn agent_and_inspect_verbs_keep_the_envelope_even_at_a_terminal() {
     let world = World::new();
     for args in [vec!["status"], vec!["exit-codes"]] {

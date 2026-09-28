@@ -89,7 +89,9 @@ question starts as data the logic returns, and its words live in
 A human verb whose stdout is a terminal ends in words on the rail, printed
 where the envelope would go, with the same exit code. Piped, it prints the
 envelope byte for byte, and agent and inspect verbs print the envelope even
-at a terminal. Those words live in `src/cli/endings.rs`.
+at a terminal. Those words live in `src/cli/endings.rs`. A command line
+clap refuses is read the same way, by the verb it names; one that names no
+verb, like a bare `cahoots`, is a person's at a terminal.
 
 ## Working here
 

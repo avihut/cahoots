@@ -23,22 +23,17 @@ fn main() -> ExitCode {
             error.exit()
         }
         // A bad command line is a usage error (exit 2), and clap says why on
-        // stderr. For a person who typed a human verb at a terminal, those
-        // words are the answer. Everyone else also gets the one JSON
+        // stderr: its error, or for a bare `cahoots`, its help. For a person
+        // at a terminal, those words are the answer, unless the line names an
+        // agent or inspect verb. Everyone else also gets the one JSON
         // envelope, since an agent or a script cannot parse clap's prose.
         Err(error) => {
             let _ = error.print();
             let named = cli::tier_named(std::env::args_os());
-            if named.is_some_and(|tier| cli::reader(tier, stdout_is_terminal) == Reader::Person) {
+            if cli::refused_reader(named, stdout_is_terminal) == Reader::Person {
                 return ExitCode::from(Exit::Usage.code());
             }
-            let text = error.render().to_string();
-            let reason = text
-                .lines()
-                .next()
-                .unwrap_or("bad command line")
-                .trim_start_matches("error: ")
-                .to_string();
+            let reason = cli::refused_because(&error);
             return cli::emit(&Envelope::new(Exit::Usage, reason).into());
         }
     };
