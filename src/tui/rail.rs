@@ -1,10 +1,11 @@
 //! A conversation on the rail: its intro, the questions, each drawn and then
 //! redrawn in place as keys come, and its outro (or, when a question is left
-//! unanswered, its cancel line).
+//! unanswered, its cancel line), or the command's whole end in words.
 
 use std::io::Write;
 
 use super::Choice;
+use super::ending::Ending;
 use super::keys::{Key, Keys};
 use super::select::Select;
 use super::view::{self, Colors};
@@ -29,6 +30,12 @@ impl<'a, W: Write> Rail<'a, W> {
 
     pub fn cancel(&mut self, message: &str) {
         self.draw(&view::cancel(message, self.colors), 0);
+    }
+
+    /// Draws how the command ends, below whatever is there: what it did on
+    /// the rail, its last word, and the lines to copy.
+    pub fn end(&mut self, ending: &Ending) {
+        self.draw(&view::ending::lines(ending, self.colors), 0);
     }
 
     /// Asks `prompt` with `choices`: the index of the one chosen, or `None`

@@ -14,6 +14,17 @@ use crate::tui::{Choice, Colors, Keys, Rail};
 
 pub(super) const NO_METER: &str = "only cahoots' own runs-per-hour limit";
 
+/// Where the rail a question opens is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Close {
+    /// With the question's own outro, or its cancel line: a program reads
+    /// stdout, and the rail ends here.
+    Here,
+    /// By the verb's words, which go on from the question on stdout: a
+    /// person reads it.
+    InWords,
+}
+
 /// `install`'s question: which of the usage meters found to use, or none.
 /// Asked before `install` writes anything, so leaving it writes nothing.
 pub fn which_meter(
@@ -21,6 +32,7 @@ pub fn which_meter(
     keys: &mut impl Keys,
     screen: &mut impl Write,
     colors: Colors,
+    close: Close,
 ) -> Res<Selection> {
     let mut choices: Vec<Choice> = options
         .iter()
@@ -30,19 +42,22 @@ pub fn which_meter(
     let mut rail = Rail::new(screen, colors);
     rail.intro("cahoots install");
     let Some(chosen) = rail.select("Which usage meter should cahoots use?", &choices, keys) else {
-        rail.cancel("No meter chosen, and nothing written");
+        if close == Close::Here {
+            rail.cancel("No meter chosen, and nothing written");
+        }
         return Err(meter_unanswered());
     };
-    Ok(match options.get(chosen) {
-        Some(found) => {
-            rail.outro(&format!("Usage meter: {}", found.meter));
-            Selection::Meter(found.meter)
-        }
-        None => {
-            rail.outro(&format!("No usage meter: {NO_METER}"));
-            Selection::NoMeter
-        }
-    })
+    let (selection, outro) = match options.get(chosen) {
+        Some(found) => (
+            Selection::Meter(found.meter),
+            format!("Usage meter: {}", found.meter),
+        ),
+        None => (Selection::NoMeter, format!("No usage meter: {NO_METER}")),
+    };
+    if close == Close::Here {
+        rail.outro(&outro);
+    }
+    Ok(selection)
 }
 
 const METER_FLAG: &str =
@@ -82,6 +97,10 @@ mod tests {
     }
 
     fn ask(keys: &[Key]) -> (Res<Selection>, String) {
+        ask_and(keys, Close::Here)
+    }
+
+    fn ask_and(keys: &[Key], close: Close) -> (Res<Selection>, String) {
         let options = [
             found(
                 MeterId::AgentUsage,
@@ -95,6 +114,7 @@ mod tests {
             &mut keys.iter().copied(),
             &mut screen,
             Colors::OFF,
+            close,
         );
         (answer, String::from_utf8(screen).unwrap())
     }
@@ -158,6 +178,22 @@ mod tests {
             ask(&[]).0.unwrap_err().exit,
             Exit::Usage,
             "the keys ran out: unanswered"
+        );
+    }
+
+    #[test]
+    fn when_words_follow_the_question_leaves_its_rail_open_for_them() {
+        let (answer, shown) = ask_and(&[Key::Down, Key::Enter], Close::InWords);
+        assert_eq!(answer.unwrap(), Selection::Meter(MeterId::Ccusage));
+        assert!(
+            shown.ends_with("◇  Which usage meter should cahoots use?\n│  ccusage\n│\n"),
+            "no outro: {shown:?}"
+        );
+        let (left, shown) = ask_and(&[Key::Cancel], Close::InWords);
+        assert_eq!(left.unwrap_err().exit, Exit::Usage);
+        assert!(
+            shown.ends_with("■  Which usage meter should cahoots use?\n│  agent-usage\n│\n"),
+            "no cancel line: {shown:?}"
         );
     }
 }

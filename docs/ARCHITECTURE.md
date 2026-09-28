@@ -37,16 +37,21 @@ hard rule 11, held by `scripts/guard.sh`):
 - **The interface** is how cahoots meets whoever called it. Agents and
   scripts get one JSON envelope and an exit code that means something
   (`src/exit.rs`, printed by `cli::emit`). A person at a terminal gets the
-  Clack rail for a command's questions, and the settings page on the whole
-  screen (`src/tui`, designed in `docs/TUI.md`). It presents what it is
-  given, returns answers as plain data (which choice, which number, what
-  order), and knows nothing of meters, gates, runs or settings.
+  Clack rail for a command's questions, the settings page on the whole
+  screen, and, for a human verb, how it ended in words on the rail, printed
+  where the envelope would go (`src/tui`, designed in `docs/TUI.md`). It
+  presents what it is given, returns answers as plain data (which choice,
+  which number, what order), and knows nothing of meters, gates, runs or
+  settings.
 - **The command layer** is `src/main.rs`, `src/cli.rs` and `src/cli/`. It
   parses the command line, calls the logic, and puts the logic's questions to
   a person. `src/cli/questions.rs` holds their words and what each answer
   means, and `src/cli/settings.rs` the settings' words and what each answer
-  on the page changes. It hands the answers back to the logic and prints the
-  envelope.
+  on the page changes. It hands the answers back to the logic and prints
+  what the verb said: the envelope, or for a person, the same in words
+  (`src/cli/endings.rs`). Which one is `cli::reader`'s to decide: a person
+  reads a human verb whose stdout is a terminal, and a program reads
+  everything else.
 
 The TUI is layered the same way inside: the terminal itself, what its bytes
 mean, each way of answering (a choice, a number, an order), the page's
@@ -195,8 +200,13 @@ removed when its run ages out; one daft cut is daft's to remove.
 ## Exit codes (M0)
 
 `src/exit.rs`; `cahoots exit-codes` prints them. Every exit also prints one
-JSON envelope: `v`, `code`, `class`, `retry` (`never | later | after_reset |
-other_target | fix_config`), and optionally `message` and `data`.
+JSON envelope on stdout: `v`, `code`, `class`, `retry` (`never | later |
+after_reset | other_target | fix_config`), and optionally `message` and
+`data`. The one exception is a human verb whose stdout is a terminal, where
+a person is reading: it ends in words on the rail instead (`docs/TUI.md`),
+with the same exit code. Piped, as in `cahoots install | jq`, even a human
+verb prints the envelope, byte for byte, and an agent or inspect verb prints
+it at a terminal too.
 
 | Code | Meaning |
 |---|---|
@@ -237,14 +247,16 @@ fixes it for its own harness.
   resolves and *before* anything is created — an agent home that is a symlink
   out of `$HOME` does not even get a directory made through it.
 - **Permission rules are printed, never applied.** `install` ends by listing
-  the rules still missing and the file each belongs in; `doctor` checks them —
-  and the installed copies' freshness — read-only.
+  the rules still missing and the file each belongs in: at a terminal, as
+  lines to paste, flush left under that file. `doctor` checks them, and the
+  installed copies' freshness, read-only.
 - **It chooses the usage meter** (see *The gate*) — before it writes a file,
   so a question left unanswered leaves nothing half-done. It asks on the
-  Clack rail (`docs/TUI.md`), with the arrow keys, on stderr: stdout is the
-  one JSON envelope, as for every verb, and only when config.toml has no
-  `[meter] use`. `--meter <agent-usage|ccusage|none>` answers it in advance,
-  and `--meter-binary` names a copy install would not find. Once the files
+  Clack rail (`docs/TUI.md`), with the arrow keys, on stderr, and only when
+  config.toml has no `[meter] use`. At a terminal, install's words go on from
+  the question's rail on stdout; piped, the question closes its own rail and
+  stdout is the envelope. `--meter <agent-usage|ccusage|none>` answers it in
+  advance, and `--meter-binary` names a copy install would not find. Once the files
   are in, it writes what it found to meter.json and a person's answer to
   config.toml (`[meter] use`, and a `--meter-binary` path as that meter's
   `binary`); a dry run writes neither.

@@ -8,20 +8,23 @@
 //!
 //! This is the command layer, the one place the logic and the interface meet
 //! (hard rule 11). It calls the logic, puts the logic's questions to a person
-//! (`questions`, on `crate::tui`), hands the answers back, and prints the one
-//! JSON envelope.
+//! (`questions`, on `crate::tui`), hands the answers back, and prints what
+//! the verb said: the one JSON envelope, or, for a person reading a human
+//! verb at a terminal, the same in words (`endings`, `settings`).
 
+mod endings;
 mod questions;
 mod settings;
 
 use clap::{Parser, Subcommand};
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::dirs::Dirs;
-use crate::exit::{self, Envelope, Exit, Fail, Res};
+use crate::exit::{self, Envelope, Exit, Fail};
 use crate::meter::detect::{self, Decision, Found};
 use crate::meter::{MeterFile, MeterId, Selection};
 use crate::model::{HarnessId, Role};
@@ -311,16 +314,114 @@ pub fn refusal(verb: &Verb, stdin_is_terminal: bool) -> Option<Fail> {
     })
 }
 
-/// Runs a parsed command line and returns what to print and exit with.
-pub fn dispatch(cli: Cli, stdin_is_terminal: bool) -> Envelope {
-    if let Some(fail) = refusal(&cli.verb, stdin_is_terminal) {
-        return fail.into();
-    }
-    run_verb(cli.verb).unwrap_or_else(Envelope::from)
+/// Who reads what a verb prints on stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reader {
+    /// An agent or a script: one JSON envelope.
+    Program,
+    /// A person at a terminal: the verb ends in words on the rail.
+    Person,
 }
 
-fn run_verb(verb: Verb) -> Res<Envelope> {
-    let ok = |data| Ok(Envelope::new(Exit::Ok, None).with_data(data));
+/// Who reads stdout. PURE, like `refusal`, so it is tested without running
+/// a verb. A person only for a human verb, which already needs a terminal on
+/// stdin, and only while stdout is a terminal too: piped (`| jq`), it is
+/// the envelope, byte for byte. For every other tier a terminal proves
+/// nothing, since an agent may run a command under a pseudo-terminal, and
+/// it is always owed the envelope.
+pub fn reader(tier: Tier, stdout_is_terminal: bool) -> Reader {
+    if tier == Tier::Human && stdout_is_terminal {
+        Reader::Person
+    } else {
+        Reader::Program
+    }
+}
+
+/// The tier of the verb a command line names, for one clap refused, which
+/// has no `Verb`: its first word that is not a flag, if clap knows it.
+pub fn tier_named(args: impl IntoIterator<Item = OsString>) -> Option<Tier> {
+    args.into_iter()
+        .skip(1)
+        .find(|arg| !arg.to_string_lossy().starts_with('-'))
+        .and_then(|name| tier_of(&name.to_string_lossy()))
+}
+
+/// What a verb has to say, and the exit that goes with it.
+#[derive(Debug)]
+pub struct Said {
+    pub envelope: Envelope,
+    /// The same, in words, when a person reads stdout: how the verb ends on
+    /// the rail. Printed instead of the envelope.
+    pub words: Option<tui::Ending>,
+}
+
+impl From<Envelope> for Said {
+    fn from(envelope: Envelope) -> Said {
+        Said {
+            envelope,
+            words: None,
+        }
+    }
+}
+
+/// A verb that stopped short: why, and whether a question it asked left the
+/// rail open, for its words to close.
+struct Stopped {
+    fail: Fail,
+    rail_open: bool,
+}
+
+impl From<Fail> for Stopped {
+    fn from(fail: Fail) -> Stopped {
+        Stopped {
+            fail,
+            rail_open: false,
+        }
+    }
+}
+
+/// The title of a verb's rail: `cahoots install`.
+fn title(verb: &Verb) -> String {
+    match verb {
+        Verb::Learn {
+            action: LearnAction::List,
+        } => "cahoots learn list".to_string(),
+        Verb::Learn {
+            action: LearnAction::Reset,
+        } => "cahoots learn reset".to_string(),
+        verb => format!("cahoots {}", verb.name()),
+    }
+}
+
+/// Runs a parsed command line and returns what to print and exit with: the
+/// envelope, and for a person reading stdout, the same in words.
+pub fn dispatch(cli: Cli, stdin_is_terminal: bool, stdout_is_terminal: bool) -> Said {
+    let reader = reader(cli.verb.tier(), stdout_is_terminal);
+    let title = title(&cli.verb);
+    let stopped = match refusal(&cli.verb, stdin_is_terminal) {
+        Some(fail) => Stopped::from(fail),
+        None => match run_verb(cli.verb, reader, title.clone()) {
+            Ok(said) => return said,
+            Err(stopped) => stopped,
+        },
+    };
+    // A refusal, in words: the rail closing in red, on the question that
+    // opened it if one did.
+    let words = (reader == Reader::Person).then(|| {
+        tui::Ending::just(
+            (!stopped.rail_open).then_some(title),
+            tui::Last::Refused(stopped.fail.message.clone()),
+        )
+    });
+    Said {
+        envelope: stopped.fail.into(),
+        words,
+    }
+}
+
+fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> {
+    let person = reader == Reader::Person;
+    let ok = |data| Ok(Envelope::new(Exit::Ok, None).with_data(data).into());
     match verb {
         Verb::ExitCodes => ok(exit::taxonomy()),
         Verb::Dirs => {
@@ -334,9 +435,18 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             }))
         }
         Verb::Registry => {
-            let registry = Registry::load(&Dirs::resolve()?)?;
-            ok(serde_json::to_value(&registry)
-                .map_err(|error| Fail::internal(format!("cannot encode the registry: {error}")))?)
+            let dirs = Dirs::resolve()?;
+            let registry = Registry::load(&dirs)?;
+            let data = serde_json::to_value(&registry)
+                .map_err(|error| Fail::internal(format!("cannot encode the registry: {error}")))?;
+            let words = match person {
+                true => Some(settings::registry(&dirs, &registry, title)?),
+                false => None,
+            };
+            Ok(Said {
+                envelope: Envelope::new(Exit::Ok, None).with_data(data),
+                words,
+            })
         }
         Verb::Run {
             role,
@@ -348,7 +458,7 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             in_place,
             wait,
             timeout,
-        } => client::run(RunArgs {
+        } => Ok(client::run(RunArgs {
             role,
             brief,
             to,
@@ -358,18 +468,28 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             in_place,
             wait_secs: wait,
             timeout_secs: timeout,
-        }),
-        Verb::Pick { role, to, caller } => client::pick_target(role, caller, to),
-        Verb::Settings { action } => settings::settings(action),
+        })?
+        .into()),
+        Verb::Pick { role, to, caller } => Ok(client::pick_target(role, caller, to)?.into()),
+        Verb::Settings { action } => Ok(settings::settings(action, person, title)?),
         Verb::Enable { harness, off } => {
-            let enabled = crate::registry::set_enabled(&Dirs::resolve()?, harness, !off)?;
-            ok(serde_json::json!({ "enabled": enabled }))
+            let dirs = Dirs::resolve()?;
+            let enabled = crate::registry::set_enabled(&dirs, harness, !off)?;
+            let words = match person {
+                true => Some(settings::enabled(&dirs, harness, !off, title)?),
+                false => None,
+            };
+            Ok(Said {
+                envelope: Envelope::new(Exit::Ok, None)
+                    .with_data(serde_json::json!({ "enabled": enabled })),
+                words,
+            })
         }
-        Verb::Doctor => crate::doctor::doctor(),
-        Verb::Notes { role, to, caller } => crate::learn::notes(role, to, caller),
+        Verb::Doctor => Ok(crate::doctor::doctor()?.into()),
+        Verb::Notes { role, to, caller } => Ok(crate::learn::notes(role, to, caller)?.into()),
         Verb::Review {
             action: ReviewAction::Next { caller },
-        } => crate::learn::review_next(caller),
+        } => Ok(crate::learn::review_next(caller)?.into()),
         Verb::Review {
             action:
                 ReviewAction::Submit {
@@ -377,85 +497,45 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
                     caller,
                     finding,
                 },
-        } => crate::learn::review_submit(&run, caller, &finding),
+        } => Ok(crate::learn::review_submit(&run, caller, &finding)?.into()),
         Verb::Learn {
             action: LearnAction::List,
-        } => crate::learn::learn_list(),
+        } => {
+            let envelope = crate::learn::learn_list()?;
+            let words = match person {
+                true => {
+                    let home = Dirs::resolve()?.home;
+                    let data = envelope.data.clone().unwrap_or_default();
+                    Some(endings::learned(title, &data, &home))
+                }
+                false => None,
+            };
+            Ok(Said { envelope, words })
+        }
         Verb::Learn {
             action: LearnAction::Reset,
-        } => crate::learn::learn_reset(),
-        Verb::Outcome { run, outcome } => client::outcome(&run, outcome),
-        Verb::Report { days, suggest } => crate::report::report(days, suggest),
+        } => Ok(Said {
+            envelope: crate::learn::learn_reset()?,
+            words: person.then(|| endings::forgot(title)),
+        }),
+        Verb::Outcome { run, outcome } => Ok(client::outcome(&run, outcome)?.into()),
+        Verb::Report { days, suggest } => Ok(crate::report::report(days, suggest)?.into()),
         Verb::Skill => ok(serde_json::json!({ "skill": crate::install::files::skill_text() })),
         Verb::Install {
             harness,
             dry_run,
             meter,
             meter_binary,
-        } => {
-            let dirs = Dirs::resolve()?;
-            let config = crate::config::UserConfig::load(&dirs.config_file())?;
-            // Decided — and asked, when it comes to that — before anything is
-            // written, so a question left unanswered leaves nothing half-done.
-            let (found, decision) = choose_meter(
-                &dirs,
-                &config.meter,
-                meter,
-                meter_binary.as_deref(),
-                dry_run,
-            )?;
-            let files = crate::install::files::install(&dirs, harness, dry_run)?;
-            let mut config = config;
-            if !dry_run {
-                // What was found is cahoots' own record; a choice is the
-                // person's, and goes where their other settings are.
-                MeterFile::of(&found).save(&dirs)?;
-                let changes = decision.config_changes(meter_binary.is_some());
-                if !changes.is_empty() {
-                    config = crate::config::edit::apply(&dirs.config_file(), &changes)?;
-                }
-            }
-            let in_effect = decision.in_effect();
-            let meter = serde_json::json!({
-                "found": found,
-                "decision": decision,
-                "in_effect": in_effect,
-                "still_to_do": detect::still_to_do(in_effect, &config.meter, &found, &dirs.config_file()),
-            });
-            let rules: serde_json::Map<String, serde_json::Value> = HarnessId::ALL
-                .into_iter()
-                .filter(|id| harness.is_none_or(|only| only == *id))
-                .map(|id| {
-                    let missing = crate::install::rules::missing(&dirs.home, id);
-                    let lines: Vec<String> =
-                        missing.iter().map(|verb| crate::install::rules::rule(id, verb)).collect();
-                    (
-                        id.to_string(),
-                        serde_json::json!({ "add_to": crate::install::rules::rules_file(id), "rules": lines }),
-                    )
-                })
-                .collect();
-            let mut envelope = Envelope::new(
-                Exit::Ok,
-                format!(
-                    "{} cahoots never edits a harness's permission rules: to let a harness delegate \
-                     without a prompt, add the rules below yourself. Then `cahoots enable <harness>` \
-                     for each target you want (`cahoots settings` shows every setting), and \
-                     `cahoots doctor` to check.",
-                    decision.sentence()
-                ),
-            );
-            envelope.data = Some(serde_json::json!({
-                "dry_run": dry_run,
-                "files": files,
-                "rules_to_add": rules,
-                "meter": meter,
-            }));
-            Ok(envelope)
-        }
+        } => install(harness, dry_run, meter, meter_binary, reader, title),
         Verb::Uninstall { dry_run } => {
-            let files = crate::install::files::uninstall(&Dirs::resolve()?, dry_run)?;
-            ok(serde_json::json!({ "dry_run": dry_run, "files": files }))
+            let dirs = Dirs::resolve()?;
+            let files = crate::install::files::uninstall(&dirs, dry_run)?;
+            let words = person.then(|| endings::uninstalled(title, dry_run, &files, &dirs.home));
+            Ok(Said {
+                envelope: Envelope::new(Exit::Ok, None)
+                    .with_data(serde_json::json!({ "dry_run": dry_run, "files": files })),
+                words,
+            })
         }
         Verb::Resume {
             run,
@@ -463,40 +543,147 @@ fn run_verb(verb: Verb) -> Res<Envelope> {
             caller,
             wait,
             timeout,
-        } => client::resume(ResumeArgs {
+        } => Ok(client::resume(ResumeArgs {
             run,
             brief,
             caller,
             wait_secs: wait,
             timeout_secs: timeout,
-        }),
-        Verb::Wait { run, timeout } => client::wait(&run, timeout),
-        Verb::Status { run } => client::status(run.as_deref()),
-        Verb::Result { run } => client::result(&run),
-        Verb::Cancel { run } => client::cancel(&run),
+        })?
+        .into()),
+        Verb::Wait { run, timeout } => Ok(client::wait(&run, timeout)?.into()),
+        Verb::Status { run } => Ok(client::status(run.as_deref())?.into()),
+        Verb::Result { run } => Ok(client::result(&run)?.into()),
+        Verb::Cancel { run } => Ok(client::cancel(&run)?.into()),
         Verb::Supervise { run } => {
             supervise::supervise(&Dirs::resolve()?, &run)?;
-            Ok(Envelope::new(Exit::Ok, None))
+            Ok(Envelope::new(Exit::Ok, None).into())
         }
     }
 }
 
-/// `install`'s usage meter: what is here, and which one to use, asking the
-/// person when the logic says there is a choice to make (never under
-/// `--dry-run`). Nothing is written here; the caller records the decision once
-/// the files are in.
+/// `cahoots install`: the meter decided (and asked, when it comes to that)
+/// before anything is written, then the files, then what was found and
+/// chosen, and the rules still missing. With a person reading stdout, the
+/// words go on from the question's rail, when it asked one.
+fn install(
+    harness: Option<HarnessId>,
+    dry_run: bool,
+    meter: Option<Selection>,
+    meter_binary: Option<PathBuf>,
+    reader: Reader,
+    title: String,
+) -> Result<Said, Stopped> {
+    let dirs = Dirs::resolve()?;
+    let config = crate::config::UserConfig::load(&dirs.config_file())?;
+    let close = match reader {
+        Reader::Person => questions::Close::InWords,
+        Reader::Program => questions::Close::Here,
+    };
+    // Decided — and asked, when it comes to that — before anything is
+    // written, so a question left unanswered leaves nothing half-done.
+    let (found, decision, asked) = choose_meter(
+        &dirs,
+        &config.meter,
+        meter,
+        meter_binary.as_deref(),
+        dry_run,
+        close,
+    )?;
+    let rail_open = asked && close == questions::Close::InWords;
+    let stopped = |fail: Fail| Stopped { fail, rail_open };
+    let files = crate::install::files::install(&dirs, harness, dry_run).map_err(stopped)?;
+    let mut config = config;
+    let mut saved = Vec::new();
+    if !dry_run {
+        // What was found is cahoots' own record; a choice is the
+        // person's, and goes where their other settings are.
+        MeterFile::of(&found).save(&dirs).map_err(stopped)?;
+        let changes = decision.config_changes(meter_binary.is_some());
+        if !changes.is_empty() {
+            config = crate::config::edit::apply(&dirs.config_file(), &changes).map_err(stopped)?;
+            saved = changes.iter().map(settings::said_change).collect();
+        }
+    }
+    let in_effect = decision.in_effect();
+    let still_to_do = detect::still_to_do(in_effect, &config.meter, &found, &dirs.config_file());
+    let meter = serde_json::json!({
+        "found": found,
+        "decision": decision,
+        "in_effect": in_effect,
+        "still_to_do": still_to_do,
+    });
+    let rules: Vec<(HarnessId, Vec<String>)> = HarnessId::ALL
+        .into_iter()
+        .filter(|id| harness.is_none_or(|only| only == *id))
+        .map(|id| {
+            let missing = crate::install::rules::missing(&dirs.home, id);
+            let lines = missing
+                .iter()
+                .map(|verb| crate::install::rules::rule(id, verb))
+                .collect();
+            (id, lines)
+        })
+        .collect();
+    let rules_to_add: serde_json::Map<String, serde_json::Value> = rules
+        .iter()
+        .map(|(id, lines)| {
+            (
+                id.to_string(),
+                serde_json::json!({ "add_to": crate::install::rules::rules_file(*id), "rules": lines }),
+            )
+        })
+        .collect();
+    let mut envelope = Envelope::new(
+        Exit::Ok,
+        format!(
+            "{} cahoots never edits a harness's permission rules: to let a harness delegate \
+             without a prompt, add the rules below yourself. Then `cahoots enable <harness>` \
+             for each target you want (`cahoots settings` shows every setting), and \
+             `cahoots doctor` to check.",
+            decision.sentence()
+        ),
+    );
+    envelope.data = Some(serde_json::json!({
+        "dry_run": dry_run,
+        "files": files,
+        "rules_to_add": rules_to_add,
+        "meter": meter,
+    }));
+    let words = (reader == Reader::Person).then(|| {
+        endings::installed(endings::Installed {
+            title: (!rail_open).then_some(title),
+            dry_run,
+            files: &files,
+            meter: decision.sentence(),
+            saved,
+            still_to_do: still_to_do.as_deref(),
+            rules: &rules,
+            home: &dirs.home,
+        })
+    });
+    Ok(Said { envelope, words })
+}
+
+/// `install`'s usage meter: what is here, which one to use, and whether a
+/// question was asked to decide it. The person is asked when the logic
+/// says there is a choice to make (never under `--dry-run`), and `close`
+/// says whether the question's rail ends with it. Nothing is written here;
+/// the caller records the decision once the files are in.
 fn choose_meter(
     dirs: &Dirs,
     config: &crate::config::MeterConfig,
     selection: Option<Selection>,
     binary: Option<&std::path::Path>,
     dry_run: bool,
-) -> Res<(Vec<Found>, Decision)> {
+    close: questions::Close,
+) -> Result<(Vec<Found>, Decision, bool), Stopped> {
     if selection == Some(Selection::NoMeter) && binary.is_some() {
         return Err(Fail::new(
             Exit::Usage,
             "--meter-binary names a meter's binary, and --meter none names no meter",
-        ));
+        )
+        .into());
     }
     // Where config.toml says each meter is, then where it was found last
     // time. A file an older cahoots wrote only loses its hints: this run
@@ -524,20 +711,33 @@ fn choose_meter(
         found.push(detect::probe(meter, &binary));
     }
     let decision = detect::decide(config.use_, selection, &found)?;
-    let decision = match decision {
-        Decision::Ask { options } if !dry_run => {
-            let selection = {
-                let Some(mut terminal) = person_at_terminal() else {
-                    return Err(questions::no_terminal_for_meter());
-                };
-                questions::which_meter(&options, &mut terminal, &mut std::io::stderr(), colors())?
-                // The terminal is given back here, before install says more.
-            };
-            detect::picked(selection, &options)?
-        }
-        other => other,
+    let Decision::Ask { options } = decision else {
+        return Ok((found, decision, false));
     };
-    Ok((found, decision))
+    if dry_run {
+        return Ok((found, Decision::Ask { options }, false));
+    }
+    // From here the question is on the rail, and a failure closes it.
+    let asked = |fail: Fail| Stopped {
+        fail,
+        rail_open: close == questions::Close::InWords,
+    };
+    let selection = {
+        let Some(mut terminal) = person_at_terminal() else {
+            return Err(questions::no_terminal_for_meter().into());
+        };
+        questions::which_meter(
+            &options,
+            &mut terminal,
+            &mut std::io::stderr(),
+            colors(),
+            close,
+        )
+        .map_err(asked)?
+        // The terminal is given back here, before install says more.
+    };
+    let decision = detect::picked(selection, &options).map_err(asked)?;
+    Ok((found, decision, true))
 }
 
 /// The person's terminal, set up for a question. `None` when there is no
@@ -549,21 +749,29 @@ fn person_at_terminal() -> Option<tui::Terminal> {
     tui::Terminal::open()
 }
 
-/// The rail in color, unless `NO_COLOR` says otherwise.
+/// The rail in color, unless `NO_COLOR` says otherwise, or the terminal is
+/// one that shows no escape codes (`TERM=dumb`).
 fn colors() -> tui::Colors {
-    if crate::env::no_color() {
+    if crate::env::no_color() || crate::env::dumb_terminal() {
         tui::Colors::OFF
     } else {
         tui::Colors::ON
     }
 }
 
-/// Prints the envelope and turns it into the process's exit status. A closed
-/// pipe is a quiet exit, not a panic (docs/SPIKE.md S5).
-pub fn emit(envelope: &Envelope) -> ExitCode {
+/// Prints what a verb said and turns it into the process's exit status: its
+/// words for a person, drawn on stdout where the envelope would go, and the
+/// envelope for everyone else. A closed pipe is a quiet exit, not a panic
+/// (docs/SPIKE.md S5).
+pub fn emit(said: &Said) -> ExitCode {
     use std::io::IsTerminal;
+    let envelope = &said.envelope;
+    if let Some(words) = &said.words {
+        tui::Rail::new(&mut std::io::stdout(), colors()).end(words);
+        return ExitCode::from(envelope.code);
+    }
     let encode = if std::io::stdout().is_terminal() {
-        serde_json::to_string_pretty // a person is reading
+        serde_json::to_string_pretty // a person may be reading
     } else {
         serde_json::to_string // one line, for an agent
     };
@@ -634,6 +842,65 @@ mod tests {
         assert!(
             refusal(&status, false).is_none(),
             "an agent verb needs no terminal"
+        );
+    }
+
+    /// Who reads is decided, never found out by running a verb: `reader`,
+    /// like `refusal`, is tested without `dispatch`.
+    #[test]
+    fn only_a_human_verb_with_stdout_at_a_terminal_is_read_by_a_person() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            let tier = tier_of(name).unwrap();
+            assert_eq!(
+                reader(tier, false),
+                Reader::Program,
+                "{name}: a pipe is read by a program"
+            );
+            let expected = match tier {
+                Tier::Human => Reader::Person,
+                Tier::Agent | Tier::Inspect | Tier::Internal => Reader::Program,
+            };
+            assert_eq!(reader(tier, true), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_command_line_clap_refused_still_names_its_verb() {
+        let named = |argv: &[&str]| tier_named(argv.iter().map(OsString::from));
+        assert_eq!(named(&["cahoots", "enable", "gemini"]), Some(Tier::Human));
+        assert_eq!(
+            named(&["cahoots", "settings", "set", "harness.codex.cap"]),
+            Some(Tier::Human)
+        );
+        assert_eq!(named(&["cahoots", "--bogus", "install"]), Some(Tier::Human));
+        assert_eq!(
+            named(&["cahoots", "run", "--role", "deploy"]),
+            Some(Tier::Agent)
+        );
+        assert_eq!(named(&["cahoots", "conspire"]), None);
+        assert_eq!(named(&["cahoots"]), None);
+    }
+
+    #[test]
+    fn a_verbs_rail_is_titled_with_its_command() {
+        let title_of = |argv: &[&str]| title(&Cli::try_parse_from(argv).unwrap().verb);
+        assert_eq!(
+            title_of(&["cahoots", "install", "--dry-run"]),
+            "cahoots install"
+        );
+        assert_eq!(title_of(&["cahoots", "enable", "codex"]), "cahoots enable");
+        assert_eq!(
+            title_of(&["cahoots", "settings", "reset", "harness.codex.cap"]),
+            "cahoots settings"
+        );
+        assert_eq!(
+            title_of(&["cahoots", "learn", "list"]),
+            "cahoots learn list"
+        );
+        assert_eq!(
+            title_of(&["cahoots", "learn", "reset"]),
+            "cahoots learn reset"
         );
     }
 

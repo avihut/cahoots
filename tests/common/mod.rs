@@ -270,13 +270,32 @@ impl World {
 
     /// `at_terminal`, with `env` set on top.
     pub fn at_terminal_with(&self, args: &[&str], env: &[(&str, &str)]) -> AtTerminal {
-        AtTerminal::start(self.terminal_command(args, env), Duration::ZERO)
+        AtTerminal::start(
+            self.terminal_command(args, env),
+            Duration::ZERO,
+            Stdout::Piped,
+        )
     }
 
     /// `at_terminal`, at a terminal that answers where its cursor is only
     /// after `delay`, as one over a slow connection does.
     pub fn at_slow_terminal(&self, args: &[&str], delay: Duration) -> AtTerminal {
-        AtTerminal::start(self.terminal_command(args, &[]), delay)
+        AtTerminal::start(self.terminal_command(args, &[]), delay, Stdout::Piped)
+    }
+
+    /// `cahoots <args>` as a person runs it: stdout on the terminal too, so a
+    /// human verb ends in words, and there is no JSON to read.
+    pub fn as_a_person(&self, args: &[&str]) -> AtTerminal {
+        self.as_a_person_with(args, &[])
+    }
+
+    /// `as_a_person`, with `env` set on top.
+    pub fn as_a_person_with(&self, args: &[&str], env: &[(&str, &str)]) -> AtTerminal {
+        AtTerminal::start(
+            self.terminal_command(args, env),
+            Duration::ZERO,
+            Stdout::Terminal,
+        )
     }
 
     fn terminal_command(&self, args: &[&str], env: &[(&str, &str)]) -> StdCommand {
@@ -385,14 +404,24 @@ pub fn path_str(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+/// Where a command at a terminal writes its stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdout {
+    /// Piped apart, as in `cahoots install | jq`: the JSON envelope.
+    Piped,
+    /// On the terminal, as a person runs it: a human verb's words.
+    Terminal,
+}
+
 /// A command run at a terminal of its own: a pseudo-terminal on its stdin and
-/// stderr, and stdout piped apart, as in `cahoots install | jq`. What the
-/// terminal shows is collected as it comes, so a test can wait for a question,
-/// press keys, and then read the screen, the JSON, and the terminal's mode.
-/// Like a real terminal, it answers when it is asked where its cursor is
-/// (`ESC [ 6 n`): at its far corner, which is its size.
+/// stderr, and stdout piped apart, as in `cahoots install | jq`, or on the
+/// terminal too. What the terminal shows is collected as it comes, so a test
+/// can wait for a question, press keys, and then read the screen, the JSON,
+/// and the terminal's mode. Like a real terminal, it answers when it is asked
+/// where its cursor is (`ESC [ 6 n`): at its far corner, which is its size.
 pub struct AtTerminal {
     child: std::process::Child,
+    stdout: Stdout,
     master: Arc<OwnedFd>,
     /// Kept open, to read the terminal's mode once the command is gone.
     slave: OwnedFd,
@@ -406,6 +435,7 @@ pub struct AtTerminal {
 /// What a command left at its terminal.
 pub struct Finished {
     pub code: i32,
+    /// The envelope on a piped stdout; `Null` when stdout was the terminal.
     pub json: Value,
     /// Everything the terminal was sent, escapes and all.
     pub screen: String,
@@ -413,10 +443,50 @@ pub struct Finished {
     pub mode: Termios,
 }
 
+impl Finished {
+    /// What stayed on the screen, as a person reads it: without what was
+    /// drawn on the alternate screen, which is gone when the page closes, and
+    /// without escape codes or carriage returns.
+    pub fn text(&self) -> String {
+        let mut rest = self.screen.as_str();
+        let mut kept = String::new();
+        while let Some(start) = rest.find("\x1b[?1049h") {
+            kept.push_str(&rest[..start]);
+            rest = match rest[start..].find("\x1b[?1049l") {
+                Some(end) => &rest[start + end..],
+                None => "",
+            };
+        }
+        kept.push_str(rest);
+        plain(&kept)
+    }
+}
+
+/// `text` without its escape codes (`ESC [ … letter`) or carriage returns.
+pub fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() || next == '~' {
+                        break;
+                    }
+                }
+            }
+            '\r' => {}
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
 impl AtTerminal {
     /// Starts `command` at the terminal, which answers a size question after
-    /// `delay`.
-    pub fn start(mut command: StdCommand, delay: Duration) -> AtTerminal {
+    /// `delay`, with its stdout piped apart or on the terminal too.
+    pub fn start(mut command: StdCommand, delay: Duration, stdout: Stdout) -> AtTerminal {
         let size = Winsize {
             ws_row: 24,
             ws_col: 100,
@@ -427,7 +497,10 @@ impl AtTerminal {
         command
             .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
             .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
-            .stdout(Stdio::piped());
+            .stdout(match stdout {
+                Stdout::Piped => Stdio::piped(),
+                Stdout::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
+            });
         let child = command.spawn().expect("cahoots starts");
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
@@ -458,6 +531,7 @@ impl AtTerminal {
         };
         AtTerminal {
             child,
+            stdout,
             master,
             slave: pty.slave,
             shown,
@@ -498,20 +572,20 @@ impl AtTerminal {
         });
         let code = self.child.wait().unwrap().code().expect("an exit code");
         let mut stdout = String::new();
-        self.child
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_string(&mut stdout)
-            .unwrap();
+        if let Some(mut piped) = self.child.stdout.take() {
+            piped.read_to_string(&mut stdout).unwrap();
+        }
         self.done.store(true, Ordering::Relaxed);
         self.reader.take().unwrap().join().unwrap();
         // What it drew last may still be on its way.
         drain(&self.master, &self.shown, 200);
         let screen = self.screen();
-        let json = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
-            panic!("stdout is not one JSON envelope ({error}): {stdout:?}\nscreen: {screen:?}")
-        });
+        let json = match self.stdout {
+            Stdout::Piped => serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+                panic!("stdout is not one JSON envelope ({error}): {stdout:?}\nscreen: {screen:?}")
+            }),
+            Stdout::Terminal => Value::Null,
+        };
         Finished {
             code,
             json,

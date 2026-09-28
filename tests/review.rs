@@ -273,6 +273,61 @@ fn a_note_needs_two_runs_in_two_directories() {
 }
 
 #[test]
+fn learn_list_shows_a_person_what_reviewers_wrote_and_nothing_it_could_steer_with() {
+    let world = World::new();
+    world.configure(ON);
+    let elsewhere = second_repo(&world);
+    for run in [
+        world.run("one", &[]).run_id(),
+        run_in(&world, &elsewhere, "two"),
+    ] {
+        let answer = world.ask(&[
+            "review",
+            "submit",
+            &run,
+            "--caller",
+            "claude",
+            "--finding",
+            "brief_too_broad:it asked for three things at once",
+        ]);
+        assert_eq!(answer.code, 0, "{}", answer.json);
+    }
+    // A record edited behind cahoots' back: review submit refuses a control
+    // character, and the words escape one anyway.
+    let history = world.state.join("history.jsonl");
+    let tampered = fs::read_to_string(&history).unwrap().replacen(
+        "it asked for three things at once",
+        "fine\\u001b]0;owned\\u0007 then",
+        1,
+    );
+    fs::write(&history, tampered).unwrap();
+
+    let after = world.as_a_person(&["learn", "list"]).finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    assert!(
+        text.starts_with("┌  cahoots learn list\n│\n●  Review is on, for 100% of finished runs\n"),
+        "{text}"
+    );
+    assert!(text.contains("◇  advise · codex\n"), "{text}");
+    // The rail's lines as the sentences they wrap.
+    let said = text.replace("\n│  ", " ");
+    assert!(
+        said.contains(
+            "What reviewers wrote: \"fine\\u{1b}]0;owned\\u{7} then\", \
+             \"it asked for three things at once\""
+        ),
+        "the honest words as written, the tampered ones escaped: {text}"
+    );
+    assert!(
+        !after.screen.contains('\u{1b}') && !after.screen.contains('\u{7}'),
+        "a control character reached the terminal: {:?}",
+        after.screen
+    );
+    assert!(text.ends_with("└  1 note in effect\n"), "{text}");
+}
+
+#[test]
 fn learn_reset_forgets_what_reviews_said_and_keeps_the_record() {
     let world = World::new();
     world.configure(ON);
