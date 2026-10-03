@@ -779,16 +779,19 @@ fn real_git() -> PathBuf {
 }
 
 /// A `git` of the test's own, first on PATH and outside the workspace, that
-/// passes everything to the real one except what it is told to do instead
-/// when its argv holds `diff` or `ls-files` — a `diff --name-only` aside.
+/// logs each call to `bin/git.calls` and passes it to the real one — except
+/// what it is told to do instead when its argv holds `diff` or `ls-files`,
+/// the index's own listing (`ls-files --cached`) aside.
 fn capture_git(world: &World, diff: &str, ls_files: &str) {
     world.script_at(
         &world.bin.join("git"),
         &format!(
-            "#!/bin/sh\nfor arg do\n  [ \"$arg\" = --name-only ] && exec '{git}' \"$@\"\ndone\n\
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n\
+             for arg do\n  [ \"$arg\" = --cached ] && exec '{git}' \"$@\"\ndone\n\
              for arg do\n  case \"$arg\" in\n    diff) {diff} ;;\n    ls-files) {ls_files} ;;\n  \
              esac\ndone\nexec '{git}' \"$@\"\n",
-            git = real_git().display()
+            git = real_git().display(),
+            calls = world.bin.join("git.calls").display(),
         ),
     );
     world.prefix_path(&world.bin);
@@ -919,4 +922,38 @@ fn a_tracked_file_made_a_hard_link_is_never_read() {
         &[],
     );
     assert_no_patch(&world, &answer, "has more than one hard link");
+}
+
+#[test]
+fn a_hard_link_is_refused_before_git_reads_any_file() {
+    // The refusal comes from the index's listing and `lstat` alone: no git
+    // that reads a file in the tree — a `diff` of any kind — ever runs.
+    let world = World::new();
+    commit_files(&world, &[("notes.txt", b"notes\n")]);
+    let secret = world.home.join("secret");
+    fs::write(&secret, "TOP-SECRET-MARKER\n").unwrap();
+    capture_git(&world, ":", ":");
+    let answer = fork(
+        &world,
+        &format!(
+            "FAKE: remove=notes.txt\nFAKE: write=x.txt\nFAKE: hardlink=notes.txt={}",
+            secret.display()
+        ),
+        &[],
+    );
+    assert_no_patch(&world, &answer, "has more than one hard link");
+    let calls = fs::read_to_string(world.bin.join("git.calls")).unwrap();
+    let words = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    assert!(
+        calls
+            .lines()
+            .any(|line| words(line).contains(&"--cached".to_string())),
+        "the index was never listed: {calls}"
+    );
+    assert!(
+        !calls
+            .lines()
+            .any(|line| words(line).contains(&"diff".to_string())),
+        "a git diff ran before the refusal: {calls}"
+    );
 }

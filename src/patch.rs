@@ -234,13 +234,17 @@ pub fn capture(
     let diff: Vec<&OsStr> = DIFF.iter().map(OsStr::new).collect();
 
     let run = |budget: &mut Budget| -> Result<Vec<u8>, String> {
-        // What the tracked diff will read, looked at before it does: none of
-        // it a hard link, and all of it the same files once it has.
-        let mut names = diff.clone();
-        names
-            .extend(["--name-only", "-z", "--end-of-options", base.as_str(), "--"].map(OsStr::new));
-        let changed = step(budget, "git diff --name-only", &names, 0)?;
-        let watched = changed
+        // What the tracked diff may read — every path in the index, listed
+        // from the index alone, without a worktree file opened — looked at
+        // before any git reads one: none of it a hard link, and all of it
+        // the same files once git has read them.
+        let indexed = step(
+            budget,
+            "git ls-files --cached",
+            &["ls-files", "-z", "--cached"].map(OsStr::new),
+            0,
+        )?;
+        let watched = indexed
             .split(|&byte| byte == 0)
             .filter(|name| !name.is_empty())
             .map(|name| {
