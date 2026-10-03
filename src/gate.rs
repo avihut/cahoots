@@ -59,17 +59,33 @@ fn usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> 
     };
     let mut answer = meter.ask(&ask);
     let mut notes = Vec::new();
-    if answer.verdict == Exit::Stale && meter.refreshes_on_use(harness) {
-        let lowered = cap.saturating_sub(STALE_MARGIN).max(1);
-        answer = meter.ask(&Ask {
-            cap: lowered,
-            fresh: false,
-            ..ask
-        });
-        if answer.verdict == Exit::Ok {
-            notes.push(format!(
-                "{harness}'s usage data was stale, so it was held to {lowered}% instead of {cap}% — this run refreshes it"
-            ));
+    if answer.verdict == Exit::Stale {
+        // A stale reading is a lower bound the run itself refreshes — when
+        // the harness's numbers refresh on use (Codex), or when the tracker
+        // is still polling (a quiet Claude is polled slowly, and a run makes
+        // it poll). Otherwise nothing will refresh it: refuse.
+        let why = if meter.refreshes_on_use(harness) {
+            Ok("")
+        } else {
+            meter
+                .still_polling(harness, now())
+                .map(|()| ", and the tracker is still polling it (slowly, while it is quiet)")
+        };
+        match why {
+            Ok(why) => {
+                let lowered = cap.saturating_sub(STALE_MARGIN).max(1);
+                answer = meter.ask(&Ask {
+                    cap: lowered,
+                    fresh: false,
+                    ..ask
+                });
+                if answer.verdict == Exit::Ok {
+                    notes.push(format!(
+                        "{harness}'s usage data was stale{why}, so it was held to {lowered}% instead of {cap}% — this run refreshes it"
+                    ));
+                }
+            }
+            Err(why) => answer.why = Some(why),
         }
     }
     if answer.verdict == Exit::Ok {

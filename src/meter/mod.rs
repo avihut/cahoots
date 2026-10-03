@@ -265,6 +265,18 @@ impl UsageMeter {
         }
     }
 
+    /// Whether whatever refreshes `harness`'s readings is still at it, asked
+    /// after a stale answer for a harness that does not refresh on use. Only
+    /// Agent Usage polls; `Err` says why it is not a yes, for the refusal.
+    pub fn still_polling(&self, harness: HarnessId, now: u64) -> Result<(), String> {
+        match self {
+            UsageMeter::AgentUsage(meter) => {
+                meter.still_polling(&self.resolve().map_err(|fail| fail.message)?, harness, now)
+            }
+            UsageMeter::Ccusage(_) => Err("ccusage polls nothing".to_string()),
+        }
+    }
+
     /// Asks. A meter that cannot be run, or that answers in a way cahoots
     /// does not understand, is a `NoDigest` answer — never a yes.
     pub fn ask(&self, ask: &Ask) -> Answer {

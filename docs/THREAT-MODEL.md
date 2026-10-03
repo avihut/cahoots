@@ -159,7 +159,11 @@ from `/`, where no repository can leave it a config file. ccusage always gets
 network and every write under the home directory denied, it gave the same
 answer, and the kernel's sandbox log — which does record a denied attempt —
 showed none. A meter that fails, times out or answers in a shape cahoots does
-not know refuses the run.
+not know refuses the run. A stale reading is let in only held to `cap − 15`,
+and only when the run itself refreshes it: always for Codex, and for Claude
+only while the tracker's own `status` stamps say it is still polling — its
+heartbeat, judged by the tracker's rule for an engine that stopped. A
+heartbeat for another harness, or one cahoots cannot read, refuses.
 
 **Targets are off until enabled.** A run sends repository content to another
 vendor. That is a decision for a human, per harness, once: `cahoots enable`,

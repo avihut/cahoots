@@ -48,7 +48,10 @@ fn emit(value: serde_json::Value) {
 }
 
 /// As `usage-cli`: answers `headroom` the way `usage-cli.plan` (next to the
-/// binary) says, and logs each call to `usage-cli.calls`.
+/// binary) says, and logs each call to `usage-cli.calls`. `status` is
+/// answered by the plan's `"status"` — `{"code": 0, "provider": "claude",
+/// "generated": -600, "next_poll": 1800}`, its stamps in seconds from now —
+/// and with no `"status"` it has no digest (13).
 fn fake_meter(exe: &std::path::Path, argv: &[String]) {
     let calls = exe.with_file_name("usage-cli.calls");
     let is_watch = |line: &str| line.contains("--max-data-age") && !line.contains("--forecast");
@@ -68,6 +71,25 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
+    if argv.get(1).map(String::as_str) == Some("status") {
+        let status = &plan["status"];
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let stamp = |key: &str| status[key].as_i64().map(|offset| now + offset);
+        if status.is_object() {
+            println!(
+                "{}",
+                json!({
+                    "provider": status["provider"],
+                    "generated": stamp("generated"),
+                    "next-poll": stamp("next_poll"),
+                })
+            );
+        }
+        std::process::exit(status["code"].as_i64().unwrap_or(13) as i32);
+    }
     // Three kinds of call: admission (guarded by data age, asks the forecast),
     // admission's stale re-ask (unguarded), and the mid-run watchdog (guarded,
     // no forecast) — answered by "watch", or by "watch_sequence" in turn, or
@@ -89,6 +111,8 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
             "{}",
             json!({"verdict": "from-the-fake", "percent": percent})
         );
+    } else if let Some(age) = answer["data_age"].as_i64() {
+        println!("{}", json!({"verdict": "stale", "dataAge": age}));
     }
     std::process::exit(answer["code"].as_i64().unwrap_or(13) as i32);
 }
