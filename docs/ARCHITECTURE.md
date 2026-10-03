@@ -76,6 +76,7 @@ supervisor, and there is no second, foreground path to keep honest.
   are time-sortable and match `^[0-9A-Za-z_-]{1,64}$`. There is no separate
   ledger file; `report` reads the folded history, which outlives a run's
   retained content. Content is kept 7 days.
+  `<data>` holds what a person keeps: the suite.
 - **Liveness** is an exclusive lock on `runs/<id>/lock`, held for the
   supervisor's lifetime; the kernel releases it on death. `cancel` writes a
   marker the supervisor polls. Only the supervisor signals the callee — its
@@ -483,3 +484,42 @@ stay in the person's order even when learned routing is enabled. Ordinary
 report totals still include kind runs, and outcomes, sampling and role-scoped
 notes retain their behavior. Report groups kind runs (above); no per-kind
 calibration exists yet.
+
+## The eval suite (#38)
+
+A writer's run whose result the caller accepted already holds a task: the
+commit it started from, its brief, its kind and the patch it made. All of it
+ages out with the run directory, so `cahoots evals add <run>` copies it into
+the data directory (`~/.local/share/cahoots`), which nothing ages out:
+
+```text
+<data>/evals/tasks/<task>/   0700; a task's id is its run's
+  task.json      the record: run, role, kind, target, repo, git_common_dir,
+                 base_commit, hidden_tests, solution                0600
+  brief          the run's brief, byte for byte                     0600
+  tests.diff     the hidden tests: the patch's sections for test files 0600
+  solution.diff  every other section of the patch                   0600
+```
+
+- **The split.** The run's `patch.diff` is cut at its `diff --git` headers
+  (`patch::sections`, which names each file as `summarize` does). A section
+  whose path is a test — under a `test`, `tests`, `__tests__`, `spec`, `specs`
+  or `testdata` directory, or named like `foo_test.go`, `test_foo.py`,
+  `foo.test.ts` or `FooTest.java` (`evals::is_test_path`) — goes to
+  `tests.diff`, the rest to `solution.diff`. Sections are independent, so
+  each file applies on its own at `base_commit`. A patch with no test file
+  still makes a task, with no hidden tests. Rust's inline `#[cfg(test)]`
+  modules count as solution.
+- **Only an accepted writer's own answer.** The run must be finished, an
+  `implement` run in a fork, not a resume (its brief is only the follow-up),
+  with `accepted` as its last outcome in the history, a patch kept and not
+  empty, and within the 7 days a run directory is kept.
+- **The rot check** runs `git rev-parse --verify` for the base commit in the
+  repository's common git directory, read once from the fork's pinned git
+  directory when the task is made. A linked worktree (daft's layout) is
+  removed after a merge, and the repository outlives it. `evals list` marks
+  each task `none`, `commit_gone`, `repository_gone` or `unknown`; a check
+  that cannot run is `unknown`, never "gone".
+- **All of it is a person's.** `evals` is a human verb: `add`, `list` and
+  `remove` run only from a terminal. Nothing executes a task yet (replay is
+  #39), and nothing sends one anywhere.

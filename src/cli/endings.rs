@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use super::settings::tilde;
 use crate::doctor::{Check, EvidenceGap, Status};
+use crate::evals::{Added, Listed, Rot};
 use crate::install::files::{Outcome, Report};
 use crate::install::rules::rules_file;
 use crate::meter::tokens;
@@ -499,6 +500,148 @@ pub fn forgot(title: String) -> Ending {
         Some(title),
         Last::Said("Reviews recorded before now no longer count toward any note.".to_string()),
     )
+}
+
+/// `evals add`: what the new task holds, where it came from, and where it
+/// is kept — with a warning when no file in its patch is a test.
+pub fn evals_added(title: String, added: &Added, home: &Path) -> Ending {
+    let task = &added.task;
+    let kind = match &task.kind {
+        Some(kind) => kind.to_string(),
+        None => "a task of no kind".to_string(),
+    };
+    let target = &task.target;
+    let lines = vec![
+        format!(
+            "From a run by {} · {} · {}, accepted",
+            target.harness,
+            target.model.as_str(),
+            target.effort
+        ),
+        format!("Repository: {}", tilde(&task.repo, home)),
+        paths("Hidden tests", &task.hidden_tests),
+        paths("The rest of the change", &task.solution),
+    ];
+    let mut blocks = vec![Block::done(
+        format!(
+            "Task {}: {kind} at {}",
+            task.task,
+            sha12(task.base_commit.as_str())
+        ),
+        lines,
+    )];
+    if task.hidden_tests.is_empty() {
+        blocks.push(Block::warning(
+            "Its patch touches no test file, so the task has no hidden tests",
+            vec![
+                "A test file is one under a tests/, test/, spec/ or __tests__/ directory, or \
+                 named like foo_test.go, test_foo.py or foo.test.ts."
+                    .to_string(),
+            ],
+        ));
+    }
+    Ending {
+        title: Some(title),
+        blocks,
+        last: Last::Said(format!(
+            "Added to the suite, in {}. It stays on this machine.",
+            tilde(&added.path, home)
+        )),
+        paste: Vec::new(),
+    }
+}
+
+/// `evals list`: a block per task, marked when it can no longer be
+/// replayed, and how many there are.
+pub fn evals_listed(title: String, tasks: &[Listed], home: &Path) -> Ending {
+    let mut rotted = 0;
+    let blocks = tasks
+        .iter()
+        .map(|listed| {
+            let task = &listed.task;
+            let kind = task
+                .kind
+                .as_ref()
+                .map_or("no kind".to_string(), ToString::to_string);
+            let text = format!(
+                "{} · {kind} · {}",
+                task.task,
+                sha12(task.base_commit.as_str())
+            );
+            let mut lines = vec![
+                tilde(&task.repo, home),
+                count(
+                    task.hidden_tests.len() as u64,
+                    "hidden test",
+                    "hidden tests",
+                ),
+            ];
+            let rot = match listed.rot {
+                Rot::None => None,
+                Rot::CommitGone => Some(format!(
+                    "Its base commit is gone from the repository, so it cannot be replayed. \
+                     `cahoots evals remove {}` takes it out.",
+                    task.task
+                )),
+                Rot::RepositoryGone => Some(format!(
+                    "Its repository is gone ({}).",
+                    tilde(&task.git_common_dir, home)
+                )),
+                Rot::Unknown => Some(format!(
+                    "Its base commit could not be checked: {}",
+                    listed.rot_error.as_deref().unwrap_or_default()
+                )),
+            };
+            match rot {
+                Some(rot) => {
+                    rotted += 1;
+                    lines.push(rot);
+                    Block::warning(text, lines)
+                }
+                None => Block::done(text, lines),
+            }
+        })
+        .collect();
+    let last = match (tasks.len(), rotted) {
+        (0, _) => {
+            "No tasks yet: `cahoots evals add <run>` makes one from a writer's run you accepted."
+                .to_string()
+        }
+        (n, 0) => count(n as u64, "task", "tasks"),
+        (n, rotted) => format!("{}, {rotted} rotted", count(n as u64, "task", "tasks")),
+    };
+    Ending {
+        title: Some(title),
+        blocks,
+        last: Last::Said(last),
+        paste: Vec::new(),
+    }
+}
+
+/// `evals remove`.
+pub fn evals_removed(title: String, task: &str) -> Ending {
+    Ending::just(
+        Some(title),
+        Last::Said(format!("Task {task} removed from the suite.")),
+    )
+}
+
+/// A commit as a person reads it: its first 12 hex digits.
+fn sha12(commit: &str) -> &str {
+    &commit[..commit.len().min(12)]
+}
+
+/// `Hidden tests (2): a, b`, the first five of a long list and how many
+/// more, or `none`.
+fn paths(what: &str, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return format!("{what}: none");
+    }
+    let mut shown = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 5 {
+        shown.push_str(&format!(" and {} more", paths.len() - 5));
+    }
+    format!("{what} ({}): {shown}", paths.len())
 }
 
 /// The files `install` or `uninstall` reported, a block for each thing that
@@ -1223,5 +1366,21 @@ mod tests {
             "┌  cahoots learn reset\n│\n\
              └  Reviews recorded before now no longer count toward any note.\n"
         );
+    }
+
+    #[test]
+    fn a_long_list_of_paths_shows_five_and_counts_the_rest() {
+        let list = |n: usize| (1..=n).map(|i| format!("f{i}")).collect::<Vec<_>>();
+        assert_eq!(paths("Hidden tests", &[]), "Hidden tests: none");
+        assert_eq!(paths("Hidden tests", &list(1)), "Hidden tests (1): f1");
+        assert_eq!(
+            paths("Hidden tests", &list(5)),
+            "Hidden tests (5): f1, f2, f3, f4, f5"
+        );
+        assert_eq!(
+            paths("The rest of the change", &list(8)),
+            "The rest of the change (8): f1, f2, f3, f4, f5 and 3 more"
+        );
+        assert_eq!(sha12(&"0123456789abcdef".repeat(4)), "0123456789ab");
     }
 }

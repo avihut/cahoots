@@ -306,6 +306,7 @@ fn a_kind_is_recorded_in_every_run_summary_and_history() {
         home: world.home.clone(),
         config: world.config.clone(),
         state: world.state.clone(),
+        data: world.data.clone(),
         overridden: true,
     };
     fs::remove_dir_all(world.state.join("runs")).unwrap();

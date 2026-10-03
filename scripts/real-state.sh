@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The real-state tripwire. The suite must never touch what a person actually
-# has: their cahoots config and state, or the files `cahoots install` puts in
+# has: their cahoots config, state and eval suite, or the files `cahoots install` puts in
 # their agent homes. Throwaway directories are what the tests are GIVEN; this
 # is what proves they stayed in them.
 #
@@ -18,6 +18,7 @@ home="${REAL_STATE_HOME:-$HOME}"
 watched=(
     "$home/.config/cahoots"
     "$home/.local/state/cahoots"
+    "$home/.local/share/cahoots"
     "$home/.agents/skills/cahoots"
     "$home/.claude/skills/cahoots"
     "$home/.claude/agents/cahoots-delegate.md"

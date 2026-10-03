@@ -1,8 +1,8 @@
 //! A throwaway world for one test: fake `claude` and `codex` binaries, a
-//! config and a state directory of its own, and a small git repository to
-//! stand in. Nothing here touches the real `~/.config` or `~/.local/state`:
-//! the binary under test is a dev build, and every command gets both
-//! directory overrides.
+//! config, a state and a data directory of its own, and a small git
+//! repository to stand in. Nothing here touches the real `~/.config`,
+//! `~/.local/state` or `~/.local/share`: the binary under test is a dev
+//! build, and every command gets every directory override.
 #![allow(dead_code)]
 
 use std::cell::RefCell;
@@ -29,6 +29,8 @@ pub struct World {
     pub bin: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
+    /// What a person keeps: the eval suite.
+    pub data: PathBuf,
     /// Stands in for the user's home, where the agent homes live.
     pub home: PathBuf,
     pub work: PathBuf,
@@ -118,6 +120,7 @@ impl World {
             bin: base.join("bin"),
             config: base.join("config"),
             state: base.join("state"),
+            data: base.join("data"),
             home: base.join("home"),
             work: base.join("work"),
             enabled: RefCell::new(Vec::new()),
@@ -129,6 +132,7 @@ impl World {
             &world.bin,
             &world.config,
             &world.state,
+            &world.data,
             &world.home,
             &world.work,
         ] {
@@ -528,6 +532,7 @@ impl World {
             .current_dir(&self.work)
             .env("CAHOOTS_CONFIG_DIR", &self.config)
             .env("CAHOOTS_STATE_DIR", &self.state)
+            .env("CAHOOTS_DATA_DIR", &self.data)
             .env("CAHOOTS_HOME_DIR", &self.home)
             .env_remove("CAHOOTS_DEV_REAL_DIRS")
             // Whatever the caller says, cahoots' own git never fetches
@@ -561,6 +566,72 @@ impl World {
         }
         args.extend(extra);
         self.ask(&args)
+    }
+
+    /// A PATH for a command at a terminal that starts `git`: this world's
+    /// bin first, then the inherited PATH, where git is.
+    pub fn path_with_git(&self) -> String {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(
+            std::iter::once(self.bin.clone()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap()
+        .into_string()
+        .unwrap()
+    }
+
+    /// Commits the files an eval task is made from: `src/lib.rs` and the
+    /// test file `tests/old_test.rs`.
+    pub fn evals_fixture(&self) {
+        fs::create_dir_all(self.work.join("src")).unwrap();
+        fs::create_dir_all(self.work.join("tests")).unwrap();
+        fs::write(self.work.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+        fs::write(self.work.join("tests/old_test.rs"), "#[test] fn old() {}\n").unwrap();
+        self.git(&["add", "--", "src/lib.rs", "tests/old_test.rs"]);
+        self.git(&["commit", "-q", "-m", "chore: a library and its test"]);
+    }
+
+    /// A writer's run in a fork (`--role implement`, unless `extra` names a
+    /// kind), from `dir` with its brief there, which must succeed.
+    pub fn writer_in(&self, dir: &Path, brief: &str, extra: &[&str]) -> Answer {
+        let path = dir.join(format!("brief-{}.md", uuid_like()));
+        fs::write(&path, brief).unwrap();
+        let mut args = vec!["run", "--fork", "--caller", "claude"];
+        if !extra.contains(&"--kind") {
+            args.extend(["--role", "implement"]);
+        }
+        args.extend(["--brief", path.to_str().unwrap()]);
+        args.extend(extra);
+        let answer = answer(self.cahoots().current_dir(dir).args(&args));
+        assert_eq!(answer.code, 0, "{}", answer.json);
+        answer
+    }
+
+    /// `writer_in` this world's repository, then its result recorded as
+    /// accepted.
+    pub fn accepted_writer(&self, brief: &str, extra: &[&str]) -> Answer {
+        self.accepted_writer_in(&self.work.clone(), brief, extra)
+    }
+
+    pub fn accepted_writer_in(&self, dir: &Path, brief: &str, extra: &[&str]) -> Answer {
+        let run = self.writer_in(dir, brief, extra);
+        let outcome = self.ask(&["outcome", &run.run_id(), "accepted"]);
+        assert_eq!(outcome.code, 0, "{}", outcome.json);
+        run
+    }
+
+    /// Makes the commit every run in `forks` started from unreachable, and
+    /// gone: they were cut from a branch `scratch`, which is deleted along
+    /// with their worktrees, and the repository is collected.
+    pub fn lose_the_scratch_commit(&self, forks: &[&Answer]) {
+        self.git(&["switch", "-q", "main"]);
+        self.git(&["branch", "-q", "-D", "scratch"]);
+        for fork in forks {
+            let worktree = fork.data()["worktree"].as_str().expect("a worktree");
+            self.git(&["worktree", "remove", "--force", worktree]);
+        }
+        self.git(&["reflog", "expire", "--expire=now", "--all"]);
+        self.git(&["gc", "-q", "--prune=now"]);
     }
 
     pub fn record(&self, run: &str) -> Value {

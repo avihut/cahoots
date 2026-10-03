@@ -582,6 +582,46 @@ fn walk(patch: &[u8]) -> Summing {
     sum
 }
 
+/// One file's part of a patch: its `diff --git ` header and everything up to
+/// the next one, byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section<'a> {
+    /// As `summarize` names the file.
+    pub path: String,
+    pub bytes: &'a [u8],
+}
+
+/// A patch cut at its `diff --git ` headers, in order. Pure. Every section
+/// applies on its own, since none depends on another; together they are the
+/// patch from its first header on. Bytes before the first header — git
+/// prints none — belong to no section.
+pub fn sections(patch: &[u8]) -> Vec<Section<'_>> {
+    let mut starts = Vec::new();
+    let mut at = 0;
+    while at < patch.len() {
+        if patch[at..].starts_with(b"diff --git ") {
+            starts.push(at);
+        }
+        at = match patch[at..].iter().position(|&byte| byte == b'\n') {
+            Some(newline) => at + newline + 1,
+            None => patch.len(),
+        };
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = starts.get(n + 1).copied().unwrap_or(patch.len());
+            let bytes = &patch[start..end];
+            let header = bytes.split(|&byte| byte == b'\n').next().unwrap_or(bytes);
+            Section {
+                path: header_path(&header[b"diff --git ".len()..]),
+                bytes,
+            }
+        })
+        .collect()
+}
+
 /// What `summarize` carries from line to line: the summary so far, and the
 /// file and block it is in.
 #[derive(Default)]
@@ -777,6 +817,39 @@ mod tests {
         assert!(binary.hunks.is_empty(), "{binary:?}");
         assert_eq!(summary.files[5].hunks, vec![(block_hash(b"+y\n"), 1)]);
         assert_eq!(summary.added, 5);
+    }
+
+    #[test]
+    fn sections_cover_the_patch_and_name_each_file() {
+        let body = concat!(
+            "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-diff --git x\n+y\n",
+            "diff --git a/with space/a b.txt b/with space/a b.txt\n@@ -0,0 +1 @@\n+x\n",
+            "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n@@ -0,0 +1 @@\n+x\n",
+            "diff --git a/logo.png b/logo.png\nnew file mode 100644\nindex 0000000..1111111\nGIT binary patch\nliteral 3\n@@KcmZ>\n\nliteral 0\n",
+            "diff --git a/b b/b\n@@ -0,0 +1 @@\n+y",
+        );
+        let joined = |parts: &[Section]| {
+            parts
+                .iter()
+                .map(|part| part.bytes)
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        let parts = sections(body.as_bytes());
+        assert_eq!(parts.len(), 5);
+        assert_eq!(joined(&parts), body.as_bytes());
+        let summary = summarize(body.as_bytes());
+        let paths: Vec<&str> = parts.iter().map(|part| part.path.as_str()).collect();
+        let summed: Vec<&str> = summary.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, summed);
+        assert!(parts[3].bytes.starts_with(b"diff --git a/logo.png"));
+
+        // What comes before the first header is in no section.
+        let mut stray = b"a line git never prints\n".to_vec();
+        stray.extend_from_slice(body.as_bytes());
+        assert_eq!(joined(&sections(&stray)), body.as_bytes());
+        assert!(sections(b"").is_empty());
+        assert!(sections(b"no header at all\n").is_empty());
     }
 
     #[test]

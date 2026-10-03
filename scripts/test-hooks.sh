@@ -56,6 +56,9 @@ fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard /bin/sh -c
 # A new file, a changed file, a removed file, a new agent definition: all trip it.
 fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "mkdir -p '$fake_home/.local/state/cahoots' && echo x >'$fake_home/.local/state/cahoots/install-manifest.json'"
+# The eval suite is a person's too: a task appearing in it trips it.
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "mkdir -p '$fake_home/.local/share/cahoots/evals/tasks/x' && echo '{}' >'$fake_home/.local/share/cahoots/evals/tasks/x/task.json'"
 fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "echo edited >>'$fake_home/.claude/skills/cahoots/SKILL.md'"
 fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \

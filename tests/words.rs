@@ -589,3 +589,145 @@ candidates = [{ harness = "codex", model = "custom", effort = "high" }, { harnes
             .contains("Kind ·")
     );
 }
+
+/// A tracked change to the solution, a tracked change to a test, and a new,
+/// untracked test.
+const EVALS_BRIEF: &str = "FAKE: append=src/lib.rs::pub fn b() {}\\n\n\
+                           FAKE: append=tests/old_test.rs::#[test] fn more() {}\\n\n\
+                           FAKE: append=tests/new_test.rs::#[test] fn new() {}\\n\n";
+
+/// A person's screen with the rail's wrapped lines run together, so a
+/// sentence reads whole whatever its length.
+fn flowed(text: &str) -> String {
+    text.replace("\n│  ", " ").replace("\n   ", " ")
+}
+
+/// `cahoots evals <args>` as a person runs it, with git on PATH.
+fn evals(world: &World, args: &[&str]) -> Finished {
+    let mut argv = vec!["evals"];
+    argv.extend(args);
+    world
+        .as_a_person_with(&argv, &[("PATH", &world.path_with_git())])
+        .finish()
+}
+
+#[test]
+fn evals_add_says_what_the_task_holds() {
+    let world = World::new();
+    world.evals_fixture();
+    let run = world.accepted_writer(EVALS_BRIEF, &[]);
+    let id = run.run_id();
+    let sha = run.data()["base_commit"].as_str().unwrap().to_string();
+    let after = evals(&world, &["add", &id]);
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    let target = &run.data()["target"];
+    let by = format!(
+        "From a run by {} · {} · {}, accepted",
+        target["harness"].as_str().unwrap(),
+        target["model"].as_str().unwrap(),
+        target["effort"].as_str().unwrap()
+    );
+    assert!(text.starts_with("┌  cahoots evals add\n│\n"), "{text}");
+    for said in [
+        format!("◇  Task {id}: a task of no kind at {} {by}", &sha[..12]),
+        format!("Repository: {}", world.work.display()),
+        "Hidden tests (2): tests/old_test.rs, tests/new_test.rs The rest of the change (1): src/lib.rs"
+            .to_string(),
+        format!(
+            "└  Added to the suite, in {}/evals/tasks/{id}. It stays on this machine.",
+            world.data.display()
+        ),
+    ] {
+        assert!(flowed(&text).contains(&said), "{said:?} in:\n{text}");
+    }
+    assert!(!text.contains("▲"), "{text}");
+    no_json(&after);
+}
+
+#[test]
+fn evals_add_warns_when_there_are_no_hidden_tests() {
+    let world = World::new();
+    world.evals_fixture();
+    let id = world
+        .accepted_writer("FAKE: append=src/lib.rs::pub fn b() {}\\n\n", &[])
+        .run_id();
+    let after = evals(&world, &["add", &id]);
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = flowed(&after.text());
+    assert!(text.contains("Hidden tests: none"), "{text}");
+    assert!(
+        text.contains(
+            "▲  Its patch touches no test file, so the task has no hidden tests A test file is \
+             one under a tests/, test/, spec/ or __tests__/ directory, or named like \
+             foo_test.go, test_foo.py or foo.test.ts."
+        ),
+        "{text}"
+    );
+    no_json(&after);
+}
+
+#[test]
+fn evals_list_flags_a_rotted_task() {
+    let world = World::new();
+    world.evals_fixture();
+    world.git(&["switch", "-q", "-c", "scratch"]);
+    fs::write(world.work.join("f.txt"), "scratch\n").unwrap();
+    world.git(&["add", "f.txt"]);
+    world.git(&["commit", "-q", "-m", "chore: scratch"]);
+    let run = world.accepted_writer(EVALS_BRIEF, &[]);
+    let id = run.run_id();
+    assert_eq!(evals(&world, &["add", &id]).code, 0);
+    world.lose_the_scratch_commit(&[&run]);
+    let after = evals(&world, &["list"]);
+    assert_eq!(after.code, 0, "{}", after.text());
+    let text = after.text();
+    assert!(text.starts_with("┌  cahoots evals list\n│\n"), "{text}");
+    assert!(text.ends_with("│\n└  1 task, 1 rotted\n"), "{text}");
+    let said = format!(
+        "▲  {id} · no kind · {} {} 2 hidden tests Its base commit is gone from the repository, \
+         so it cannot be replayed. `cahoots evals remove {id}` takes it out.",
+        &run.data()["base_commit"].as_str().unwrap()[..12],
+        world.work.display()
+    );
+    assert!(flowed(&text).contains(&said), "{said:?} in:\n{text}");
+    no_json(&after);
+}
+
+#[test]
+fn evals_list_with_no_tasks_says_how_to_add_one() {
+    let world = World::new();
+    let after = evals(&world, &["list"]);
+    assert_eq!(after.code, 0, "{}", after.text());
+    assert_eq!(
+        flowed(&after.text()),
+        "┌  cahoots evals list\n│\n└  No tasks yet: `cahoots evals add <run>` makes one from a \
+         writer's run you accepted.\n"
+    );
+}
+
+#[test]
+fn evals_remove_says_so() {
+    let world = World::new();
+    world.evals_fixture();
+    let id = world.accepted_writer(EVALS_BRIEF, &[]).run_id();
+    assert_eq!(evals(&world, &["add", &id]).code, 0);
+    let after = evals(&world, &["remove", &id]);
+    assert_eq!(after.code, 0, "{}", after.text());
+    assert_eq!(
+        after.text(),
+        format!("┌  cahoots evals remove\n│\n└  Task {id} removed from the suite.\n")
+    );
+}
+
+#[test]
+fn an_evals_refusal_closes_the_rail_in_red() {
+    let world = World::new();
+    let id = "0198c0de-0000-7000-8000-000000000000";
+    let after = evals(&world, &["add", id]);
+    assert_eq!(after.code, 50, "{}", after.text());
+    assert_eq!(
+        after.text(),
+        format!("┌  cahoots evals add\n│\n└  no run {id}\n")
+    );
+}

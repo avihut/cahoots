@@ -51,11 +51,12 @@ dir = "{{cwd}}"
 # mise appends the task's arguments to this.
 run = "exec '{{config_root}}/target/debug/cahoots'"
 
-# A dev build runs only once all three are set (`Dirs::resolve`). They are this
+# A dev build runs only once all four are set (`Dirs::resolve`). They are this
 # worktree's own, because branches can disagree about cahoots' files.
 [tasks.cahoots.env]
 CAHOOTS_CONFIG_DIR = "{{config_root}}/.cache/sandbox/config"
 CAHOOTS_STATE_DIR = "{{config_root}}/.cache/sandbox/state"
+CAHOOTS_DATA_DIR = "{{config_root}}/.cache/sandbox/data"
 CAHOOTS_HOME_DIR = "{{config_root}}/.cache/sandbox/home"
 
 [tasks.test]

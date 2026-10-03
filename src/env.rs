@@ -17,13 +17,16 @@ fn var(name: &str) -> Option<String> {
 pub enum DirKind {
     Config,
     State,
+    /// What a person keeps: the eval suite.
+    Data,
     /// The user's home as `install` and `doctor` see it — where the agent
     /// homes live. (A callee's `HOME` is never overridden: it is always the
     /// passwd home, or the harness would not find its login.)
     Home,
 }
 
-/// `CAHOOTS_CONFIG_DIR` / `CAHOOTS_STATE_DIR` — honoured ONLY by a dev build
+/// `CAHOOTS_CONFIG_DIR` / `CAHOOTS_STATE_DIR` / `CAHOOTS_DATA_DIR` /
+/// `CAHOOTS_HOME_DIR` — honoured ONLY by a dev build
 /// (`build.rs`). In a build anyone installs this is a constant `None`: the
 /// variables are not even read.
 pub fn dev_dir_override(kind: DirKind) -> Option<PathBuf> {
@@ -33,6 +36,7 @@ pub fn dev_dir_override(kind: DirKind) -> Option<PathBuf> {
     let name = match kind {
         DirKind::Config => "CAHOOTS_CONFIG_DIR",
         DirKind::State => "CAHOOTS_STATE_DIR",
+        DirKind::Data => "CAHOOTS_DATA_DIR",
         DirKind::Home => "CAHOOTS_HOME_DIR",
     };
     var(name).map(PathBuf::from)

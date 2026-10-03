@@ -785,7 +785,7 @@ fn works_in(worktree: &Path, in_use: &[PathBuf]) -> bool {
 /// The asking process's workspace, for the verbs that look a run up: they
 /// start `git` and `ps` too. A `git` planted in it is refused, as it is for
 /// `run`; a working directory that cannot be read adds nothing.
-fn invoker_roots() -> Res<Vec<PathBuf>> {
+pub(crate) fn invoker_roots() -> Res<Vec<PathBuf>> {
     let Ok(cwd) = std::env::current_dir() else {
         return Ok(Vec::new());
     };
@@ -796,10 +796,10 @@ fn invoker_roots() -> Res<Vec<PathBuf>> {
     }
 }
 
-fn owned(roots: &[&Path]) -> Vec<PathBuf> {
+pub(crate) fn owned(roots: &[&Path]) -> Vec<PathBuf> {
     roots.iter().map(|root| root.to_path_buf()).collect()
 }
 
-fn borrowed(roots: &[PathBuf]) -> Vec<&Path> {
+pub(crate) fn borrowed(roots: &[PathBuf]) -> Vec<&Path> {
     roots.iter().map(PathBuf::as_path).collect()
 }

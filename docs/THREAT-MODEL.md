@@ -33,7 +33,7 @@ directory permissions are already broken.
 
 **Two tiers of verbs.** Agent verbs — `pick run resume wait status result
 cancel outcome notes review` — are the only ones the printed rules name. Human verbs
-(`install`, `uninstall`, `settings`, `enable`, `learn`, `registry`) change what
+(`install`, `uninstall`, `settings`, `enable`, `learn`, `registry`, `evals`) change what
 cahoots may do, and refuse to run without a terminal on stdin. A test pins the agent tier
 by name: growing it is a change to this document. `outcome` starts `git` too:
 for a fork writer, it measures how much of its diff survived (Writers).
@@ -106,8 +106,8 @@ exist only in builds made with `CAHOOTS_DEV_BUILD=1`; the check is opt-in by
 an explicit build-time variable, never inferred from "this looks like a
 checkout", which a `cargo install --git` would satisfy. `cahoots --version`
 says which kind of build it is. The reverse holds too: a dev build refuses to
-touch the real directories — config, state, and the home `install` writes
-into — unless its developer sets `CAHOOTS_DEV_REAL_DIRS=1`, so a half-finished
+touch the real directories — config, state, data, and the home `install`
+writes into — unless its developer sets `CAHOOTS_DEV_REAL_DIRS=1`, so a half-finished
 build or a test run cannot damage a working setup.
 
 **The callee's environment** is cleared and rebuilt from an allowlist. Vendor
@@ -213,7 +213,9 @@ and `core.fsmonitor=false`, as configuration above every config file.
 commit every run starts from; for a writer, the `diff` and `ls-files`
 that keep its patch; and, for a fork writer that has a recorded patch,
 `rev-parse` and a `diff` between two commits, run when `outcome` is recorded
-and by `report`. They get the same empty hooks directory and
+and by `report`; and `evals`, a person's verb, reads the common git directory
+a writer's fork belongs to and whether a task's base commit is still in it
+(`rev-parse`). They get the same empty hooks directory and
 `core.fsmonitor=false`.) The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
@@ -404,6 +406,24 @@ hash and line count of each changed block — derived from content, never
 content — and, for a fork writer, the two git-directory paths of its pin and
 each measurement of how much of its diff survived (a commit hash and two
 counts). Like everything learned it stays on this machine.
+
+## The eval suite
+
+`evals add` turns a writer's run, one a caller accepted, into a task: its
+brief, the commit it started from, and its patch split into the test files (the
+hidden tests) and the rest. It is a person's verb, run from a terminal. An
+agent can mark a run accepted, but it cannot put that run into the suite. Tasks
+live under cahoots' data directory (`~/.local/share/cahoots/evals`), private to
+the user (0700, files 0600). Nothing ever sends them anywhere, and nothing ages
+them out. Making a task executes nothing. The patch is split by its `diff
+--git` headers and stored as bytes. The checks run `git rev-parse` only, under
+the same binary policy, empty hooks directory and `core.fsmonitor=false` as
+every other git. A task's commit is held to the shape of an object id when it
+is read back, so an edited task file cannot put text into a command line.
+Hidden tests are withheld, not hidden: anything that runs as the user can read
+the data directory, and a worktree cut at the base commit shares its
+repository's objects, which may already hold the accepted change. A replay
+(#39) must not be taken as blind to its tests.
 
 ## What cahoots never does
 

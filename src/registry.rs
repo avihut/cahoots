@@ -414,6 +414,7 @@ mod tests {
             home: tmp.path().to_path_buf(),
             config: tmp.path().join("config"),
             state: tmp.path().join("state"),
+            data: tmp.path().join("data"),
             overridden: true,
         };
         let enabled = |on| set_enabled(&dirs, HarnessId::Codex, on).unwrap();

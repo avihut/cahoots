@@ -648,6 +648,7 @@ mod tests {
             home: root.join("home"),
             config: root.join("config"),
             state: root.join("state"),
+            data: root.join("data"),
             overridden: true,
         };
         let (top, common) = (root.join("work"), root.join("work/.git"));
