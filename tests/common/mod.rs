@@ -704,9 +704,14 @@ impl World {
     /// Waits until `run` is running: the supervisor has taken it up. A
     /// launched run may be a long way from there on a loaded machine.
     pub fn wait_running(&self, run: &str) {
-        wait_until(&format!("run {run} is running"), || {
-            self.record(run)["state"] == "running"
-        });
+        let last = std::cell::RefCell::new(Value::Null);
+        wait_until_described(
+            || format!("run {run} is running (last seen state: {})", last.borrow()),
+            || {
+                *last.borrow_mut() = self.record(run)["state"].clone();
+                *last.borrow() == "running"
+            },
+        );
     }
 
     /// `cancel`, which answers 51 when its own patience runs out before the
@@ -717,7 +722,7 @@ impl World {
     /// untouched.
     pub fn cancel_settled(&self, run: &str) -> Answer {
         let first = self.ask(&["cancel", run]);
-        if first.code != 51 {
+        if !cancel_is_pending(&first) {
             return first;
         }
         wait_until(&format!("run {run} ends after its cancel"), || {
@@ -756,18 +761,42 @@ pub fn alive(pid: i64) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// Whether a `cancel` answer is the legitimate "not over yet": 51 with a run
+/// that is `starting` or `running`. Any other 51 is a wrong answer, not a
+/// slow machine, and fails the test here; every other code is the caller's
+/// to judge.
+pub fn cancel_is_pending(answer: &Answer) -> bool {
+    if answer.code != 51 {
+        return false;
+    }
+    let state = &answer.data()["state"];
+    assert!(
+        state == "starting" || state == "running",
+        "cancel answered 51 for a run that is {state}, not unfinished: {}",
+        answer.json
+    );
+    true
+}
+
 /// How long a test waits on a state before it gives up. Generous: a machine
 /// under heavy load runs the same code, only far later, and the deadline is
 /// reached only when the wait fails.
 pub const WAIT_SECS: u64 = 120;
 
-pub fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+pub fn wait_until(what: &str, check: impl FnMut() -> bool) {
+    wait_until_described(|| what.to_string(), check);
+}
+
+/// `wait_until`, with `what` worked out when the wait gives up, so it can say
+/// what the last look found.
+pub fn wait_until_described(what: impl Fn() -> String, mut check: impl FnMut() -> bool) {
     let started = std::time::Instant::now();
     while !check() {
         assert!(
             started.elapsed().as_secs() < WAIT_SECS,
-            "timing wait gave up after {WAIT_SECS}s, still waiting until {what} \
-             (a deadline passed, not a wrong answer)"
+            "timing wait gave up after {WAIT_SECS}s, still waiting until {} \
+             (a deadline passed, not a wrong answer)",
+            what()
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

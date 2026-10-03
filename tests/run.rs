@@ -493,8 +493,9 @@ fn unknown_and_malformed_run_ids() {
     assert_eq!(world.ask(&["cancel", "nope"]).code, 50);
 }
 
-/// Once the callee is spawned, an error inside the supervisor still cleans up
-/// the run's process group before the run is published terminal — so a child
+/// Once the callee is spawned, an error inside the supervisor (here, writing
+/// the final result) still cleans up the run's process group before the run
+/// is published terminal — so a child
 /// the callee left behind cannot go on writing the tree after a failed run.
 #[test]
 fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
@@ -536,9 +537,13 @@ fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
         ),
     )
     .unwrap();
-    fs::create_dir(run_dir.join("events.jsonl")).unwrap();
+    // The log exists before a supervisor starts, as the client makes it.
+    fs::write(run_dir.join("supervisor.log"), "").unwrap();
+    fs::create_dir(run_dir.join("final.md")).unwrap();
 
-    // Drive the supervisor directly: it fails post-spawn.
+    // Drive the supervisor directly. Its result file is a directory, so it
+    // fails writing the final result — after the callee has run to the end
+    // and everything it said, its child's pid included, has been read.
     let done = world.cahoots().args(["__supervise", id]).output().unwrap();
     assert!(!done.status.success(), "the supervisor did not fail");
 
@@ -547,9 +552,12 @@ fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
         serde_json::from_str(&fs::read_to_string(run_dir.join("run.json")).unwrap()).unwrap();
     assert_eq!(after["state"], "failed", "{after}");
 
-    // The failed run is over and its group cleaned up; only now is a leftover
-    // child let go to write. Had its group outlived the run, it would have
-    // written the tree by now.
+    // The callee did leave a child in its group, and the failed run's cleanup
+    // killed it: it is dead before it is let go.
+    let child = world.leaked_child(id);
+    common::wait_until("the leaked child is gone", || !common::alive(child));
+    // Only now is it let go to write. Had its group outlived the run, it
+    // would have written the tree by now.
     world.open_leak_gate();
     std::thread::sleep(std::time::Duration::from_secs(3));
     assert!(
