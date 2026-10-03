@@ -560,3 +560,82 @@ fn in_place_changes_are_not_read_once_the_git_configuration_changed() {
     git_in(&world.work, &["status", "--short"]);
     assert!(marker.exists(), "the control never ran the filter");
 }
+
+#[test]
+fn changes_does_not_descend_into_a_submodule() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+
+    // A submodule, from a source repository of its own (no network). git
+    // status in the superproject runs a child git status inside a populated
+    // submodule — which reads the submodule's own gitdir and config, where a
+    // writer could name a filter or an fsmonitor command, outside the pin and
+    // the in-place config snapshot both. `--ignore-submodules=all` keeps
+    // `changes` from descending there at all; its visible mark is that a
+    // dirtied submodule is not reported.
+    let src = world.root.join("subsrc");
+    fs::create_dir_all(&src).unwrap();
+    git_in(&src, &["init", "-q"]);
+    git_in(
+        &src,
+        &[
+            "-c",
+            "user.name=Sub",
+            "-c",
+            "user.email=sub@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: a submodule",
+        ],
+    );
+    git_in(
+        &world.work,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            "../subsrc",
+            "sub",
+        ],
+    );
+    world.git(&["commit", "-q", "-m", "chore: add a submodule"]);
+    // The submodule's working tree now differs from what it records.
+    fs::write(world.work.join("sub/extra.txt"), "changed\n").unwrap();
+
+    let answer = implement(&world, "FAKE: write=edit.txt", &["--in-place"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    let changes = answer.data()["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no changes: {}", answer.json));
+    assert!(
+        changes
+            .iter()
+            .any(|line| line.as_str().unwrap().ends_with("edit.txt")),
+        "{changes:?}"
+    );
+    assert!(
+        !changes
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("sub")),
+        "changes descended into the submodule: {changes:?}"
+    );
+    // The control: a plain git status there does report the submodule.
+    let out = std::process::Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("sub"),
+        "the control did not report the submodule"
+    );
+}

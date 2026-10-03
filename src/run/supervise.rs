@@ -143,7 +143,23 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     // (`placement::changes_in_place`). A reading that fails records nothing,
     // and then status does not run at all.
     if record.placement == Placement::InPlace {
-        match placement::config_listing(dirs, &record.cwd, &record.tool_roots()) {
+        let recorded = match &record.resumed_from {
+            // A resume is held to the configuration the ORIGINAL run was
+            // recorded against, never a fresh reading of its own: a first
+            // writer that named a filter in the config would otherwise have
+            // set the baseline its resume is compared to, and the resume
+            // would run that filter. The snapshot is copied forward from the
+            // run this one continues — itself a copy, back to the first run's
+            // reading, taken before any writer had touched the tree.
+            Some(original) => RunDir::open(dirs, original)
+                .ok()
+                .and_then(|from| std::fs::read(from.git_config_path()).ok())
+                .ok_or_else(|| {
+                    format!("the git configuration recorded for run {original} is gone")
+                }),
+            None => placement::config_listing(dirs, &record.cwd, &record.tool_roots()),
+        };
+        match recorded {
             Ok(listing) => write_private(&dir.git_config_path(), &listing)?,
             Err(why) => {
                 let _ = writeln!(

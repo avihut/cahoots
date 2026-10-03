@@ -462,7 +462,22 @@ fn status(
         work_tree.push(tree);
         args.extend([git_dir, work_tree]);
     }
-    args.extend(["status", "--short", "--untracked-files=all"].map(OsString::from));
+    // `--ignore-submodules=all`: a `git status` recurses into each populated
+    // submodule with a child `git status` there, which reads the submodule's
+    // own gitdir and config — outside this run's pin and the in-place config
+    // snapshot both. A writer can drop a `.git` file in a submodule directory
+    // naming a gitdir of its own, with a filter; the flag overrides every
+    // `submodule.*.ignore` and never recurses, so no such child runs. The
+    // cost is that a modified submodule no longer shows in `changes`.
+    args.extend(
+        [
+            "status",
+            "--short",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ]
+        .map(OsString::from),
+    );
     let git = spawn::system_tool("git", roots).map_err(|fail| fail.message)?;
     let output = spawn::run_helper_with_env(
         &git,

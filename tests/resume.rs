@@ -481,7 +481,73 @@ fn a_resume_from_another_worktree_keeps_both_workspaces_out_of_its_tools() {
 }
 
 #[test]
-fn a_resumed_in_place_run_is_held_to_the_configuration_it_started_with() {
+fn a_resumed_in_place_run_is_held_to_the_original_runs_configuration() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    fs::write(world.work.join("tracked.txt"), "written by the callee\n").unwrap();
+    world.git(&["add", "tracked.txt"]);
+    world.git(&["commit", "-q", "-m", "chore: a tracked file"]);
+    let marker = world.root.join("filter-ran");
+    let filter = world.root.join("filter");
+    world.script_at(
+        &filter,
+        &format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+    );
+
+    // The first in-place writer names a filter in the tree's own config and
+    // sets a tracked file to go through it. Its own result is refused — the
+    // configuration changed while it ran.
+    let brief = world.brief(&format!(
+        "FAKE: append=.git/config::[filter \"evil\"]\\n\\tclean = {}\\n\n\
+         FAKE: append=.gitattributes::* filter=evil\\n",
+        filter.display()
+    ));
+    let first = world.ask(&[
+        "run",
+        "--role",
+        "implement",
+        "--in-place",
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(first.code, 0, "{}", first.json);
+    assert!(first.data()["changes"].is_null(), "{}", first.json);
+
+    // The resume leaves the config poisoned. It is compared against the
+    // ORIGINAL run's snapshot — taken before any writer touched the tree —
+    // not a fresh one of the poisoned config, so it still differs: status is
+    // refused, and the first writer's filter never runs.
+    let brief = world.brief("FAKE: write=tracked.txt");
+    let again = world.ask(&[
+        "resume",
+        &first.run_id(),
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(again.code, 0, "the run keeps its own code: {}", again.json);
+    assert!(again.data()["changes"].is_null(), "{}", again.json);
+    assert!(
+        again.data()["changes_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("changed during the run"),
+        "{}",
+        again.json
+    );
+    assert!(!marker.exists(), "the resume ran the first writer's filter");
+    // The control: git status there, as anyone runs it, does run it.
+    git_in(&world.work, &["status", "--short"]);
+    assert!(marker.exists(), "the control never ran the filter");
+}
+
+/// An in-place resume whose configuration never changed still reads its
+/// changes: the original run's snapshot matches, so status runs.
+#[test]
+fn a_clean_in_place_resume_still_reads_its_changes() {
     let world = World::new();
     world.configure("limits.allow_in_place = true");
     let brief = world.brief("FAKE: write=first.txt");
@@ -496,9 +562,6 @@ fn a_resumed_in_place_run_is_held_to_the_configuration_it_started_with() {
         path_str(&brief),
     ]);
     assert_eq!(first.code, 0, "{}", first.json);
-    // Between the runs the configuration changes, a person's doing; during
-    // the resumed run it does not.
-    world.git(&["config", "cahoots.test", "between-the-runs"]);
     let brief = world.brief("FAKE: write=second.txt");
     let again = world.ask(&[
         "resume",
@@ -509,13 +572,13 @@ fn a_resumed_in_place_run_is_held_to_the_configuration_it_started_with() {
         path_str(&brief),
     ]);
     assert_eq!(again.code, 0, "{}", again.json);
-    let changes = again.data()["changes"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no changes: {}", again.json));
     assert!(
-        changes
+        again.data()["changes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no changes: {}", again.json))
             .iter()
             .any(|line| line.as_str().unwrap().ends_with("second.txt")),
-        "{changes:?}"
+        "{}",
+        again.json
     );
 }
