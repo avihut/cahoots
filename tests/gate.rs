@@ -53,6 +53,14 @@ fn what_the_gate_does_not_understand_is_a_refusal() {
         let world = world(json!({"guarded": {"code": code}}));
         assert_eq!(world.run("hello", &[]).code, 13);
     }
+    // An answer past the output cap, or one whose stdout outlives it.
+    for plan in [
+        json!({"guarded": {"code": 0, "percent": 35, "pad": 1 << 20}}),
+        json!({"guarded": {"code": 0, "percent": 35, "hold": true}}),
+    ] {
+        let answer = world(plan.clone()).run("hello", &[]);
+        assert_eq!(answer.code, 13, "{plan} {}", answer.json);
+    }
     // A meter that is configured but not there.
     let world = World::new();
     world.configure(
@@ -84,17 +92,113 @@ fn stale_codex_data_is_re_asked_against_a_lower_cap() {
     assert_eq!(world.run("hello", &["--to", "codex"]).code, 24);
 }
 
-#[test]
-fn stale_claude_data_means_the_tracker_is_down() {
-    let world = world(json!({"guarded": {"code": 21}, "unguarded": {"code": 0, "percent": 1}}));
+/// A stale Claude reading, with what the tracker's `status` says beside it.
+fn stale_claude(status: serde_json::Value) -> World {
+    world(json!({
+        "guarded": {"code": 21, "data_age": 2460},
+        "unguarded": {"code": 0, "percent": 1},
+        "status": status,
+    }))
+}
+
+/// The refusal never says the tracker is down unless the tracker did: it
+/// says how old the data is and what a person can look at.
+fn refused_as_stale(world: &World) -> String {
     let answer = world.run("hello", &["--caller", "codex", "--to", "claude"]);
     assert_eq!(answer.code, 21, "{}", answer.json);
-    assert_eq!(
-        world.meter_calls().len(),
-        1,
-        "a polled provider is never re-asked"
+    let calls = world.meter_calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0].contains("--cap 47"));
+    assert!(calls[1].starts_with("status --provider claude"));
+    let message = answer.json["message"].as_str().unwrap().to_string();
+    assert!(
+        message.contains("41m old, past the 15m allowed") && message.contains("`usage-cli status`"),
+        "{message}"
     );
-    assert!(world.meter_calls()[0].contains("--cap 47"));
+    assert!(!message.contains("daemon"), "{message}");
+    message
+}
+
+#[test]
+fn a_quiet_claude_the_tracker_still_polls_is_held_to_a_lower_cap() {
+    // A quiet Claude is polled as seldom as hourly. Published ten minutes
+    // ago with the next poll half an hour away, the tracker is polling: the
+    // stale reading is a lower bound, and the run itself makes it poll.
+    let world = stale_claude(
+        json!({"code": 0, "provider": "claude", "generated": -600, "next_poll": 1800}),
+    );
+    let answer = world.run("hello", &["--caller", "codex", "--to", "claude"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    let note = answer.data()["gate_notes"][0].as_str().unwrap();
+    assert!(
+        note.contains("still polling") && note.contains("32%"),
+        "{note}"
+    );
+    let calls = world.meter_calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(calls[1].starts_with("status --provider claude"));
+    assert!(calls[2].contains("--cap 32") && !calls[2].contains("--max-data-age"));
+}
+
+#[test]
+fn a_tracker_that_stopped_polling_refuses_stale_claude_data() {
+    // Published two hours ago, meaning to poll half an hour later.
+    let world = stale_claude(
+        json!({"code": 0, "provider": "claude", "generated": -7200, "next_poll": -5400}),
+    );
+    let message = refused_as_stale(&world);
+    assert!(
+        message.contains("last published 2h 0m ago, its next poll due 1h 30m ago"),
+        "{message}"
+    );
+}
+
+/// What the gate reads of a meter: no more than a mebibyte, and nothing at
+/// all once its stdout outlives it or runs past that.
+const OUTPUT_CAP: u64 = 1 << 20;
+
+#[test]
+fn a_heartbeat_within_the_output_cap_is_read() {
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "pad": OUTPUT_CAP - 200,
+    }));
+    let answer = world.run("hello", &["--caller", "codex", "--to", "claude"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+}
+
+#[test]
+fn a_heartbeat_past_the_output_cap_or_held_open_is_no_answer() {
+    // Padding JSON reads past: only the cap itself refuses it.
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "pad": OUTPUT_CAP,
+    }));
+    let message = refused_as_stale(&world);
+    assert!(message.contains("printed more than 1024 KiB"), "{message}");
+    // The status process exits at once; what it left behind keeps stdout
+    // open, and the meter's deadline still holds.
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "hold": true,
+    }));
+    let message = refused_as_stale(&world);
+    assert!(message.contains("its stdout stayed open"), "{message}");
+}
+
+#[test]
+fn stale_claude_data_with_no_word_from_the_tracker_is_refused() {
+    for status in [
+        json!(null),
+        json!({"code": 0, "provider": "codex", "generated": -600, "next_poll": 1800}),
+        json!({"code": 0, "provider": "claude", "generated": -600}),
+    ] {
+        let message = refused_as_stale(&stale_claude(status.clone()));
+        assert!(
+            message.contains("could not say whether it is still polling"),
+            "{status} {message}"
+        );
+    }
 }
 
 #[test]

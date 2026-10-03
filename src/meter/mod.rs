@@ -41,8 +41,13 @@ use crate::exit::{Exit, Fail, Res};
 use crate::model::HarnessId;
 use crate::spawn;
 
-/// How long a meter may take to answer.
+/// How long a meter may take to answer — its stdout closed, not only the
+/// process gone.
 const DEADLINE: Duration = Duration::from_secs(10);
+
+/// How much a meter may print. Every answer it gives is one small object or
+/// a line; more than this is not an answer.
+const OUTPUT_CAP: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -265,6 +270,18 @@ impl UsageMeter {
         }
     }
 
+    /// Whether whatever refreshes `harness`'s readings is still at it, asked
+    /// after a stale answer for a harness that does not refresh on use. Only
+    /// Agent Usage polls; `Err` says why it is not a yes, for the refusal.
+    pub fn still_polling(&self, harness: HarnessId, now: u64) -> Result<(), String> {
+        match self {
+            UsageMeter::AgentUsage(meter) => {
+                meter.still_polling(&self.resolve().map_err(|fail| fail.message)?, harness, now)
+            }
+            UsageMeter::Ccusage(_) => Err("ccusage polls nothing".to_string()),
+        }
+    }
+
     /// Asks. A meter that cannot be run, or that answers in a way cahoots
     /// does not understand, is a `NoDigest` answer — never a yes.
     pub fn ask(&self, ask: &Ask) -> Answer {
@@ -336,16 +353,29 @@ impl Exe {
 
 /// Runs a meter: from `/`, so that no file in the caller's working directory
 /// can configure it (a repository cannot tune the gate about to judge it),
-/// with a PATH of its own, and HOME from the passwd database.
+/// with a PATH of its own, and HOME from the passwd database. Its stdout is
+/// held to `OUTPUT_CAP`, and its deadline holds until that stdout closes —
+/// something it started cannot keep the gate waiting. Past either, there is
+/// no answer, and nothing it printed is read.
 fn run(exe: &Exe, args: &[String]) -> Result<spawn::Output, String> {
-    spawn::run_helper_with_path(
+    let (output, overflowed) = spawn::run_helper_capped(
         &exe.resolved,
         args,
         Some(Path::new("/")),
         DEADLINE,
         exe.path(),
+        &[],
+        OUTPUT_CAP,
     )
-    .map_err(|fail| fail.message)
+    .map_err(|fail| fail.message)?;
+    if overflowed {
+        return Err(format!(
+            "{} printed more than {} KiB",
+            exe.resolved.display(),
+            OUTPUT_CAP / 1024
+        ));
+    }
+    Ok(output)
 }
 
 /// What `meter.json` holds: where `install` found each usage meter it can

@@ -177,8 +177,18 @@ from `/`, where no repository can leave it a config file. ccusage always gets
 `--offline`, its own switch against fetching a price list; run with the
 network and every write under the home directory denied, it gave the same
 answer, and the kernel's sandbox log — which does record a denied attempt —
-showed none. A meter that fails, times out or answers in a shape cahoots does
-not know refuses the run.
+showed none. Its stdout is held to 1 MiB, and its 10-second deadline holds
+until that stdout closes, so nothing it leaves behind can keep the gate
+waiting; past either, nothing it printed is read. A meter that fails, times
+out or answers in a shape cahoots does not know refuses the run. A stale
+reading is let in only held to `cap − 15`, and only when something will
+refresh it. For Codex that is the run itself. For Claude it is the tracker,
+and only while its own `status` stamps say it is still polling — its
+heartbeat, judged by the tracker's rule for an engine that stopped. The run
+can prompt a sooner poll, but only as the tracker's pace and any backoff
+allow, so the admission rests on that heartbeat and the fixed lower cap, not
+on the run. A heartbeat for another harness, or one cahoots cannot read,
+refuses.
 
 **Targets are off until enabled.** A run sends repository content to another
 vendor. That is a decision for a human, per harness, once: `cahoots enable`,

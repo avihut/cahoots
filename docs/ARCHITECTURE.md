@@ -150,9 +150,25 @@ admitting the run that crosses the line.
   refresh when Codex runs locally, so a strict freshness guard would refuse it
   forever. For such snapshot-on-use readings, a stale one is re-asked without
   the age guard against `cap − 15`: a stale reading is a lower bound, and the
-  run itself refreshes it. For polled ones, stale means the tracker's daemon
-  is down: refuse. ccusage reads the logs themselves, so nothing it says is
-  stale.
+  run itself refreshes it. Claude's numbers are polled, and the tracker
+  polls a quiet Claude slowly — every 40 minutes at its default pace after
+  four quiet hours, up to hourly, longer under a 429 backoff — so a stale
+  reading alone does not say the tracker stopped (#73). On one, the gate
+  asks `usage-cli status` when the tracker last published and when it polls
+  next, and applies the tracker's own rule for an engine that stopped
+  (`EngineHostBroker.heartbeatStale`): silent longer than twice the gap to
+  its next poll, and longer than 3 minutes. Still polling, the reading is
+  re-asked against `cap − 15` as Codex's is. A Claude run writes a
+  transcript, which can prompt the tracker to poll sooner — but only as its
+  pace and any backoff allow, so what admits the run is the heartbeat and
+  the fixed lower cap, not the run refreshing the numbers. Stopped, or any answer that
+  can't say (another harness's, an unknown shape, a stamp ahead of the
+  clock), refuses, and the refusal says how old the data is, what the
+  tracker's stamps say, and that `usage-cli status` shows both — never that
+  a daemon is down. The cost: a tracker that dies just after publishing is
+  noticed only after twice its poll horizon, and until then Claude is held
+  to `cap − 15` on numbers that no longer move — the exposure Codex always
+  has. ccusage reads the logs themselves, so nothing it says is stale.
 - **Slots.** Per-target `max_concurrent` (default 1) as lock files, fail-fast:
   `pick` skips a busy target, an explicit `--to` returns *busy*. A global
   `max_active_runs`. `CAHOOTS_DEPTH` is exported on every spawn, but an agent
