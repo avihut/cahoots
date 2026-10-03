@@ -4,7 +4,8 @@
 //!
 //! So the verbs come in tiers. Agent verbs are the only ones the printed
 //! allow-rules name. Human verbs change what cahoots may do, and refuse to run
-//! without a terminal on stdin. Inspect verbs read and report.
+//! without a terminal on stdin. Inspect verbs read and report; `report` also
+//! files in the history the survival it measured.
 //!
 //! This is the command layer, the one place the logic and the interface meet
 //! (hard rule 11). It calls the logic, puts the logic's questions to a person

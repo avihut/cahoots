@@ -335,8 +335,8 @@ every option that shapes the output on the command line. No worktree and no
 index is read, so no clean filter, no fsmonitor and no submodule's own `git`
 runs; no path from the history is ever put on a command line except the
 repository's own git directory, which is typed and re-checked (next).
-**The repository is the one the run started in, pinned.** When a run starts,
-before any writer exists, cahoots records the git directory of the caller's
+**The repository is the one the run started in, pinned.** When a fork
+writer's run starts, before any writer exists, cahoots records the git directory of the caller's
 tree and the repository's common directory: canonical, a git directory, owned
 by the person, and at git's layout (the tree's directory is the common one or
 `<common>/worktrees/<name>` with a `commondir` that names it) — the way a

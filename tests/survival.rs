@@ -702,7 +702,20 @@ fn the_pin_is_recorded_before_the_writer_runs() {
     assert_eq!(pin["common"], path_str(&common));
     // A reader has none.
     let reader = world.run("hello", &[]).run_id();
-    assert!(world.record(&reader)["base_repo"].is_null());
+    assert!(
+        world
+            .record(&reader)
+            .get("base_repo")
+            .is_none_or(Value::is_null)
+    );
+    common::wait_until("the reader's history event", || {
+        !lines_of(&world, "finished", &reader).is_empty()
+    });
+    assert!(
+        lines_of(&world, "finished", &reader)[0]
+            .get("base_repo")
+            .is_none()
+    );
 }
 
 /// The HEAD git keeps for linked worktree `name`, read from its git
