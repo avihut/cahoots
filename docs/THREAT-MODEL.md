@@ -45,6 +45,21 @@ does, and nothing is written that the config's own checks would refuse.
 `--in-place` works only if configuration allows it. Read-only roles are forced read-only by
 `validate_argv`, after every other decision.
 
+**Task kinds select a person's list.** `pick --kind <name>` and
+`run --kind <name>` select a task kind from the person's `config.toml`,
+never from the repository or a callee's output. Each kind names a role and
+an ordered list of typed candidates. Its role supplies the same reserve,
+placement checks and final command-line fence as an explicit `--role`.
+When both flags are given, their roles must agree; an unknown kind or a
+disagreement is refused before a run starts. `--to` can only narrow the
+kind's list, and exhausting that list never falls back to the role's list.
+The caller still cannot name a model or an effort, alter the list, enable
+a target, or change a cap, reserve, sandbox, flag or command. Descriptions
+do not enter a harness command or the delegated brief. A kind is recorded
+as a label, and resuming preserves the recorded kind, role and candidate
+under the existing resume checks; later edits to the kind cannot change
+that session's fence.
+
 **Resuming is not a side door.** `resume` continues a harness's own session,
 and is a new run in every other respect: gated, slotted, depth-checked,
 recorded. It carries the ROLE's fence again rather than trusting what the
@@ -212,6 +227,8 @@ may change is a struct with one field, `role → index`; there is nothing in it
 for a cap, a reserve, a sandbox mode, a model, a flag or a command, and an
 order a person wrote is left alone. The worst a poisoned history can do is
 make a role try its second choice first.
+Role calibration uses only runs without a task kind; a kind's candidate
+list is left in the order a person wrote.
 
 ## What cahoots never does
 

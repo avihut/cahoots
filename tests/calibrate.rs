@@ -121,3 +121,69 @@ fn what_is_learned_never_touches_a_cap_a_model_or_an_effort() {
         "{codex}"
     );
 }
+
+#[test]
+fn role_learning_leaves_kind_order_alone_and_ignores_kind_evidence() {
+    let world = World::new();
+    world.configure(r#"[review]
+enabled = true
+apply_routing = true
+[kinds.second-opinion]
+description = "A recurring opinion."
+role = "advise"
+candidates = [{ harness = "codex", model = "gpt-6-astra", effort = "high" }, { harness = "claude", model = "opus", effort = "high" }]
+"#);
+    world.history_where_the_second_choice_does_better(8);
+    assert_eq!(first_choice(&world), "claude");
+    let kind = world.ask(&["pick", "--kind", "second-opinion"]);
+    assert_eq!(kind.code, 0, "{}", kind.json);
+    assert_eq!(kind.data()["target"]["harness"], "codex");
+    let file = world.state.join("history.jsonl");
+    let old = std::fs::read_to_string(&file).unwrap();
+    let tagged = old
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["kind"] == "finished" {
+                event["task_kind"] = serde_json::json!("second-opinion");
+            }
+            event.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&file, tagged).unwrap();
+    assert_eq!(first_choice(&world), "codex");
+    let report = world.ask(&["report", "--suggest"]);
+    assert_eq!(report.data()["runs"], 16);
+    let role = &report.data()["routing"]["roles"]["advise"];
+    assert!(role["suggested_swap"].is_null());
+    for candidate in role["order"].as_array().unwrap() {
+        assert_eq!(candidate["evidence"]["n"], 0);
+    }
+    assert_eq!(
+        world.ask(&["pick", "--kind", "second-opinion"]).data()["target"]["harness"],
+        "codex"
+    );
+    // Keep both routing scopes in the fold: unique IDs for the role-only group.
+    let untagged = old
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["run"] = serde_json::json!(format!("{}-role", event["run"].as_str().unwrap()));
+            event.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&file, std::fs::read_to_string(&file).unwrap() + &untagged).unwrap();
+    assert_eq!(first_choice(&world), "claude");
+    let report = world.ask(&["report", "--suggest"]);
+    assert_eq!(report.data()["runs"], 32);
+    for candidate in report.data()["routing"]["roles"]["advise"]["order"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(candidate["evidence"]["n"], 8);
+    }
+}

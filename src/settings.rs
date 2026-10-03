@@ -19,12 +19,12 @@ use crate::config::edit::{self, Change, KeyPath};
 use crate::config::{self, UserConfig};
 use crate::exit::{Exit, Fail, Res};
 use crate::meter::{Exe, MeterFile, MeterId, Selection};
-use crate::model::{Candidate, HarnessId, ModelName, Role};
+use crate::model::{Candidate, HarnessId, ModelName, Role, TaskKindName};
 use crate::registry::{self, Registry};
 use crate::spawn;
 
 /// A setting, by what it sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     Enabled(HarnessId),
     Cap(HarnessId),
@@ -53,21 +53,25 @@ pub enum Key {
     ApplyRouting,
     Candidates(Role),
     Calibrate(Role),
+    KindDescription(TaskKindName),
+    KindRole(TaskKindName),
+    KindCandidates(TaskKindName),
 }
 
 /// Where a setting is shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Section {
     Harness(HarnessId),
     Meter,
     Runs,
     Review,
     Roles,
+    TaskKind(TaskKindName),
 }
 
 impl Key {
     /// Every setting, in the order the page shows them.
-    pub fn all() -> Vec<Key> {
+    pub fn all(config: &UserConfig) -> Vec<Key> {
         use Key::*;
         let mut keys = Vec::new();
         for id in HarnessId::ALL {
@@ -104,11 +108,18 @@ impl Key {
         for role in Role::ALL {
             keys.extend([Candidates(role), Calibrate(role)]);
         }
+        for name in config.kinds.keys() {
+            keys.extend([
+                KindDescription(name.clone()),
+                KindRole(name.clone()),
+                KindCandidates(name.clone()),
+            ]);
+        }
         keys
     }
 
     /// Its dotted path in config.toml: `harness.codex.cap`.
-    pub fn name(self) -> String {
+    pub fn name(&self) -> String {
         use Key::*;
         match self {
             Enabled(id) => format!("harness.{id}.enabled"),
@@ -137,18 +148,32 @@ impl Key {
             ApplyRouting => "review.apply_routing".to_string(),
             Candidates(role) => format!("roles.{role}.candidates"),
             Calibrate(role) => format!("roles.{role}.calibrate"),
+            KindDescription(name) => format!("kinds.{name}.description"),
+            KindRole(name) => format!("kinds.{name}.role"),
+            KindCandidates(name) => format!("kinds.{name}.candidates"),
         }
     }
 
     pub fn parse(name: &str) -> Option<Key> {
-        Key::all().into_iter().find(|key| key.name() == name)
+        if let ["kinds", kind, field] = name.split('.').collect::<Vec<_>>()[..] {
+            let kind = TaskKindName::try_from(kind.to_string()).ok()?;
+            return match field {
+                "description" => Some(Key::KindDescription(kind)),
+                "role" => Some(Key::KindRole(kind)),
+                "candidates" => Some(Key::KindCandidates(kind)),
+                _ => None,
+            };
+        }
+        Key::all(&UserConfig::default())
+            .into_iter()
+            .find(|key| key.name() == name)
     }
 
-    pub fn section(self) -> Section {
+    pub fn section(&self) -> Section {
         use Key::*;
         match self {
             Enabled(id) | Cap(id) | AbortAt(id) | MaxConcurrent(id) | Billing(id) | Binary(id) => {
-                Section::Harness(id)
+                Section::Harness(*id)
             }
             Meter | MeterBinary(_) | MaxDataAge | ClaudeBlockTokens | CodexDayTokens
             | RunsPerHour | TokensPerDay => Section::Meter,
@@ -156,12 +181,15 @@ impl Key {
             | AllowInPlace => Section::Runs,
             Review | SampleRate | ApplyRouting => Section::Review,
             Candidates(_) | Calibrate(_) => Section::Roles,
+            KindDescription(name) | KindRole(name) | KindCandidates(name) => {
+                Section::TaskKind(name.clone())
+            }
         }
     }
 
     /// What a reset takes out of the file: the key, or for a role's list the
     /// role's whole table (its `calibrate` belongs to the list).
-    fn reset_path(self) -> KeyPath {
+    fn reset_path(&self) -> KeyPath {
         match self {
             Key::Candidates(role) => KeyPath::of(&format!("roles.{role}")),
             _ => KeyPath::of(&self.name()),
@@ -178,6 +206,7 @@ impl fmt::Display for Key {
 /// What a setting may be.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
+    Text,
     Toggle,
     /// One of these names.
     Choice(Vec<&'static str>),
@@ -222,6 +251,7 @@ pub enum Source {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    Text(String),
     Bool(bool),
     Number(i64),
     Share(f64),
@@ -544,6 +574,31 @@ pub fn current(
             ));
         }
     }
+    for (name, entry) in &config.kinds {
+        all.extend([
+            Setting::new(
+                Key::KindDescription(name.clone()),
+                Kind::Text,
+                Some(Value::Text(entry.description.clone())),
+                None,
+                Origin::Config,
+            ),
+            Setting::new(
+                Key::KindRole(name.clone()),
+                Kind::Choice(Role::ALL.into_iter().map(Role::as_str).collect()),
+                Some(Value::Name(entry.role.to_string())),
+                None,
+                Origin::Config,
+            ),
+            Setting::new(
+                Key::KindCandidates(name.clone()),
+                Kind::Order,
+                Some(Value::Candidates(entry.candidates.clone())),
+                None,
+                Origin::Config,
+            ),
+        ]);
+    }
     all
 }
 
@@ -662,6 +717,9 @@ pub fn find<'a>(settings: &'a [Setting], name: &str) -> Res<&'a Setting> {
                 "{name} belongs to a list of your own — set roles.{role}.candidates first (the \
                  default lists always calibrate)"
             ),
+            Some(Key::KindDescription(kind) | Key::KindRole(kind) | Key::KindCandidates(kind)) => {
+                unknown_kind(&kind).message
+            }
             _ => format!("no setting is called {name:?}"),
         },
     ))
@@ -673,7 +731,7 @@ impl Setting {
     /// share as a fraction, an absolute path, or a role's candidates as
     /// `harness:model:effort,…`.
     pub fn parse(&self, text: &str) -> Res<Value> {
-        let key = self.key;
+        let key = &self.key;
         let refuse = |why: String| Fail::new(Exit::Usage, format!("{key} = {text}: {why}"));
         if self.locked {
             return Err(refuse(
@@ -681,6 +739,13 @@ impl Setting {
             ));
         }
         Ok(match &self.kind {
+            Kind::Text => {
+                if let Key::KindDescription(name) = key {
+                    config::validate_kind_description(name, text)
+                        .map_err(|fail| Fail::new(Exit::Usage, fail.message))?;
+                }
+                Value::Text(text.to_string())
+            }
             Kind::Toggle => match text {
                 "on" | "true" => Value::Bool(true),
                 "off" | "false" => Value::Bool(false),
@@ -715,12 +780,12 @@ impl Setting {
                 }
                 let held = match key {
                     Key::Binary(id) => spawn::resolve_binary(
-                        crate::harness::harness(id).binary_name(),
+                        crate::harness::harness(*id).binary_name(),
                         Some(&path),
                         &[],
                     )
                     .map(drop),
-                    Key::MeterBinary(id) => Exe::pin(id, &path).map(drop),
+                    Key::MeterBinary(id) => Exe::pin(*id, &path).map(drop),
                     _ => Ok(()),
                 };
                 held.map_err(|fail| refuse(fail.message))?;
@@ -760,7 +825,7 @@ impl Value {
             Value::Bool(on) => (*on).into(),
             Value::Number(n) => (*n).into(),
             Value::Share(share) => (*share).into(),
-            Value::Name(name) => name.as_str().into(),
+            Value::Text(name) | Value::Name(name) => name.as_str().into(),
             Value::Program(path) => path.to_string_lossy().as_ref().into(),
             Value::Candidates(candidates) => {
                 let mut list = Array::new();
@@ -787,7 +852,9 @@ impl Value {
             Value::Bool(on) => (*on).into(),
             Value::Number(n) => (*n).into(),
             Value::Share(share) => (*share).into(),
-            Value::Name(_) | Value::Program(_) | Value::Candidates(_) => self.to_string().into(),
+            Value::Text(_) | Value::Name(_) | Value::Program(_) | Value::Candidates(_) => {
+                self.to_string().into()
+            }
         }
     }
 }
@@ -799,7 +866,7 @@ impl fmt::Display for Value {
             Value::Bool(on) => f.write_str(if *on { "on" } else { "off" }),
             Value::Number(n) => write!(f, "{n}"),
             Value::Share(share) => write!(f, "{share}"),
-            Value::Name(name) => f.write_str(name),
+            Value::Text(name) | Value::Name(name) => f.write_str(name),
             Value::Program(path) => write!(f, "{}", path.display()),
             Value::Candidates(candidates) => {
                 let each: Vec<String> = candidates
@@ -815,7 +882,13 @@ impl fmt::Display for Value {
 /// Sets one setting in config.toml, and returns the config it now holds. A
 /// change the config refuses (a cap above where runs stop) is `Usage`, and
 /// the file is left as it was.
-pub fn set(file: &Path, key: Key, value: &Value) -> Res<UserConfig> {
+pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
+    if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key {
+        let config = UserConfig::load(file)?;
+        if !config.kinds.contains_key(name) {
+            return Err(unknown_kind(name));
+        }
+    }
     edit::apply(
         file,
         &[Change::Set {
@@ -826,12 +899,34 @@ pub fn set(file: &Path, key: Key, value: &Value) -> Res<UserConfig> {
 }
 
 /// Takes one setting out of config.toml, so its default applies again.
-pub fn reset(file: &Path, key: Key) -> Res<UserConfig> {
+pub fn reset(file: &Path, key: &Key) -> Res<UserConfig> {
+    if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key {
+        let config = UserConfig::load(file)?;
+        if !config.kinds.contains_key(name) {
+            return Err(unknown_kind(name));
+        }
+        return Err(Fail::new(
+            Exit::Usage,
+            format!(
+                "{key} is required for this task kind — remove [kinds.{name}] from config.toml to remove the kind"
+            ),
+        ));
+    }
     edit::apply(
         file,
         &[Change::Remove {
             path: key.reset_path(),
         }],
+    )
+}
+
+fn unknown_kind(name: &TaskKindName) -> Fail {
+    Fail::new(
+        Exit::Usage,
+        format!(
+            "unknown task kind {:?} — define description, role and candidates together in [kinds.{name}] in config.toml first",
+            name.as_str()
+        ),
     )
 }
 
@@ -852,10 +947,10 @@ mod tests {
 
     #[test]
     fn every_key_has_a_name_that_leads_back_to_it_and_a_section() {
-        let all = Key::all();
+        let all = Key::all(&UserConfig::default());
         assert_eq!(all.len(), 2 * 6 + 8 + 8 + 3 + 4 * 2);
         for key in &all {
-            assert_eq!(Key::parse(&key.name()), Some(*key), "{key}");
+            assert_eq!(Key::parse(&key.name()), Some(key.clone()), "{key}");
         }
         assert_eq!(
             Key::parse("harness.codex.cap"),
@@ -873,7 +968,7 @@ mod tests {
             .filter(|s| matches!(s.key, Key::Calibrate(_)))
             .count();
         assert_eq!(calibrates, 0, "the default lists always calibrate");
-        assert_eq!(settings.len(), Key::all().len() - 4);
+        assert_eq!(settings.len(), Key::all(&UserConfig::default()).len() - 4);
         for setting in &settings {
             assert_eq!(setting.value, setting.default, "{}", setting.key);
             assert_eq!(setting.origin, Origin::Default, "{}", setting.key);
@@ -1076,14 +1171,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("config.toml");
         fs::write(&file, "# mine\nschema = 1\n").unwrap();
-        set(&file, Key::Cap(HarnessId::Codex), &Value::Number(60)).unwrap();
-        set(&file, Key::SampleRate, &Value::Share(0.5)).unwrap();
+        set(&file, &Key::Cap(HarnessId::Codex), &Value::Number(60)).unwrap();
+        set(&file, &Key::SampleRate, &Value::Share(0.5)).unwrap();
         let list = Value::Candidates(vec![
             candidate("claude:opus:high").unwrap(),
             candidate("codex:gpt-5.6-sol:high").unwrap(),
         ]);
-        set(&file, Key::Candidates(Role::Advise), &list).unwrap();
-        let config = set(&file, Key::Calibrate(Role::Advise), &Value::Bool(true)).unwrap();
+        set(&file, &Key::Candidates(Role::Advise), &list).unwrap();
+        let config = set(&file, &Key::Calibrate(Role::Advise), &Value::Bool(true)).unwrap();
         assert_eq!(config.roles[&Role::Advise].calibrate, Some(true));
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
@@ -1094,14 +1189,139 @@ mod tests {
         // Where runs stop can't be set at or below the cap: refused, and the
         // file is as it was.
         let before = fs::read_to_string(&file).unwrap();
-        let refused = set(&file, Key::AbortAt(HarnessId::Codex), &Value::Number(60)).unwrap_err();
+        let refused = set(&file, &Key::AbortAt(HarnessId::Codex), &Value::Number(60)).unwrap_err();
         assert_eq!(refused.exit, Exit::Usage);
         assert_eq!(fs::read_to_string(&file).unwrap(), before);
 
-        reset(&file, Key::Cap(HarnessId::Codex)).unwrap();
-        reset(&file, Key::SampleRate).unwrap();
-        let config = reset(&file, Key::Candidates(Role::Advise)).unwrap();
+        reset(&file, &Key::Cap(HarnessId::Codex)).unwrap();
+        reset(&file, &Key::SampleRate).unwrap();
+        let config = reset(&file, &Key::Candidates(Role::Advise)).unwrap();
         assert!(config.roles.is_empty(), "calibrate goes with its list");
         assert_eq!(fs::read_to_string(&file).unwrap(), "# mine\nschema = 1\n");
+    }
+
+    const KINDS: &str = r#"schema = 1
+# keep me
+[kinds.zed]
+description = "Review Rust." # words
+role = "review"
+candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "codex", model = "m", effort = "medium" }]
+[kinds.alpha]
+description = "Another task."
+role = "advise"
+candidates = [{ harness = "claude", model = "custom", effort = "low" }]
+"#;
+
+    #[test]
+    fn kind_settings_have_dynamic_keys_and_no_defaults() {
+        let config = config(KINDS);
+        let keys = Key::all(&config);
+        assert_eq!(
+            keys.iter().rev().take(6).map(Key::name).collect::<Vec<_>>(),
+            [
+                "kinds.zed.candidates",
+                "kinds.zed.role",
+                "kinds.zed.description",
+                "kinds.alpha.candidates",
+                "kinds.alpha.role",
+                "kinds.alpha.description"
+            ]
+        );
+        let now = current(&config, None, None);
+        for key in keys
+            .iter()
+            .filter(|key| matches!(key.section(), Section::TaskKind(_)))
+        {
+            assert_eq!(Key::parse(&key.name()), Some(key.clone()));
+            let row = find(&now, &key.name()).unwrap();
+            assert!(row.default.is_none() && !row.locked);
+            assert_eq!(row.origin, Origin::Config);
+        }
+        assert!(Key::parse("kinds.zed.calibrate").is_none());
+        assert!(Key::parse("kinds.zed.role.extra").is_none());
+        assert!(Key::parse("kinds.Bad.role").is_none());
+        let description = find(&now, "kinds.zed.description").unwrap();
+        assert_eq!(description.kind, Kind::Text);
+        let text = description.parse("  My own words.  ").unwrap();
+        assert_eq!(text.to_string(), "  My own words.  ");
+        assert_eq!(text.to_json(), serde_json::json!("  My own words.  "));
+        assert_eq!(
+            find(&now, "kinds.zed.role").unwrap().kind,
+            Kind::Choice(Role::ALL.into_iter().map(Role::as_str).collect())
+        );
+    }
+
+    #[test]
+    fn kind_settings_edits_require_a_complete_existing_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("config.toml");
+        fs::write(&file, KINDS).unwrap();
+        for (leaf, text) in [
+            ("description", "Changed words."),
+            ("role", "explore"),
+            ("candidates", "claude:new:low,codex:m:medium"),
+        ] {
+            let now = current(&UserConfig::load(&file).unwrap(), None, None);
+            let row = find(&now, &format!("kinds.zed.{leaf}")).unwrap();
+            set(&file, &row.key, &row.parse(text).unwrap()).unwrap();
+        }
+        let before = fs::read_to_string(&file).unwrap();
+        assert!(before.contains("# keep me") && before.contains("# words"));
+        assert!(before.contains(&KINDS[KINDS.find("[kinds.alpha]").unwrap()..]));
+        for leaf in ["description", "role", "candidates"] {
+            let key = Key::parse(&format!("kinds.zed.{leaf}")).unwrap();
+            let fail = reset(&file, &key).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert!(fail.message.contains("is required for this task kind"));
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+            let unknown = Key::parse(&format!("kinds.missing.{leaf}")).unwrap();
+            let fail = reset(&file, &unknown).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert_eq!(
+                fail.message,
+                "unknown task kind \"missing\" — define description, role and candidates together in [kinds.missing] in config.toml first"
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+            assert_eq!(
+                set(&file, &unknown, &Value::Text("x".into()))
+                    .unwrap_err()
+                    .exit,
+                Exit::Usage
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        }
+        for (name, value, message) in [
+            (
+                "kinds.zed.candidates",
+                Value::Candidates(Vec::new()),
+                "kinds.zed.candidates must contain at least one candidate",
+            ),
+            (
+                "kinds.zed.candidates",
+                Value::Candidates(vec![candidate("codex:m:high").unwrap(); 2]),
+                "kinds.zed.candidates repeats codex:m:high",
+            ),
+            (
+                "kinds.zed.description",
+                Value::Text("bad\ntext".into()),
+                "kinds.zed.description must be nonblank, one line, at most 1024 characters, and contain no control characters",
+            ),
+        ] {
+            let key = Key::parse(name).unwrap();
+            let fail = set(&file, &key, &value).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert_eq!(fail.message, message);
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        }
+        // A stale page row cannot recreate a definition removed by hand.
+        fs::write(&file, "schema = 1\n").unwrap();
+        let key = Key::parse("kinds.zed.description").unwrap();
+        assert_eq!(
+            set(&file, &key, &Value::Text("words".into()))
+                .unwrap_err()
+                .exit,
+            Exit::Usage
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "schema = 1\n");
     }
 }

@@ -13,7 +13,7 @@ use crate::exit::{Exit, Fail, Res};
 use crate::gate::{self, Admission};
 use crate::harness::{self, Version};
 use crate::model::{Candidate, HarnessId, Role};
-use crate::registry::Registry;
+use crate::registry::{Registry, Routing};
 use crate::run::record::try_lock_file;
 use crate::spawn;
 
@@ -38,7 +38,7 @@ pub struct Choice {
 /// list to one harness, and turns "not enabled" into its own refusal.
 fn candidates(
     registry: &Registry,
-    role: Role,
+    routing: &Routing<'_>,
     caller: Option<HarnessId>,
     to: Option<HarnessId>,
 ) -> Res<Vec<Candidate>> {
@@ -57,7 +57,7 @@ fn candidates(
             ));
         }
     }
-    let list: Vec<Candidate> = registry.roles[&role]
+    let list: Vec<Candidate> = routing
         .candidates
         .iter()
         .filter(|c| Some(c.harness) != caller)
@@ -68,9 +68,16 @@ fn candidates(
     if list.is_empty() {
         return Err(Fail::new(
             Exit::NoEligibleTarget,
-            format!(
-                "no enabled target for the {role} role — a person enables one with `cahoots enable <harness>`"
-            ),
+            match routing.kind {
+                Some(name) => format!(
+                    "no enabled candidate for task kind {:?} after applying --caller and --to — a person checks its candidates and enabled targets in config.toml",
+                    name.as_str()
+                ),
+                None => format!(
+                    "no enabled target for the {} role — a person enables one with `cahoots enable <harness>`",
+                    routing.role
+                ),
+            },
         ));
     }
     Ok(list)
@@ -137,14 +144,14 @@ pub fn eligible(
 pub fn choose(
     dirs: &Dirs,
     registry: &Registry,
-    role: Role,
+    routing: &Routing<'_>,
     caller: Option<HarnessId>,
     to: Option<HarnessId>,
     workspace: &[&Path],
 ) -> Res<Choice> {
     let mut skipped: Vec<(Candidate, Fail)> = Vec::new();
-    for candidate in candidates(registry, role, caller, to)? {
-        let attempt = eligible(dirs, registry, &candidate, role, workspace);
+    for candidate in candidates(registry, routing, caller, to)? {
+        let attempt = eligible(dirs, registry, &candidate, routing.role, workspace);
         match attempt {
             Ok((binary, version, admission)) => {
                 return Ok(Choice {
@@ -165,7 +172,15 @@ pub fn choose(
     }
     let reasons: Vec<String> = skipped
         .iter()
-        .map(|(c, fail)| format!("{} ({}): {}", c.harness, c.model.as_str(), fail.message))
+        .map(|(c, fail)| {
+            format!(
+                "{} ({}, {}): {}",
+                c.harness,
+                c.model.as_str(),
+                c.effort,
+                fail.message
+            )
+        })
         .collect();
     Err(Fail::new(Exit::NoEligibleTarget, reasons.join("; ")))
 }
@@ -176,5 +191,123 @@ fn skip((candidate, fail): (Candidate, Fail)) -> Skip {
         code: fail.exit.code(),
         class: fail.exit.class(),
         reason: fail.message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UserConfig;
+
+    fn registry() -> Registry {
+        Registry::effective(
+            &UserConfig::parse(
+                r#"schema = 1
+harness.codex.enabled = true
+harness.claude.enabled = true
+[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [
+ { harness = "codex", model = "m", effort = "high" },
+ { harness = "codex", model = "m", effort = "medium" },
+ { harness = "claude", model = "other", effort = "low" },
+]
+"#,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn kind_candidates_only_narrow_and_keep_distinct_efforts() {
+        let mut registry = registry();
+        let routing = registry.routing(None, Some("rust-review")).unwrap();
+        assert_eq!(
+            candidates(&registry, &routing, None, None).unwrap(),
+            routing.candidates
+        );
+        assert_eq!(
+            candidates(&registry, &routing, None, Some(HarnessId::Codex)).unwrap(),
+            routing.candidates[..2]
+        );
+        assert_eq!(
+            candidates(&registry, &routing, Some(HarnessId::Codex), None).unwrap(),
+            routing.candidates[2..]
+        );
+        registry
+            .harnesses
+            .get_mut(&HarnessId::Claude)
+            .unwrap()
+            .enabled = false;
+        let routing = registry.routing(None, Some("rust-review")).unwrap();
+        assert_eq!(
+            candidates(&registry, &routing, None, None).unwrap(),
+            routing.candidates[..2]
+        );
+    }
+
+    #[test]
+    fn kind_target_refusals_keep_existing_precedence() {
+        let mut registry = registry();
+        registry
+            .harnesses
+            .get_mut(&HarnessId::Claude)
+            .unwrap()
+            .enabled = false;
+        let routing = registry.routing(None, Some("rust-review")).unwrap();
+        assert_eq!(
+            candidates(
+                &registry,
+                &routing,
+                Some(HarnessId::Claude),
+                Some(HarnessId::Claude)
+            )
+            .unwrap_err()
+            .exit,
+            Exit::Policy
+        );
+        assert_eq!(
+            candidates(&registry, &routing, None, Some(HarnessId::Claude))
+                .unwrap_err()
+                .exit,
+            Exit::TargetUnavailable
+        );
+        let fail = candidates(&registry, &routing, Some(HarnessId::Codex), None).unwrap_err();
+        assert_eq!(fail.exit, Exit::NoEligibleTarget);
+        assert_eq!(
+            fail.message,
+            "no enabled candidate for task kind \"rust-review\" after applying --caller and --to — a person checks its candidates and enabled targets in config.toml"
+        );
+        let role = registry.routing(Some(Role::Review), None).unwrap();
+        assert!(
+            candidates(&registry, &role, Some(HarnessId::Codex), None)
+                .unwrap_err()
+                .message
+                .starts_with("no enabled target for the review role")
+        );
+        registry
+            .kinds
+            .values_mut()
+            .next()
+            .unwrap()
+            .candidates
+            .retain(|c| c.harness == HarnessId::Codex);
+        registry
+            .harnesses
+            .get_mut(&HarnessId::Claude)
+            .unwrap()
+            .enabled = true;
+        assert_eq!(
+            candidates(
+                &registry,
+                &registry.routing(None, Some("rust-review")).unwrap(),
+                None,
+                Some(HarnessId::Claude)
+            )
+            .unwrap_err()
+            .exit,
+            Exit::NoEligibleTarget
+        );
     }
 }

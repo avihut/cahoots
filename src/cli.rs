@@ -17,7 +17,7 @@ mod endings;
 mod questions;
 mod settings;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -56,10 +56,15 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Verb {
-    /// Choose the target (harness, model, effort) for a role, without running
+    /// Choose the target for a role or task kind, without running
+    #[command(group(ArgGroup::new("selector").required(true).multiple(true).args(["role", "kind"])))]
     Pick {
+        /// What the run may do: advise, review, explore, or implement (writes); optional with --kind, and must match it when given
         #[arg(long)]
-        role: Role,
+        role: Option<Role>,
+        /// A task kind defined in config.toml; its role sets what the run may do
+        #[arg(long, value_name = "NAME")]
+        kind: Option<String>,
         /// Only this harness
         #[arg(long)]
         to: Option<HarnessId>,
@@ -68,10 +73,14 @@ pub enum Verb {
         caller: Option<HarnessId>,
     },
     /// Delegate a brief to another harness, under the gate
+    #[command(group(ArgGroup::new("selector").required(true).multiple(true).args(["role", "kind"])))]
     Run {
-        /// What the run is for: advise, review, explore — or implement, which writes
+        /// What the run may do: advise, review, explore, or implement (writes); optional with --kind, and must match it when given
         #[arg(long)]
-        role: Role,
+        role: Option<Role>,
+        /// A task kind defined in config.toml; its role sets what the run may do
+        #[arg(long, value_name = "NAME")]
+        kind: Option<String>,
         /// The brief, as a file (in the working directory, its repository, or a temp dir)
         #[arg(long)]
         brief: PathBuf,
@@ -232,7 +241,7 @@ pub enum SettingsAction {
     Set {
         /// Its path in config.toml, as `cahoots settings` lists them
         key: String,
-        /// In config.toml's units: on/off, a number, a path, or harness:model:effort,…
+        /// In config.toml's units: on/off, a number, a path, description text, or harness:model:effort,…
         value: String,
     },
     /// Put one back to its default, which takes it out of config.toml
@@ -511,6 +520,7 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
         }
         Verb::Run {
             role,
+            kind,
             brief,
             to,
             caller,
@@ -521,6 +531,7 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             timeout,
         } => Ok(client::run(RunArgs {
             role,
+            kind,
             brief,
             to,
             caller,
@@ -531,7 +542,12 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             timeout_secs: timeout,
         })?
         .into()),
-        Verb::Pick { role, to, caller } => Ok(client::pick_target(role, caller, to)?.into()),
+        Verb::Pick {
+            role,
+            kind,
+            to,
+            caller,
+        } => Ok(client::pick_target(role, kind.as_deref(), caller, to)?.into()),
         Verb::Settings { action } => Ok(settings::settings(action, person, title)?),
         Verb::Enable { harness, off } => {
             let dirs = Dirs::resolve()?;
@@ -1077,5 +1093,50 @@ mod tests {
         assert!(run(&["--role", "deploy"]).is_err());
         assert!(run(&["--role", "review", "--to", "gemini"]).is_err());
         assert!(run(&["--role", "review", "--ungated"]).is_err());
+    }
+
+    #[test]
+    fn pick_and_run_accept_a_kind_with_an_optional_role() {
+        for verb in ["pick", "run"] {
+            for selector in [
+                vec!["--role", "review"],
+                vec!["--kind", "rust-review"],
+                vec!["--role", "review", "--kind", "rust-review"],
+            ] {
+                let mut args = vec!["cahoots", verb];
+                args.extend(selector);
+                if verb == "run" {
+                    args.extend(["--brief", "b.md"]);
+                }
+                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+                for flag in ["--model", "--effort"] {
+                    let mut bad = args.clone();
+                    bad.extend([flag, "high"]);
+                    assert!(Cli::try_parse_from(bad).is_err());
+                }
+            }
+            let mut args = vec!["cahoots", verb];
+            if verb == "run" {
+                args.extend(["--brief", "b.md"]);
+            }
+            let error = Cli::try_parse_from(args).unwrap_err().to_string();
+            assert!(
+                error.contains("--role") && error.contains("--kind"),
+                "{error}"
+            );
+        }
+        assert!(Cli::try_parse_from(["cahoots", "run", "--kind", "rust-review"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "cahoots",
+                "resume",
+                "r",
+                "--kind",
+                "rust-review",
+                "--brief",
+                "b"
+            ])
+            .is_err()
+        );
     }
 }

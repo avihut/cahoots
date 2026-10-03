@@ -13,9 +13,9 @@ use serde::Serialize;
 use crate::config::edit::{self, Change, KeyPath};
 use crate::config::{Billing, UserConfig};
 use crate::dirs::Dirs;
-use crate::exit::Res;
+use crate::exit::{Exit, Fail, Res};
 use crate::meter::{self, Chosen, MeterFile, UsageMeter};
-use crate::model::{Candidate, Effort, HarnessId, ModelName, Role};
+use crate::model::{Candidate, Effort, HarnessId, ModelName, Role, TaskKindName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +51,19 @@ pub struct RoleEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct KindEntry {
+    pub description: String,
+    pub role: Role,
+    pub candidates: Vec<Candidate>,
+}
+
+pub struct Routing<'a> {
+    pub role: Role,
+    pub kind: Option<&'a TaskKindName>,
+    pub candidates: &'a [Candidate],
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Limits {
     pub max_active_runs: u32,
     pub max_depth: u32,
@@ -83,6 +96,7 @@ pub struct Review {
 pub struct Registry {
     pub harnesses: BTreeMap<HarnessId, HarnessEntry>,
     pub roles: BTreeMap<Role, RoleEntry>,
+    pub kinds: BTreeMap<TaskKindName, KindEntry>,
     pub limits: Limits,
     pub meters: Meters,
     pub review: Review,
@@ -156,6 +170,45 @@ pub fn set_enabled(dirs: &Dirs, harness: HarnessId, on: bool) -> Res<Vec<Harness
 }
 
 impl Registry {
+    /// Resolve once, so admission and placement share the selected list's role.
+    pub fn routing(&self, role: Option<Role>, kind: Option<&str>) -> Res<Routing<'_>> {
+        if let Some(raw) = kind {
+            let name = TaskKindName::try_from(raw.to_string())
+                .map_err(|reason| Fail::new(Exit::Usage, reason))?;
+            let (name, entry) = self.kinds.get_key_value(&name).ok_or_else(|| {
+                Fail::new(
+                    Exit::Usage,
+                    format!("unknown task kind {raw:?} — a person defines kinds in config.toml"),
+                )
+            })?;
+            if let Some(requested) = role
+                && requested != entry.role
+            {
+                return Err(Fail::new(
+                    Exit::Usage,
+                    format!(
+                        "task kind {:?} has role {}, which does not match --role {requested}",
+                        name.as_str(),
+                        entry.role
+                    ),
+                ));
+            }
+            Ok(Routing {
+                role: entry.role,
+                kind: Some(name),
+                candidates: &entry.candidates,
+            })
+        } else {
+            let role =
+                role.ok_or_else(|| Fail::new(Exit::Usage, "one of --role or --kind is required"))?;
+            Ok(Routing {
+                role,
+                kind: None,
+                candidates: &self.roles[&role].candidates,
+            })
+        }
+    }
+
     pub fn load(dirs: &Dirs) -> Res<Registry> {
         let config = UserConfig::load(&dirs.config_file())?;
         let mut registry = Registry::effective(&config);
@@ -270,6 +323,20 @@ impl Registry {
         Registry {
             harnesses,
             roles,
+            kinds: config
+                .kinds
+                .iter()
+                .map(|(name, entry)| {
+                    (
+                        name.clone(),
+                        KindEntry {
+                            description: entry.description.clone(),
+                            role: entry.role,
+                            candidates: entry.candidates.clone(),
+                        },
+                    )
+                })
+                .collect(),
             limits: Limits {
                 max_active_runs: config.limits.max_active_runs.unwrap_or(3),
                 max_depth: config.limits.max_depth.unwrap_or(1),
@@ -399,5 +466,70 @@ mod tests {
         assert_eq!(registry.roles[&Role::Explore].origin, Origin::User);
         assert_eq!(registry.roles[&Role::Explore].candidates.len(), 1);
         assert_eq!(registry.roles[&Role::Advise].origin, Origin::Default);
+    }
+
+    fn kind_registry() -> Registry {
+        Registry::effective(&UserConfig::parse("schema = 1\n[kinds.rust-review]\ndescription = \"Review Rust.\"\nrole = \"review\"\ncandidates = [{ harness = \"claude\", model = \"custom\", effort = \"low\" }]").unwrap())
+    }
+
+    #[test]
+    fn a_kind_resolves_its_own_role_and_exact_list() {
+        assert!(Registry::effective(&UserConfig::default()).kinds.is_empty());
+        let registry = kind_registry();
+        let routing = registry.routing(None, Some("rust-review")).unwrap();
+        assert_eq!(routing.role, Role::Review);
+        assert_eq!(routing.kind.unwrap().as_str(), "rust-review");
+        assert_eq!(
+            routing.candidates,
+            registry
+                .routing(Some(Role::Review), Some("rust-review"))
+                .unwrap()
+                .candidates
+        );
+        assert_eq!(routing.candidates.len(), 1);
+        assert_eq!(routing.candidates[0].model.as_str(), "custom");
+        let role = registry.routing(Some(Role::Review), None).unwrap();
+        assert_eq!(role.candidates, registry.roles[&Role::Review].candidates);
+        assert!(role.kind.is_none());
+    }
+
+    #[test]
+    fn unknown_kinds_and_disagreeing_roles_are_usage_errors() {
+        let mut registry = kind_registry();
+        for raw in ["missing", "a.b", "A", "", "--flag"] {
+            let fail = registry
+                .routing(Some(Role::Review), Some(raw))
+                .err()
+                .unwrap();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert!(fail.message.starts_with(if raw == "missing" {
+                "unknown task kind"
+            } else {
+                "task kind name"
+            }));
+        }
+        for configured in Role::ALL {
+            registry.kinds.values_mut().next().unwrap().role = configured;
+            for requested in Role::ALL {
+                if configured == requested {
+                    continue;
+                }
+                let fail = registry
+                    .routing(Some(requested), Some("rust-review"))
+                    .err()
+                    .unwrap();
+                assert_eq!(fail.exit, Exit::Usage);
+                assert_eq!(
+                    fail.message,
+                    format!(
+                        "task kind \"rust-review\" has role {configured}, which does not match --role {requested}"
+                    )
+                );
+            }
+        }
+        assert_eq!(
+            registry.routing(None, None).err().unwrap().exit,
+            Exit::Usage
+        );
     }
 }

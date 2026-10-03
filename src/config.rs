@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::exit::{Fail, Res};
 use crate::meter::{MeterId, Selection};
-use crate::model::{Candidate, HarnessId, Role};
+use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 
 pub const SCHEMA: u32 = 1;
 
@@ -29,6 +29,8 @@ pub struct UserConfig {
     pub harness: BTreeMap<HarnessId, HarnessConfig>,
     #[serde(default)]
     pub roles: BTreeMap<Role, RoleConfig>,
+    #[serde(default)]
+    pub kinds: BTreeMap<TaskKindName, KindConfig>,
     #[serde(default)]
     pub meter: MeterConfig,
     #[serde(default)]
@@ -74,6 +76,31 @@ pub struct RoleConfig {
     /// A list a person wrote is theirs: learning leaves its order alone
     /// unless they say otherwise here.
     pub calibrate: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KindConfig {
+    pub description: String,
+    pub role: Role,
+    pub candidates: Vec<Candidate>,
+}
+
+pub const MAX_KIND_DESCRIPTION_CHARS: usize = 1024;
+
+/// Shared by stored config and settings edits; preserves the person's text.
+pub fn validate_kind_description(name: &TaskKindName, text: &str) -> Res<()> {
+    if text.trim().is_empty()
+        || text.chars().count() > MAX_KIND_DESCRIPTION_CHARS
+        || text
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(Fail::config(format!(
+            "kinds.{name}.description must be nonblank, one line, at most 1024 characters, and contain no control characters"
+        )));
+    }
+    Ok(())
 }
 
 /// `[meter]`: which usage meter judges the gate (`use`), and each meter's
@@ -247,6 +274,24 @@ impl UserConfig {
                 return Err(Fail::config(format!(
                     "roles.{role}.candidates is empty — remove the table to get the defaults"
                 )));
+            }
+        }
+        for (name, entry) in &self.kinds {
+            validate_kind_description(name, &entry.description)?;
+            if entry.candidates.is_empty() {
+                return Err(Fail::config(format!(
+                    "kinds.{name}.candidates must contain at least one candidate"
+                )));
+            }
+            for (at, candidate) in entry.candidates.iter().enumerate() {
+                if entry.candidates[..at].contains(candidate) {
+                    return Err(Fail::config(format!(
+                        "kinds.{name}.candidates repeats {}:{}:{}",
+                        candidate.harness,
+                        candidate.model.as_str(),
+                        candidate.effort
+                    )));
+                }
             }
         }
         let meter = &self.meter;
@@ -472,6 +517,101 @@ mod tests {
             "schema = 1\n[meter.ledger]\nmax_tokens_per_day = 2_000_000",
         ] {
             assert!(UserConfig::parse(text).is_ok(), "{text:?}");
+        }
+    }
+
+    const KIND: &str = "[kinds.rust-review]\ndescription = \"Review Rust.\"\nrole = \"review\"\ncandidates = [{ harness = \"codex\", model = \"m\", effort = \"high\" }, { harness = \"codex\", model = \"m\", effort = \"medium\" }]\n";
+
+    #[test]
+    fn kinds_require_complete_definitions_and_preserve_distinct_efforts() {
+        assert!(UserConfig::parse("schema = 1").unwrap().kinds.is_empty());
+        let config = UserConfig::parse(&format!("schema = 1\n{KIND}")).unwrap();
+        let entry = config.kinds.values().next().unwrap();
+        assert_eq!(entry.candidates.len(), 2);
+        assert_eq!(entry.candidates[0].effort, crate::model::Effort::High);
+        assert_eq!(entry.candidates[1].effort, crate::model::Effort::Medium);
+        for field in ["description", "role", "candidates"] {
+            let incomplete = KIND
+                .lines()
+                .filter(|line| !line.starts_with(field))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                UserConfig::parse(&format!("schema = 1\n{incomplete}"))
+                    .unwrap_err()
+                    .exit,
+                Exit::Config
+            );
+        }
+        assert!(
+            UserConfig::parse(&format!(
+                "schema = 1\n{}",
+                KIND.replace("kinds.rust-review", "kinds.\"rust-review\"")
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn kind_validation_refuses_bad_text_duplicates_and_authority_fields() {
+        for bad in [
+            "",
+            "  ",
+            "a\nb",
+            "a\rb",
+            "a\tb",
+            "a\u{1b}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            &"é".repeat(1025),
+        ] {
+            let text = KIND.replace("\"Review Rust.\"", &serde_json::to_string(bad).unwrap());
+            let fail = UserConfig::parse(&format!("schema = 1\n{text}")).unwrap_err();
+            assert_eq!(fail.exit, Exit::Config, "{bad:?}");
+            assert_eq!(
+                fail.message,
+                "kinds.rust-review.description must be nonblank, one line, at most 1024 characters, and contain no control characters",
+                "{bad:?}"
+            );
+        }
+        let name = TaskKindName::try_from("rust-review".to_string()).unwrap();
+        assert!(validate_kind_description(&name, &"é".repeat(1024)).is_ok());
+        for (text, message) in [
+            (
+                KIND.replace("effort = \"medium\"", "effort = \"high\""),
+                "kinds.rust-review.candidates repeats codex:m:high",
+            ),
+            (
+                KIND.replace("candidates = [", "candidates = []\n# ["),
+                "kinds.rust-review.candidates must contain at least one candidate",
+            ),
+        ] {
+            let fail = UserConfig::parse(&format!("schema = 1\n{text}")).unwrap_err();
+            assert_eq!(fail.exit, Exit::Config);
+            assert_eq!(fail.message, message);
+        }
+        for text in [
+            KIND.replace("role = \"review\"", "role = \"deploy\""),
+            KIND.replace("harness = \"codex\"", "harness = \"other\""),
+            KIND.replace("model = \"m\"", "model = \"--flag\""),
+            KIND.replace("effort = \"high\"", "effort = \"ultra\""),
+        ] {
+            assert_eq!(
+                UserConfig::parse(&format!("schema = 1\n{text}"))
+                    .unwrap_err()
+                    .exit,
+                Exit::Config
+            );
+        }
+        for field in [
+            "calibrate = true",
+            "cap = 99",
+            "reserve = 0",
+            "sandbox = \"write\"",
+            "exploration = 1",
+            "flags = []",
+        ] {
+            assert!(UserConfig::parse(&format!("schema = 1\n{KIND}{field}")).is_err());
         }
     }
 }

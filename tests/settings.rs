@@ -372,3 +372,143 @@ fn with_nowhere_to_draw_the_page_settings_names_its_flags() {
     let message = after.json["message"].as_str().unwrap();
     assert!(message.contains("cahoots settings set"), "{message}");
 }
+
+const TASK_KINDS: &str = r#"# my kinds
+[kinds.rust-review]
+description = "Review Rust." # my description
+role = "review"
+candidates = [{ harness = "codex", model = "custom", effort = "high" }, { harness = "codex", model = "custom", effort = "medium" }]
+[kinds.zed]
+description = "Sibling."
+role = "advise"
+candidates = [{ harness = "claude", model = "other", effort = "low" }]
+"#;
+
+#[test]
+fn kind_fields_are_set_without_changing_neighboring_config() {
+    let world = World::new();
+    world.configure(TASK_KINDS);
+    let file = world.config.join("config.toml");
+    for (leaf, value) in [
+        ("description", "My changed words."),
+        ("role", "explore"),
+        ("candidates", "claude:new:low,codex:custom:medium"),
+    ] {
+        let key = format!("kinds.rust-review.{leaf}");
+        let after = world
+            .at_terminal(&["settings", "set", &key, value])
+            .finish();
+        assert_eq!(after.code, 0, "{}", after.json);
+        assert_eq!(
+            after.json["data"]["changed"],
+            json!([{"key": key, "value": value, "origin": "config"}])
+        );
+    }
+    let before = fs::read_to_string(&file).unwrap();
+    assert!(before.contains("# my kinds") && before.contains("# my description"));
+    assert!(before.contains(&TASK_KINDS[TASK_KINDS.find("[kinds.zed]").unwrap()..]));
+    for (key, value) in [
+        ("kinds.rust-review.description", "bad\ntext"),
+        ("kinds.rust-review.role", "deploy"),
+        ("kinds.rust-review.candidates", "codex:m:high,codex:m:high"),
+        ("kinds.missing.role", "review"),
+        ("kinds.rust-review.cap", "100"),
+    ] {
+        let after = world.at_terminal(&["settings", "set", key, value]).finish();
+        assert_eq!(after.code, 2, "{}", after.json);
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    }
+    for leaf in ["description", "role", "candidates"] {
+        let missing = format!("kinds.missing.{leaf}");
+        let after = world.at_terminal(&["settings", "reset", &missing]).finish();
+        assert_eq!(after.code, 2, "{}", after.json);
+        assert_eq!(
+            after.json["message"],
+            "unknown task kind \"missing\" — define description, role and candidates together in [kinds.missing] in config.toml first"
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        let key = format!("kinds.rust-review.{leaf}");
+        let after = world.at_terminal(&["settings", "reset", &key]).finish();
+        assert_eq!(after.code, 2, "{}", after.json);
+        assert_eq!(
+            after.json["message"],
+            format!(
+                "{key} is required for this task kind — remove [kinds.rust-review] from config.toml to remove the kind"
+            )
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    }
+    let person = world
+        .as_a_person(&[
+            "settings",
+            "set",
+            "kinds.rust-review.description",
+            "Person's words.",
+        ])
+        .finish();
+    assert_eq!(person.code, 0);
+    assert!(person.json.is_null());
+    assert!(
+        person.text().contains(
+            "Saved to config.toml: [kinds.rust-review] description = \"Person's words.\""
+        )
+    );
+}
+
+#[test]
+fn the_page_edits_a_kind_role_and_candidate_order() {
+    for person in [false, true] {
+        let world = World::new();
+        world.configure(TASK_KINDS);
+        let terminal = if person {
+            world.as_a_person(&["settings"])
+        } else {
+            world.at_terminal(&["settings"])
+        };
+        terminal.wait_for("❯ Enabled");
+        terminal.resize(40, 180);
+        // Claude, Codex, meter, runs, review, roles, then the first kind.
+        for _ in 0..6 {
+            terminal.press(TAB);
+        }
+        terminal.wait_for("❯ Description");
+        terminal.wait_for("Change it with settings set kinds.rust-review.description");
+        terminal.press(ENTER);
+        terminal.press(DOWN);
+        terminal.wait_for("❯ Role");
+        terminal.press(ENTER);
+        terminal.wait_for("● review ✓ (find problems; read-only)");
+        terminal.press(DOWN);
+        terminal.press(ENTER);
+        terminal.wait_for("Saved to config.toml: [kinds.rust-review] role = \"explore\"");
+        terminal.press(DOWN);
+        terminal.wait_for("❯ Candidates");
+        terminal.press(ENTER);
+        terminal.wait_for("codex  custom  high");
+        terminal.wait_for("codex  custom  medium");
+        terminal.press(b" ");
+        terminal.press(DOWN);
+        terminal.press(b" ");
+        terminal.press(ENTER);
+        terminal.wait_for(
+            "Saved to config.toml: [kinds.rust-review] candidates, codex custom medium first",
+        );
+        terminal.press(ESC);
+        let after = terminal.finish();
+        assert_eq!(after.code, 0, "{}", after.text());
+        given_back(&after);
+        let config = cahoots::config::UserConfig::load(&world.config.join("config.toml")).unwrap();
+        let key = cahoots::model::TaskKindName::try_from("rust-review".to_string()).unwrap();
+        let entry = &config.kinds[&key];
+        assert_eq!(entry.description, "Review Rust.");
+        assert_eq!(entry.role, cahoots::model::Role::Explore);
+        assert_eq!(entry.candidates[0].effort, cahoots::model::Effort::Medium);
+        assert_eq!(entry.candidates[1].effort, cahoots::model::Effort::High);
+        if person {
+            assert!(after.json.is_null());
+            assert!(after.text().contains("2 settings changed"));
+        } else {
+            assert_eq!(after.json["data"]["changed"].as_array().unwrap().len(), 2);
+        }
+    }
+}

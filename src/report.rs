@@ -78,7 +78,8 @@ pub fn rows(stories: &[Story]) -> BTreeMap<String, (Candidate, Row)> {
 }
 
 /// `report --suggest`: what the outcome statistics say about each role's
-/// candidate order — the evidence per candidate, the one swap it supports (if
+/// candidate order — role-only evidence per candidate (kind runs still count
+/// in ordinary totals), the one swap it supports (if
 /// any), and whether that swap is in effect or only being SHOWN (shadow mode,
 /// the default). Computed against the order WITHOUT learning, so it reads as
 /// "default → suggestion".
