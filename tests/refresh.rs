@@ -49,6 +49,7 @@ fn dirs(world: &World) -> Dirs {
         home: world.home.clone(),
         config: world.config.clone(),
         state: world.state.clone(),
+        data: world.data.clone(),
         overridden: true,
     }
 }
@@ -131,8 +132,8 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, String> {
     found
 }
 
-fn everything(world: &World) -> [BTreeMap<PathBuf, String>; 3] {
-    [&world.home, &world.config, &world.state].map(|root| snapshot(root))
+fn everything(world: &World) -> [BTreeMap<PathBuf, String>; 4] {
+    [&world.home, &world.config, &world.state, &world.data].map(|root| snapshot(root))
 }
 
 /// Rewrites the file's stamp line as an older version wrote it.

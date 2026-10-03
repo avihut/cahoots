@@ -1045,6 +1045,7 @@ mod tests {
             home: PathBuf::from(home),
             config: PathBuf::from("/nowhere/config"),
             state: PathBuf::from("/nowhere/state"),
+            data: PathBuf::from("/nowhere/data"),
             overridden: true,
         }
     }
