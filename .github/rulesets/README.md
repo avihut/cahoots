@@ -32,13 +32,20 @@ gh api -X POST repos/{owner}/{repo}/rulesets --input .github/rulesets/main-integ
   because a bypass covers *every* rule of its ruleset: in that one, the app
   could move and delete tags too. No admin bypass: agents act with the
   maintainer's credentials, and an admin bypass would let any of them cut a
-  release by pushing a tag. The tag job refuses to run unless this is live.
+  release by pushing a tag. The tag job refuses to tag unless an active
+  ruleset covers every `v*` tag with a creation rule.
 - **release-pr is the release workflow's** — creating, pushing, force-pushing
   or deleting `release-pr` is refused to everyone but the same app. Separate
   for the same reason, and without admin bypass for the same reason: the
   release PR's branch is what a merge turns into a release, so only the
   workflow that builds it may write it. The maintain job refuses to push
-  unless this is live.
+  unless an active ruleset covers `release-pr` with these rules.
+
+The app's token can't see bypass lists, so the jobs check coverage only. That
+these two rulesets let the app and nobody else bypass them is the driver's
+audit with the maintainer's credentials, `mise run release-rulesets-audit`
+(`scripts/release-rulesets-audit.sh`), run when they are applied and before
+every merge of a release PR.
 
 `gate` and `pr-title` are spelled in four places — the ruleset, the two jobs
 that report them, and the auto-merge workflow's fail-closed test.

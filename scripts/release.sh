@@ -34,8 +34,11 @@ template='<!-- What the next release ships, in prose. This becomes the annotatio
      and the top section of CHANGELOG.md.
      The FIRST LINE is the tag'"'"'s subject: make it a short title, then a blank
      line. This comment is stripped. -->'
-# A PR body is capped at 65,536 characters; this leaves room to spare.
+# A PR body is capped at 65,536 characters; this leaves room to spare. Sizes
+# are counted in bytes, which never undercount characters. The commit list
+# may use at most half of it; the changelog gets the rest.
 body_limit=60000
+list_limit=30000
 commit_list_limit=300
 
 say() { printf 'release: %s\n' "$1" >&2; }
@@ -295,12 +298,49 @@ if [ "$verb" = pr-body ]; then
         git log --format='- %h %s' HEAD^ >"$scratch_dir/commits"
     fi
     count=$(wc -l <"$scratch_dir/commits" | tr -d ' ')
+    more=
     if [ "$count" -gt "$commit_list_limit" ]; then
-        head -n "$commit_list_limit" "$scratch_dir/commits" >"$scratch_dir/listed"
-        printf -- '- … and %d more\n' "$((count - commit_list_limit))" >>"$scratch_dir/listed"
-    else
-        cp "$scratch_dir/commits" "$scratch_dir/listed"
+        more=$(printf -- '- … and %d more' "$((count - commit_list_limit))")
     fi
+    head -n "$commit_list_limit" "$scratch_dir/commits" >"$scratch_dir/first"
+    # Every commit keeps its line and its sha; when the subjects together are
+    # over the list's share, each is shortened to the same longest length that
+    # fits, ending in "…". Bytes throughout (LC_ALL=C), and a cut never leaves
+    # half a UTF-8 character behind.
+    LC_ALL=C awk -v budget="$((list_limit - ${#more} * 3 - 1))" '
+        {
+            n++
+            space = index(substr($0, 3), " ") + 2
+            prefix[n] = substr($0, 1, space)
+            subject[n] = substr($0, space + 1)
+            if (length(subject[n]) > longest) longest = length(subject[n])
+        }
+        function cost(m,    i, total, l) {
+            for (i = 1; i <= n; i++) {
+                l = length(subject[i])
+                total += length(prefix[i]) + (l > m ? m + 3 : l) + 1
+            }
+            return total
+        }
+        END {
+            low = 0; high = longest
+            if (cost(high) > budget) {
+                while (low < high) {
+                    mid = int((low + high + 1) / 2)
+                    if (cost(mid) <= budget) low = mid; else high = mid - 1
+                }
+            }
+            for (i = 1; i <= n; i++) {
+                text = subject[i]
+                if (length(text) > high) {
+                    text = substr(text, 1, high)
+                    sub(/[\300-\377][\200-\277]*$/, "", text)
+                    text = text "…"
+                }
+                print prefix[i] text
+            }
+        }' "$scratch_dir/first" >"$scratch_dir/listed"
+    [ -z "$more" ] || printf '%s\n' "$more" >>"$scratch_dir/listed"
 
     {
         printf '<!-- cahoots-release version=%s base=%s since=%s -->\n' "$version" "$base" "${last:-none}"
@@ -316,17 +356,22 @@ if [ "$verb" = pr-body ]; then
     section "$version" HEAD >"$scratch_dir/section"
 
     cut_line='(cut short — CHANGELOG.md at the PR head is whole)'
+    printf '%s\n' "$cut_line" >"$scratch_dir/cut-line"
     fixed=$(cat "$scratch_dir/head" "$scratch_dir/tail" | wc -c | tr -d ' ')
     whole=$(wc -c <"$scratch_dir/section" | tr -d ' ')
     if [ $((fixed + whole)) -gt "$body_limit" ]; then
-        room=$((body_limit - fixed - ${#cut_line} - 2))
-        awk -v room="$room" '
+        room=$((body_limit - fixed - $(wc -c <"$scratch_dir/cut-line")))
+        LC_ALL=C awk -v room="$room" '
             { if (used + length($0) + 1 > room) exit; used += length($0) + 1; print }
         ' "$scratch_dir/section" >"$scratch_dir/cut"
-        printf '%s\n' "$cut_line" >>"$scratch_dir/cut"
+        cat "$scratch_dir/cut-line" >>"$scratch_dir/cut"
         mv "$scratch_dir/cut" "$scratch_dir/section"
     fi
-    cat "$scratch_dir/head" "$scratch_dir/section" "$scratch_dir/tail"
+    cat "$scratch_dir/head" "$scratch_dir/section" "$scratch_dir/tail" >"$scratch_dir/body"
+    size=$(wc -c <"$scratch_dir/body" | tr -d ' ')
+    [ "$size" -le "$body_limit" ] ||
+        refuse "the PR body came to $size bytes, over $body_limit — refusing to print it"
+    cat "$scratch_dir/body"
     exit 0
 fi
 

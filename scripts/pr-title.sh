@@ -70,10 +70,11 @@ release_pr=false
 if [ "$PR_HEAD_REF" = release-pr ] && [ -n "$PR_HEAD_REPO" ] && [ "$PR_HEAD_REPO" = "$PR_BASE_REPO" ]; then
     release_pr=true
 fi
+# The same prefix the commit-msg hook and release-check refuse by hand.
 release_title=false
-case "$PR_TITLE" in
-release:* | release\(*) release_title=true ;;
-esac
+if [[ "$PR_TITLE" =~ ^release(\(|!|:) ]]; then
+    release_title=true
+fi
 
 if $release_title && ! $release_pr; then
     refuse "a release title comes only from the release workflow's release-pr"

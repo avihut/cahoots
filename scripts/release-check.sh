@@ -30,7 +30,7 @@ version_at() {
         "$scratch_dir/manifest"
 }
 
-while read -r local_ref local_sha remote_ref remote_sha; do
+while read -r _local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$zero" ] && continue # a delete pushes nothing to check
 
     case "$remote_ref" in
@@ -43,7 +43,9 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         continue
         ;;
     esac
-    case "$local_ref" in
+    # A branch push is chosen by where it lands: the local side may be spelt
+    # HEAD, a sha or any expression, and its commits are checked all the same.
+    case "$remote_ref" in
     refs/heads/*) ;;
     *) continue ;;
     esac

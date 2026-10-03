@@ -131,6 +131,10 @@ run = "scripts/release.sh"
 description = "Check a PR's title and, for the release PR, its diff (env: PR_TITLE, PR_HEAD_REF, PR_HEAD_REPO, PR_BASE_REPO, PR_AUTHOR; HEAD = the merge ref)"
 run = "scripts/pr-title.sh"
 
+[tasks.release-rulesets-audit]
+description = "The driver's audit, with the maintainer's gh credentials: both release rulesets are active, cover their refs, and let only the release app bypass them (args: coverage|exclusive <tag|release-pr> <ruleset.json> for the pure check)"
+run = "scripts/release-rulesets-audit.sh"
+
 [tasks.formula]
 description = "Render the Homebrew formula dist would publish into target/distrib and check it against Cargo.toml (needs dist; checksums are placeholders; publishes nothing)"
 run = "scripts/formula.sh"

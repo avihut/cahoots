@@ -290,6 +290,13 @@ said "release-pr is the release workflow's branch"
 fails with_stdin "refs/heads/main $release refs/heads/main $base
 " "$scripts/release-check.sh"
 said 'is a release commit'
+# refuse:release-commit-from-non-branch-ref
+fails with_stdin "HEAD $release refs/heads/main $base
+" "$scripts/release-check.sh"
+said 'is a release commit'
+fails with_stdin "$release $release refs/heads/topic $zero
+" "$scripts/release-check.sh"
+said 'is a release commit'
 # Main, release commit included, is on the remote from here on.
 git update-ref refs/remotes/origin/main "$release"
 git checkout -q -b topic
@@ -306,6 +313,11 @@ set_version 0.9.0
 git add -A
 git commit -qm 'fix: a version smuggled into a fix'
 fails with_stdin "refs/heads/topic $(git rev-parse HEAD) refs/heads/topic $zero
+" "$scripts/release-check.sh"
+said "moves Cargo.toml's version 0.2.0 → 0.9.0"
+# refuse:version-move-from-non-branch-ref — git spells the local side as given
+# (`git push origin HEAD:main`, a sha); where it lands is what counts.
+fails with_stdin "HEAD $(git rev-parse HEAD) refs/heads/main $release
 " "$scripts/release-check.sh"
 said "moves Cargo.toml's version 0.2.0 → 0.9.0"
 git checkout -q main
@@ -418,19 +430,65 @@ rm stray.txt
 
 # pr-body: pass:pr-body-cap — 310 commits since the last tag list 300 and
 # say how many more.
-tree=$(git rev-parse 'HEAD^{tree}')
-tip=$(git rev-parse HEAD)
-i=0
-while [ "$i" -lt 308 ]; do
-    tip=$(git commit-tree -p "$tip" -m "docs: filler $i" "$tree")
-    i=$((i + 1))
-done
-git reset -q --hard "$tip"
+# body_fits: the body is within GitHub's limit with room to spare (bytes, which
+# never undercount characters), its marker is the first line, and it lists
+# its commits.
+body_fits() {
+    passes test "$(wc -c <"$tmp/body" | tr -d ' ')" -le 60000
+    passes grep -q '^<!-- cahoots-release version=' "$tmp/body"
+    passes grep -qxF -- '## Commits since v0.2.0' "$tmp/body"
+}
+fillers() { # <count> <subject text>: that many empty commits on HEAD
+    local tree tip i=0
+    tree=$(git rev-parse 'HEAD^{tree}')
+    tip=$(git rev-parse HEAD)
+    while [ "$i" -lt "$1" ]; do
+        tip=$(git commit-tree -p "$tip" -m "docs: filler $i $2" "$tree")
+        i=$((i + 1))
+    done
+    git reset -q --hard "$tip"
+}
+fillers 308 ''
 passes "$release_sh" commit
 passes "$release_sh" pr-body
 cp "$out" "$tmp/body"
 passes test "$(grep -cE '^- [0-9a-f]+ ' "$tmp/body")" = 300
 passes grep -qxF -- '- … and 10 more' "$tmp/body"
+passes grep -qF -- 'docs: filler 307' "$tmp/body" # short subjects stay whole
+body_fits
+# pass:pr-body-long-subjects — 300 subjects of ~250 bytes each would be 75,000
+# bytes of list alone: each is shortened to fit, and keeps its sha. Em dashes,
+# so a cut can land inside a character.
+git checkout -q -B release-pr main
+long=$(awk 'BEGIN { for (i = 0; i < 80; i++) printf "ab—" }')
+fillers 308 "$long"
+passes "$release_sh" commit
+passes "$release_sh" pr-body
+cp "$out" "$tmp/body"
+body_fits
+passes test "$(grep -cE '^- [0-9a-f]{7,} docs: filler [0-9]+ .*…$' "$tmp/body")" = 300
+passes grep -qxF -- '- … and 10 more' "$tmp/body"
+passes grep -qF -- "$(git rev-parse --short HEAD^)" "$tmp/body"
+# No cut leaves half a character: the body is still valid UTF-8.
+passes iconv -f UTF-8 -t UTF-8 "$tmp/body"
+# pass:pr-body-long-changelog — a 70,000-byte fragment is the section, cut to
+# fit with a line saying so, while the marker and the list stay whole.
+git checkout -q -B release-pr main
+mkdir -p .release-notes
+{
+    printf 'A long release\n\n'
+    awk 'BEGIN { for (i = 0; i < 1600; i++) printf "Line %04d of prose — the notes go on and on.\n", i }'
+} >.release-notes/next.md
+git add -A
+git commit -qm 'docs: long notes'
+passes "$release_sh" commit
+passes "$release_sh" pr-body
+cp "$out" "$tmp/body"
+body_fits
+passes grep -qxF -- '(cut short — CHANGELOG.md at the PR head is whole)' "$tmp/body"
+passes grep -qxF -- 'A long release' "$tmp/body"
+passes grep -qxF -- "- $(git rev-parse --short "$fix") fix(gate): something users would notice" "$tmp/body"
+passes test "$(wc -c <CHANGELOG.md | tr -d ' ')" -gt 70000 # the file itself is whole
 
 # pass:commit-fix — on a release-pr built from main.
 git checkout -q -B release-pr main
@@ -610,6 +668,10 @@ fails pr_title 'a title with no type' feat/x "$repo_name" avihut
 fails pr_title 'release: v0.3.0' feat/x "$repo_name" avihut
 said "a release title comes only from the release workflow's release-pr"
 fails pr_title 'release(cli): v0.3.0' feat/x "$repo_name" avihut
+# refuse:release-bang-title — `release!:` is a valid conventional subject, and
+# a release title all the same.
+fails pr_title 'release!: v0.3.0' feat/x "$repo_name" avihut
+said "a release title comes only from the release workflow's release-pr"
 # refuse:release-no-move — the release-pr name on a diff that moves nothing.
 fails pr_title 'release: v0.2.1' release-pr "$repo_name" "$bot"
 said 'does not move the version'
@@ -661,6 +723,68 @@ exits 2 env -u PR_AUTHOR PR_TITLE='fix: x' PR_HEAD_REF=fix/x PR_HEAD_REPO="$repo
     "$scripts/pr-title.sh"
 said 'usage:'
 git checkout -q main
+
+# ── release-rulesets-audit.sh ───────────────────────────────────────────────
+# The pure checks, on the shipped records and on records changed one way each.
+audit="$scripts/release-rulesets-audit.sh"
+tags_record="$root/.github/rulesets/release-tags-by-workflow.json"
+pr_record="$root/.github/rulesets/release-pr-by-workflow.json"
+variant() { # <record> <jq filter> → a changed copy, its path on stdout
+    local file
+    file="$tmp/ruleset-$checks-$RANDOM.json"
+    jq "$2" "$1" >"$file"
+    printf '%s\n' "$file"
+}
+# pass:records — what ships reserves both refs for the app alone.
+passes "$audit" coverage tag "$tags_record"
+passes "$audit" exclusive tag "$tags_record"
+passes "$audit" coverage release-pr "$pr_record"
+passes "$audit" exclusive release-pr "$pr_record"
+# refuse:usage
+exits 2 "$audit" coverage tag
+exits 2 "$audit" covers tag "$tags_record"
+exits 2 "$audit" coverage main "$tags_record"
+# refuse:exclusion-cancels — whole, in part, or by ~ALL; one elsewhere is fine.
+fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["refs/tags/v*"]')"
+said 'its exclusions cancel part of refs/tags/v'
+fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["refs/tags/v9*"]')"
+fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["refs/tags/*"]')"
+fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["~ALL"]')"
+passes "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["refs/tags/nightly-*"]')"
+fails "$audit" coverage release-pr "$(variant "$pr_record" '.conditions.ref_name.exclude = ["refs/heads/release-pr"]')"
+said 'its exclusions cancel part of refs/heads/release-pr'
+fails "$audit" coverage release-pr "$(variant "$pr_record" '.conditions.ref_name.exclude = ["refs/heads/release*"]')"
+passes "$audit" coverage release-pr "$(variant "$pr_record" '.conditions.ref_name.exclude = ["~DEFAULT_BRANCH"]')"
+# refuse:inclusion-too-narrow, and a wider one is fine.
+fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.include = ["refs/tags/v1*"]')"
+said 'it does not include all of refs/tags/v'
+passes "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.include = ["~ALL"]')"
+# refuse:not-active, refuse:wrong-target, refuse:missing-rule
+fails "$audit" coverage tag "$(variant "$tags_record" '.enforcement = "evaluate"')"
+said 'it is not active'
+fails "$audit" coverage release-pr "$tags_record"
+said 'it targets tag, not branch'
+fails "$audit" coverage release-pr "$(variant "$pr_record" '.rules |= map(select(.type != "update"))')"
+said 'it lacks the rules update'
+fails "$audit" coverage tag "$root/.github/rulesets/release-tags.json"
+said 'it lacks the rules creation'
+# refuse:extra-bypass-actor — an admin beside the app passes coverage, which
+# can't see it, and fails exclusivity.
+admin='.bypass_actors += [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]'
+passes "$audit" coverage tag "$(variant "$tags_record" "$admin")"
+fails "$audit" exclusive tag "$(variant "$tags_record" "$admin")"
+said 'its bypass list is not exactly the release app'
+fails "$audit" exclusive release-pr "$(variant "$pr_record" "$admin")"
+fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].actor_id = 1')"
+fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].bypass_mode = "pull_request"')"
+fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors = []')"
+# refuse:bypass-list-unseen — what a token without ruleset write access gets:
+# coverage holds, exclusivity is unknown, so it fails.
+passes "$audit" coverage tag "$(variant "$tags_record" 'del(.bypass_actors)')"
+fails "$audit" exclusive tag "$(variant "$tags_record" 'del(.bypass_actors)')"
+said 'its bypass list is not visible to these credentials'
+# Extra fields GitHub adds to a bypass entry change nothing.
+passes "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].node_id = "x"')"
 
 # ── formula.sh ──────────────────────────────────────────────────────────────
 # A formula written the way dist 0.30 writes one (platform branches, the alias

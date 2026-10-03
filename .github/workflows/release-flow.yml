@@ -27,8 +27,10 @@
 # maintain-release-pr needs this job, so nothing bumps past it.
 #
 # How it differs from daft's release-flow.yml: the app's secrets live in an
-# environment rather than the repository; each job refuses to push unless the
-# ruleset that reserves its ref for the app is live; the tag job reads the
+# environment rather than the repository; each job refuses to push unless an
+# active ruleset covers its ref with the rules that reserve it (the app's
+# token can't see bypass lists, so that they name the app alone is checked by
+# the driver's audit, scripts/release-rulesets-audit.sh); the tag job reads the
 # merged PR's head, fork status and author from GitHub's API, never from the
 # PR's text; no workflow_dispatch and no version override (the bump rules
 # decide); no label, no assignee, no toolchain — git, bash, awk, jq and the
@@ -64,9 +66,19 @@ jobs:
           permission-contents: write
           permission-pull-requests: read
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true # the tag is pushed with it
+          ref: ${{ github.sha }}
+
       # Fail closed: the app may create a v* tag only because a ruleset lets
-      # nobody else do so. Without that ruleset live, don't tag.
-      - name: Require v* tag creation to be restricted to the release app
+      # nobody else do so. Without an active ruleset that covers every v* tag
+      # with a creation rule, don't tag. This token can't see a ruleset's
+      # bypass actors, so it can't tell who else may bypass it: that is the
+      # driver's audit (`mise run release-rulesets-audit`, RELEASING.md).
+      - name: Require an active ruleset that restricts v* tag creation
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -74,10 +86,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=tag" >"$RUNNER_TEMP/rulesets.json"
           restricted=false
           for id in $(jq -r '.[] | select(.enforcement == "active") | .id' "$RUNNER_TEMP/rulesets.json"); do
-            gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" >"$RUNNER_TEMP/ruleset.json"
-            if jq -e '((.conditions.ref_name.include // []) | index("refs/tags/v*") != null)
-                      and ([.rules[]?.type] | index("creation") != null)' \
-                "$RUNNER_TEMP/ruleset.json" >/dev/null; then
+            gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" >"$RUNNER_TEMP/ruleset-$id.json"
+            if scripts/release-rulesets-audit.sh coverage tag "$RUNNER_TEMP/ruleset-$id.json"; then
               restricted=true
             fi
           done
@@ -85,14 +95,7 @@ jobs:
             echo "::error::v* tag creation is not restricted to the release app; refusing to tag. Apply .github/rulesets/release-tags-by-workflow.json."
             exit 1
           fi
-          echo "v* tag creation is restricted"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-          persist-credentials: true # the tag is pushed with it
-          ref: ${{ github.sha }}
+          echo "an active ruleset restricts v* tag creation (who bypasses it is the driver's audit)"
 
       - name: Git identity
         run: |
@@ -168,27 +171,35 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      # Fail closed: the app may force-push release-pr only because a ruleset
-      # lets nobody else push it. Without that ruleset live, don't push.
-      - name: Require release-pr to be restricted to the release app
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/rules/branches/release-pr" >"$RUNNER_TEMP/rules.json"
-          if ! jq -e '[.[].type] | (index("update") != null) and (index("creation") != null)' \
-              "$RUNNER_TEMP/rules.json" >/dev/null; then
-            echo "::error::release-pr is not restricted to the release app; refusing to push. Apply .github/rulesets/release-pr-by-workflow.json."
-            exit 1
-          fi
-          echo "release-pr is restricted"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true # release-pr is pushed with it
           ref: ${{ github.sha }}
+
+      # Fail closed: the app may force-push release-pr only because a ruleset
+      # lets nobody else write it. Without an active ruleset that covers
+      # release-pr with creation, update, deletion and non-fast-forward
+      # rules, don't push. As above, who bypasses it is the driver's audit.
+      - name: Require an active ruleset that restricts release-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=branch" >"$RUNNER_TEMP/rulesets.json"
+          restricted=false
+          for id in $(jq -r '.[] | select(.enforcement == "active") | .id' "$RUNNER_TEMP/rulesets.json"); do
+            gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" >"$RUNNER_TEMP/ruleset-$id.json"
+            if scripts/release-rulesets-audit.sh coverage release-pr "$RUNNER_TEMP/ruleset-$id.json"; then
+              restricted=true
+            fi
+          done
+          if [ "$restricted" != true ]; then
+            echo "::error::release-pr is not restricted to the release app; refusing to push. Apply .github/rulesets/release-pr-by-workflow.json."
+            exit 1
+          fi
+          echo "an active ruleset restricts release-pr (who bypasses it is the driver's audit)"
 
       - name: Git identity
         run: |

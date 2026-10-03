@@ -64,7 +64,8 @@ fragment.
 
 **Merge the release PR at its head** — that is the whole act. The release
 button on the desk does it, after checking that the PR is fresh (its base is
-`main`'s tip) and green:
+`main`'s tip) and green, and after the driver's audit of the release rulesets
+passes (below):
 
 ```sh
 gh pr merge <N> --squash --match-head-commit <head sha> --body-file <the CHANGELOG section>
@@ -74,6 +75,21 @@ The squash subject is GitHub's default, `release: vX.Y.Z (#N)`. A PR merged
 while `main` had just moved ships commits that its changelog doesn't list, so
 don't merge a release PR whose base isn't `main`'s tip: wait for the workflow
 to rebuild it.
+
+**The rulesets audit.** The workflow's own token can see whether an active
+ruleset covers `v*` tags and `release-pr` with the right rules, and its jobs
+refuse to push when none does. It can't see a ruleset's bypass list, so it
+can't tell whether anyone besides the app may bypass it. That is checked with
+the maintainer's credentials — by the driver, when the rulesets are applied
+and again right before every merge of a release PR:
+
+```sh
+mise run release-rulesets-audit
+```
+
+It fails unless both rulesets are active, cover their refs (inclusions minus
+exclusions) with the rules their records name, and let exactly the Wheatley
+app (integration 2607344) bypass them.
 
 Before clicking, check the Homebrew formula dist would publish:
 
@@ -117,10 +133,13 @@ Merging this PR is the release of cahoots vX.Y.Z (from <current>). …
 ```
 
 The commit list is every commit since the last tag, newest first, up to 300
-(then `- … and N more`). A body that would pass 60,000 characters has its
-changelog section cut, with a line saying so; `CHANGELOG.md` at the PR's head
-is always whole, and it — not the editable body — is what the tag is
-annotated with.
+(then `- … and N more`). The body stays under 60,000 bytes, which never
+undercounts characters: the list may take half of that, and if its subjects
+are longer, each is shortened to the same length and ends in `…` — every line
+keeps its sha. The changelog section gets the rest, and is cut with a line
+saying so when it doesn't fit; `CHANGELOG.md` at the PR's head is always
+whole, and it — not the editable body — is what the tag is annotated with.
+`release.sh pr-body` refuses rather than print a body over the limit.
 
 ## What stands in for the signed tag
 
@@ -134,11 +153,19 @@ commit as the release". Now that is said by
   creates a `v*` tag) and `release tags are immutable` (nobody moves one).
 
 What users gain on top is build provenance. To check that an archive was built
-by this repository's release workflow from the tagged commit:
+by this repository's release workflow, from the tag and the commit it names:
 
 ```sh
-gh attestation verify <archive> -R avihut/cahoots
+tag=vX.Y.Z
+gh attestation verify <archive> -R avihut/cahoots \
+  --signer-workflow avihut/cahoots/.github/workflows/release.yml \
+  --source-ref "refs/tags/$tag" \
+  --source-digest "$(gh api "repos/avihut/cahoots/commits/$tag" --jq .sha)"
 ```
+
+`-R` alone proves only that something in this repository built the archive;
+`--signer-workflow` pins it to `release.yml`, and `--source-ref` and
+`--source-digest` to the tag and the release commit it names.
 
 ## After a release
 
@@ -175,7 +202,8 @@ red runs, and no harm.
    gh api -X POST repos/avihut/cahoots/rulesets --input .github/rulesets/release-pr-by-workflow.json
    ```
 
-   Confirm that 2607344 is the Wheatley app's id first.
+   Confirm that 2607344 is the Wheatley app's id first, then run
+   `mise run release-rulesets-audit`: both must hold.
 4. **Keep Actions' default workflow permissions `read`.** With `write`, any
    branch's workflow could push a `v*` tag before the rulesets existed.
 - **`HOMEBREW_TAP_TOKEN`** — a repository secret on `avihut/cahoots`: a
