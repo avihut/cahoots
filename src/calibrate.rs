@@ -143,6 +143,7 @@ mod tests {
                 kind: None,
                 caller: None,
                 target: target.clone(),
+                blind: false,
                 dir: PathBuf::from("/w"),
                 state: *state,
                 exit: 0,

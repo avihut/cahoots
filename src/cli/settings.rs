@@ -472,6 +472,10 @@ fn words(key: &Key) -> (String, String) {
              spends that agent's plan."
                 .to_string(),
         ),
+        Key::Blind => (
+            "Blind runs",
+            "Hide the model and effort until the run’s outcome is recorded, so the answer is judged before its author is known.".to_string(),
+        ),
         Key::SampleRate => (
             "Sample",
             "The share of finished runs offered for review.".to_string(),

@@ -512,3 +512,113 @@ fn the_page_edits_a_kind_role_and_candidate_order() {
         }
     }
 }
+
+#[test]
+fn blind_setting_toggles_sets_and_resets_without_touching_other_config() {
+    use cahoots::settings::{Key, Origin, Value, current};
+    let world = World::new();
+    world.configure(&format!(
+        "review.enabled = false\n# keep this comment\n{TASK_KINDS}"
+    ));
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let row = || {
+        let config = cahoots::config::UserConfig::load(&file).unwrap();
+        current(&config, None, None)
+            .into_iter()
+            .find(|s| s.key == Key::Blind)
+            .unwrap()
+    };
+    let default = row();
+    assert_eq!(default.value, Some(Value::Bool(false)));
+    assert_eq!(default.origin, Origin::Default);
+    assert!(!default.locked);
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    for _ in 0..4 {
+        terminal.press(TAB);
+    }
+    terminal.wait_for("❯ Review runs");
+    terminal.press(DOWN);
+    terminal.wait_for("❯ Blind runs");
+    terminal.resize(30, 180);
+    terminal.wait_for("Hide the model and effort until the run’s outcome is recorded, so the answer is judged before its author is known.");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [review] blind = true");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    assert_eq!(
+        after.json["data"]["changed"],
+        json!([{"key": "review.blind", "value": true, "origin": "config"}])
+    );
+    given_back(&after);
+    assert_eq!(row().value, Some(Value::Bool(true)));
+    assert_eq!(row().origin, Origin::Config);
+    assert!(!row().locked);
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("# keep this comment"));
+    assert!(text.contains(TASK_KINDS));
+    let reset = world
+        .at_terminal(&["settings", "reset", "review.blind"])
+        .finish();
+    assert_eq!(reset.code, 0, "{}", reset.json);
+    assert_eq!(
+        reset.json["data"]["changed"],
+        json!([{"key": "review.blind", "value": false, "origin": "default"}])
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    for value in ["true", "false"] {
+        let set = world
+            .at_terminal(&["settings", "set", "review.blind", value])
+            .finish();
+        assert_eq!(set.code, 0, "{}", set.json);
+        assert_eq!(row().value, Some(Value::Bool(value == "true")));
+        assert_eq!(row().origin, Origin::Config);
+    }
+    assert_eq!(
+        world
+            .at_terminal(&["settings", "reset", "review.blind"])
+            .finish()
+            .code,
+        0
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn blind_setting_rejects_nonbooleans_and_remains_human_only() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let invalid = world
+        .at_terminal(&["settings", "set", "review.blind", "maybe"])
+        .finish();
+    assert_eq!(invalid.code, 2, "{}", invalid.json);
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    // Policy through its pure refusal function, with isolated configuration.
+    for args in [
+        vec!["settings"],
+        vec!["settings", "set", "review.blind", "true"],
+        vec!["settings", "reset", "review.blind"],
+    ] {
+        let mut argv = vec!["cahoots"];
+        argv.extend(args);
+        let cli = <cahoots::cli::Cli as clap::Parser>::try_parse_from(argv).unwrap();
+        assert_eq!(
+            cahoots::cli::refusal(&cli.verb, false).unwrap().exit.code(),
+            33
+        );
+    }
+    for value in ["'true'", "1"] {
+        world.configure(&format!("review.blind = {value}"));
+        let config_before = fs::read_to_string(&file).unwrap();
+        let error = world.at_terminal(&["settings"]).finish();
+        assert_eq!(error.code, 34, "{}", error.json);
+        assert_eq!(error.json["class"], "config_error");
+        assert_eq!(error.json["retry"], "fix_config");
+        assert_eq!(fs::read_to_string(&file).unwrap(), config_before);
+        assert_eq!(world.run("answer", &[]).code, 34);
+        assert!(!world.state.join("runs").exists());
+    }
+}

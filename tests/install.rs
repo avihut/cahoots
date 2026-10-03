@@ -85,6 +85,30 @@ fn install_writes_stamped_files_and_is_idempotent() {
         let text = fs::read_to_string(home.dirs.home.join(path)).unwrap();
         assert!(text.contains("cahoots_version"), "{path} carries no stamp");
         assert!(!text.contains("{{version}}"), "{path} was not rendered");
+        if path.ends_with("/cahoots/SKILL.md") {
+            for words in [
+                "data.blind",
+                "honest outcome",
+                "status <run>",
+                "harness stays",
+                "aggregate reports",
+                "diagnostic text",
+                "off by default",
+            ] {
+                assert!(text.contains(words), "{path} lacks {words:?}");
+            }
+        }
+        if path.ends_with("/cahoots-review/SKILL.md") {
+            for words in [
+                "data.next.blind",
+                "honest",
+                "does not reveal",
+                "aggregate reports",
+                "harness remains",
+            ] {
+                assert!(text.contains(words), "{path} lacks {words:?}");
+            }
+        }
     }
     // Install IS update: a second run has nothing to do.
     for report in install(&home.dirs, None, false).unwrap() {

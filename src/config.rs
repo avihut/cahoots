@@ -178,11 +178,12 @@ pub struct LedgerConfig {
     pub max_tokens_per_day: Option<u64>,
 }
 
-/// Review and local learning. OFF unless a person turns it on: it spends the
-/// reviewing harness's own plan, and it changes how cahoots behaves over time.
+/// Review and local learning are off by default. Reviewing spends the caller's
+/// plan; blindness independently controls the presentation of run identity.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
+    pub blind: Option<bool>,
     pub enabled: Option<bool>,
     /// The share of finished runs offered for review. 0.0–1.0, default 0.2.
     pub sample_rate: Option<f64>,

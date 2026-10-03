@@ -92,6 +92,12 @@ supervisor, and there is no second, foreground path to keep honest.
   `--ephemeral`: it also suppresses the rollout file that carries Codex's
   rate-limit snapshot, which is what the gate reads.
 
+Blind runs snapshot `[review] blind` at launch, including each new resume.
+Private records and Finished history keep the full candidate and original
+policy. Run envelopes and `review next` omit model and effort until a folded
+outcome for that run exists; run envelopes also omit `model_reported`. Older
+records and history default to open. The answer itself is never rewritten.
+
 ## The gate (M1)
 
 Admit only if `used + reserve(role) ≤ cap`. The reserve (3 points for a

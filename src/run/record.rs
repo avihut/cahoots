@@ -66,6 +66,9 @@ pub struct RunRecord {
     pub kind: Option<TaskKindName>,
     pub caller: Option<HarnessId>,
     pub target: Candidate,
+    /// Launch-time policy; an outcome changes the public view, not this flag.
+    #[serde(default)]
+    pub blind: bool,
     /// Where the callee works. For a fork this is the BASE until the
     /// supervisor has cut the worktree, and the worktree from then on.
     pub cwd: PathBuf,

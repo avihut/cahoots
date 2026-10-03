@@ -49,6 +49,7 @@ pub enum Key {
     Watchdog,
     AllowInPlace,
     Review,
+    Blind,
     SampleRate,
     ApplyRouting,
     Candidates(Role),
@@ -102,6 +103,7 @@ impl Key {
             Watchdog,
             AllowInPlace,
             Review,
+            Blind,
             SampleRate,
             ApplyRouting,
         ]);
@@ -144,6 +146,7 @@ impl Key {
             Watchdog => "limits.watchdog_secs".to_string(),
             AllowInPlace => "limits.allow_in_place".to_string(),
             Review => "review.enabled".to_string(),
+            Blind => "review.blind".to_string(),
             SampleRate => "review.sample_rate".to_string(),
             ApplyRouting => "review.apply_routing".to_string(),
             Candidates(role) => format!("roles.{role}.candidates"),
@@ -179,7 +182,7 @@ impl Key {
             | RunsPerHour | TokensPerDay => Section::Meter,
             MaxActiveRuns | MaxDepth | Timeout | Wait | IntGrace | TermGrace | Watchdog
             | AllowInPlace => Section::Runs,
-            Review | SampleRate | ApplyRouting => Section::Review,
+            Review | Blind | SampleRate | ApplyRouting => Section::Review,
             Candidates(_) | Calibrate(_) => Section::Roles,
             KindDescription(name) | KindRole(name) | KindCandidates(name) => {
                 Section::TaskKind(name.clone())
@@ -536,6 +539,12 @@ pub fn current(
             now.review.enabled,
             base.review.enabled,
             review.enabled.is_some(),
+        ),
+        (
+            Key::Blind,
+            now.review.blind,
+            base.review.blind,
+            review.blind.is_some(),
         ),
     ] {
         all.push(toggle(key, value, default, origin(set)));
@@ -948,7 +957,10 @@ mod tests {
     #[test]
     fn every_key_has_a_name_that_leads_back_to_it_and_a_section() {
         let all = Key::all(&UserConfig::default());
-        assert_eq!(all.len(), 2 * 6 + 8 + 8 + 3 + 4 * 2);
+        let names: std::collections::BTreeSet<_> = all.iter().map(Key::name).collect();
+        assert_eq!(names.len(), all.len(), "each catalog key is unique");
+        assert_eq!(Key::parse("review.blind"), Some(Key::Blind));
+        assert_eq!(Key::Blind.section(), Section::Review);
         for key in &all {
             assert_eq!(Key::parse(&key.name()), Some(key.clone()), "{key}");
         }

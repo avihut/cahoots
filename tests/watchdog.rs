@@ -14,11 +14,26 @@ fn a_run_is_stopped_when_its_target_crosses_the_abort_threshold() {
     let world = World::new();
     world.meter(
         json!({"guarded": {"code": 0, "percent": 40}, "watch": {"code": 24, "percent": 93}}),
-        KNOBS,
+        &format!("{KNOBS}\nreview.blind = true"),
     );
     let answer = world.run("FAKE: sleep=120", &["--wait", "60"]);
     assert_eq!(answer.code, 43, "{}", answer.json);
     assert_eq!(answer.data()["state"], "budget");
+    assert_eq!(answer.data()["blind"], true);
+    assert_eq!(answer.data()["target"], json!({"harness": "codex"}));
+    assert!(answer.data().get("model_reported").is_none());
+    let id = answer.run_id();
+    common::wait_until("budget run history", || {
+        std::fs::read_to_string(world.state.join("history.jsonl"))
+            .unwrap_or_default()
+            .contains(&id)
+    });
+    assert_eq!(world.ask(&["outcome", &id, "discarded"]).code, 0);
+    let revealed = world.ask(&["result", &id]);
+    assert_eq!(revealed.code, 43);
+    assert_eq!(revealed.data()["blind"], false);
+    assert_eq!(revealed.data()["target"], world.record(&id)["target"]);
+    assert!(revealed.data().get("model_reported").is_some());
     assert_eq!(answer.json["retry"], "after_reset");
     assert!(
         answer.message().contains("90%") && answer.message().contains("93% used"),

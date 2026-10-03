@@ -279,7 +279,19 @@ settings: `use` is what turns a meter on.
 
 ## Learning from your own results
 
-This is off unless you set `[review] enabled = true`. Then, for about one run
+Set `[review] blind = true` (off by default) to judge results before seeing
+their model and effort. Each new run, including a resume, keeps its launch-time
+policy. Run envelopes and `review next` mark withheld identity with
+`blind: true` and omit model and effort; run envelopes also omit
+`model_reported`. After an honest `outcome` for that run, subsequent
+`status`/`result` views restore identity with `blind: false`. This works
+independently of review being enabled. The harness remains visible; `pick`,
+aggregate reports, config, answer and brief text, diagnostics, known kinds and
+related runs may still disclose identity. No content is rewritten, and this
+is not anonymity or access control. Change it on the settings page or with
+`cahoots settings set review.blind true`; reset returns to false.
+
+Review is off unless you set `[review] enabled = true`. Then, for about one run
 in five, the agent that delegated it is asked to review it, choosing from a
 fixed list of possible findings. When reviews of two different runs in two
 different directories agree, your agents see a short note about it before
