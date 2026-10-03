@@ -375,6 +375,9 @@ fn row_lines(row: &Value, floor: u64) -> Vec<String> {
         if !outcomes.is_empty() {
             lines.push(format!("Outcomes: {}", outcomes.join(", ")));
         }
+        if let Some(survival) = row.get("survival") {
+            lines.push(kept(survival));
+        }
         let mut cost = format!("Median time {}", duration(n("median_secs")));
         if n("tokens_in") + n("tokens_out") > 0 {
             cost.push_str(&format!(
@@ -395,6 +398,49 @@ fn row_lines(row: &Value, floor: u64) -> Vec<String> {
         }
     }
     lines
+}
+
+/// How much of a row's writers' diffs survived: the settled share and how
+/// many fell since their first measure, the share still settling, then
+/// what is unknown and what is not measured yet. Zero parts are left out.
+fn kept(survival: &Value) -> String {
+    let percent = |share: &Value| share.as_f64().map(|share| (share * 100.0).round() as u64);
+    let mut shares = Vec::new();
+    for (bucket, label) in [("settled", "settled"), ("early", "still settling")] {
+        let part = &survival[bucket];
+        let runs = part["runs"].as_u64().unwrap_or(0);
+        if runs == 0 {
+            continue;
+        }
+        let mut said = match (bucket, percent(&part["share"])) {
+            ("settled", Some(share)) => {
+                format!("{share}% of {}", count(runs, "settled run", "settled runs"))
+            }
+            (_, Some(share)) => format!("{share}% of {runs} {label}"),
+            ("settled", None) => format!(
+                "nothing to count in {}",
+                count(runs, "settled run", "settled runs")
+            ),
+            (_, None) => format!("nothing to count in {runs} {label}"),
+        };
+        let fell = part["fell"].as_u64().unwrap_or(0);
+        if fell > 0 {
+            said.push_str(&format!(" ({fell} fell)"));
+        }
+        shares.push(said);
+    }
+    let mut rest = Vec::new();
+    for (field, words) in [("unknown", "unknown"), ("unmeasured", "not measured yet")] {
+        let n = survival[field].as_u64().unwrap_or(0);
+        if n > 0 {
+            rest.push(format!("{n} {words}"));
+        }
+    }
+    let parts: Vec<String> = [shares.join(", "), rest.join(", ")]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect();
+    format!("Kept: {}", parts.join(" · "))
 }
 
 /// The sentence for evidence that is too thin to put numbers on.
@@ -812,6 +858,51 @@ mod tests {
              │\n\
              └  12 runs in the last day\n",
             "no outcomes and no tokens: no words for them"
+        );
+    }
+
+    #[test]
+    fn report_says_how_much_of_a_writers_diff_survived() {
+        let row = |survival: serde_json::Value| {
+            serde_json::json!({
+                "days": 30,
+                "runs": 10,
+                "by_role_and_target": {
+                    "implement · codex · m · high": {
+                        "runs": 10, "done": 10, "accepted": 10, "median_secs": 60,
+                        "survival": survival
+                    }
+                }
+            })
+        };
+        let said = |survival| shown(&reported("cahoots report".into(), &row(survival)));
+        let all = said(serde_json::json!({
+            "settled": {"runs": 4, "share": 0.7, "fell": 1},
+            "early": {"runs": 3, "share": 0.55},
+            "unknown": 2,
+            "unmeasured": 0
+        }));
+        assert!(
+            all.contains(
+                "│  Outcomes: 10 accepted\n\
+                 │  Kept: 70% of 4 settled runs (1 fell), 55% of 3 still settling · 2 unknown\n\
+                 │  Median time"
+            ),
+            "{all}"
+        );
+        let one = said(serde_json::json!({
+            "settled": {"runs": 1, "share": null, "fell": 0},
+            "unknown": 0,
+            "unmeasured": 0
+        }));
+        assert!(
+            one.contains("│  Kept: nothing to count in 1 settled run\n"),
+            "{one}"
+        );
+        let unknown = said(serde_json::json!({"unknown": 1, "unmeasured": 2}));
+        assert!(
+            unknown.contains("│  Kept: 1 unknown, 2 not measured yet\n"),
+            "{unknown}"
         );
     }
 

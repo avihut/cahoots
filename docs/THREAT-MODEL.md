@@ -35,7 +35,8 @@ directory permissions are already broken.
 cancel outcome notes review` — are the only ones the printed rules name. Human verbs
 (`install`, `uninstall`, `settings`, `enable`, `learn`, `registry`) change what
 cahoots may do, and refuse to run without a terminal on stdin. A test pins the agent tier
-by name: growing it is a change to this document.
+by name: growing it is a change to this document. `outcome` starts `git` too:
+for a fork writer, it measures how much of its diff survived (Writers).
 
 **No flag widens authority.** There is no `--ungated`; the gate is bypassed
 only by configuration, which is a human's file. cahoots writes it only through
@@ -209,8 +210,10 @@ recorded — as is a plain `git worktree` — and every `git` that cuts, reads o
 and the one `daft` starts — is given an empty hooks directory of cahoots' own
 and `core.fsmonitor=false`, as configuration above every config file.
 (cahoots' other `git` calls read: `rev-parse` where a repository is, and the
-commit every run starts from; and, for a writer, the `diff` and `ls-files`
-that keep its patch. They get the same empty hooks directory and
+commit every run starts from; for a writer, the `diff` and `ls-files`
+that keep its patch; and, for a fork writer that has a recorded patch,
+`rev-parse` and a `diff` between two commits, run when `outcome` is recorded
+and by `report`. They get the same empty hooks directory and
 `core.fsmonitor=false`.) The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
@@ -320,6 +323,35 @@ directory then fails the pin is refused before the writer starts and left
 where it is: no run on record points at it, so the refusal names its path,
 for a person to remove.
 
+**How much of a writer's diff survived.** `outcome`, an agent verb that runs
+outside the sandbox, and `report` read the caller's repository once more to
+say how much of a writer's patch is still part of it. They read **commits
+only**: the repository is found from the run's directory and held to the
+binary policy like every `git`; HEAD and the recorded base commit are
+resolved to full hashes (a hash read from a record is validated hex before it
+is ever an argument); then `git diff <base> <head>` compares two trees, with
+`--no-ext-diff`, `--no-textconv`, `--ignore-submodules=all`, `--no-pager`, and
+every option that shapes the output on the command line. No worktree and no
+index is read, so no clean filter, no fsmonitor and no submodule's own `git`
+runs; no path from the history is ever put on a command line except the
+repository's own git directory, which is typed and re-checked (next).
+**The repository is the one the run started in, pinned.** When a run starts,
+before any writer exists, cahoots records the git directory of the caller's
+tree and the repository's common directory: canonical, a git directory, owned
+by the person, and at git's layout (the tree's directory is the common one or
+`<common>/worktrees/<name>` with a `commondir` that names it) — the way a
+fork's git directory is pinned. Every read passes `--git-dir=<that
+directory>`; the tree's `.git`, which an agent that worked in the tree could
+have rewritten to name a repository of its own, is never followed. The pin is
+checked again when it is used; one that is no longer the repository's refuses
+and reads nothing (`pin_changed`). If the tree's worktree was removed, the
+repository's own HEAD is used. The output is compared in memory and only
+counts and a hash are kept. A failure of any step — including a refused `git`
+— records "unknown" and never changes an exit code. What remains: an agent
+with write access to the real git directory can change that repository, which
+is the person's own; nothing it writes there can run a command under these
+options. Survival is data (rule 6): nothing in routing reads it.
+
 ## Learning is an injection channel
 
 A callee's output is read by a reviewing agent, whose finding becomes a note
@@ -366,7 +398,9 @@ Role calibration uses only runs without a task kind; a kind's candidate
 list is left in the order a person wrote.
 The history keeps, for a writer, the repo-relative paths it touched and a
 hash and line count of each changed block — derived from content, never
-content — and like everything learned it stays on this machine.
+content — and, for a fork writer, the two git-directory paths of its pin and
+each measurement of how much of its diff survived (a commit hash and two
+counts). Like everything learned it stays on this machine.
 
 ## What cahoots never does
 

@@ -12,7 +12,10 @@
 //! answer, no file content: ids, enums, counts, the working directory, the
 //! commit a run started from, and for a writer the repo-relative paths it
 //! touched and a hash and line count of each block it changed — derived from
-//! content, never content.
+//! content, never content. A fork writer's line also holds where its
+//! repository's git directories are (`base_repo`), and each measurement of
+//! how much of its diff survived is a line of its own: a commit id and two
+//! counts.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -27,6 +30,7 @@ use crate::exit::{Fail, Res};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::patch::{Commit, PatchSummary};
 use crate::run::record::{RunRecord, State, now};
+use crate::survival::{Measure, RepoPin, Why};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +82,12 @@ pub enum Event {
         /// A fork writer's patch, summed up; it outlives the patch itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         patch: Option<PatchSummary>,
+        /// The run this one continues.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resumed_from: Option<String>,
+        /// A fork's repository, pinned at launch (`survival::RepoPin`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_repo: Option<Box<RepoPin>>,
     },
     Outcome {
         t: u64,
@@ -94,6 +104,19 @@ pub enum Event {
     },
     /// A person's `learn reset`: reviews before this moment no longer count.
     Forget { t: u64 },
+    /// How much of a fork writer's diff survived, measured at `t`
+    /// (`survival`): against which HEAD, and how many of its blocks were
+    /// kept of those counted — or why that is unknown.
+    Survival {
+        t: u64,
+        run: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tip: Option<Commit>,
+        kept: u32,
+        counted: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unknown: Option<Why>,
+    },
 }
 
 fn path(dirs: &Dirs) -> PathBuf {
@@ -161,6 +184,8 @@ pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
         sampled: is_sampled(&record.id, sample_rate),
         base_commit: record.base_commit.clone(),
         patch: record.patch.clone(),
+        resumed_from: record.resumed_from.clone(),
+        base_repo: record.base_repo.clone().map(Box::new),
     }
 }
 
@@ -184,8 +209,15 @@ pub struct Story {
     pub sampled: bool,
     pub base_commit: Option<Commit>,
     pub patch: Option<PatchSummary>,
+    pub resumed_from: Option<String>,
+    /// Never shown: the pin stays out of what agents read.
+    #[serde(skip)]
+    pub base_repo: Option<RepoPin>,
     /// `None` means unknown — never inferred from anything else.
     pub outcome: Option<Outcome>,
+    /// Every survival measurement, in the order of the file.
+    #[serde(skip)]
+    pub measures: Vec<(u64, Measure)>,
 }
 
 pub fn stories(events: &[Event]) -> Vec<Story> {
@@ -210,6 +242,8 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                 sampled,
                 base_commit,
                 patch,
+                resumed_from,
+                base_repo,
             } => {
                 by_run.insert(
                     run,
@@ -231,7 +265,10 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                         sampled: *sampled,
                         base_commit: base_commit.clone(),
                         patch: patch.clone(),
+                        resumed_from: resumed_from.clone(),
+                        base_repo: base_repo.as_deref().cloned(),
                         outcome: None,
+                        measures: Vec::new(),
                     },
                 );
             }
@@ -239,6 +276,28 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
             Event::Outcome { run, outcome, .. } => {
                 if let Some(story) = by_run.get_mut(run.as_str()) {
                     story.outcome = Some(*outcome);
+                }
+            }
+            // A measurement of a run that is not here is ignored, like an
+            // orphan outcome.
+            Event::Survival {
+                t,
+                run,
+                tip,
+                kept,
+                counted,
+                unknown,
+            } => {
+                if let Some(story) = by_run.get_mut(run.as_str()) {
+                    story.measures.push((
+                        *t,
+                        Measure {
+                            tip: tip.clone(),
+                            kept: *kept,
+                            counted: *counted,
+                            unknown: *unknown,
+                        },
+                    ));
                 }
             }
             Event::Review { .. } | Event::Forget { .. } => {}
@@ -340,6 +399,78 @@ mod tests {
 
         // A base commit that is not one does not parse, and the line is skipped.
         let forged = raw.replace(sha, "--exec=x");
+        assert!(serde_json::from_str::<Event>(&forged).is_err());
+    }
+
+    #[test]
+    fn survival_lines_fold_into_their_run_and_orphans_are_ignored() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let lines = [
+            format!(
+                r#"{{"kind":"survival","t":4,"run":"orphan","tip":"{sha}","kept":1,"counted":1}}"#
+            ),
+            OLD_FINISHED.to_string(),
+            format!(r#"{{"kind":"survival","t":11,"run":"a","tip":"{sha}","kept":3,"counted":4}}"#),
+            r#"{"kind":"survival","t":12,"run":"a","kept":0,"counted":0,"unknown":"base_gone"}"#
+                .to_string(),
+            r#"{"kind":"survival","t":13,"run":"a","kept":0,"counted":0,"unknown":"made_up"}"#
+                .to_string(),
+        ];
+        let events: Vec<Event> = lines
+            .iter()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(events.len(), 4, "an unknown reason is not one");
+        let folded = stories(&events);
+        assert_eq!(folded.len(), 1);
+        let measures = &folded[0].measures;
+        assert_eq!(measures.len(), 2);
+        assert_eq!(measures[0].0, 11);
+        assert_eq!(measures[0].1.tip.as_ref().unwrap().as_str(), sha);
+        assert_eq!((measures[0].1.kept, measures[0].1.counted), (3, 4));
+        assert_eq!(measures[1].1.unknown, Some(Why::BaseGone));
+        // Written back, an unknown one has no tip at all.
+        let raw = serde_json::to_string(&events[3]).unwrap();
+        assert_eq!(
+            raw,
+            r#"{"kind":"survival","t":12,"run":"a","kept":0,"counted":0,"unknown":"base_gone"}"#
+        );
+        let raw = serde_json::to_string(&events[2]).unwrap();
+        assert!(!raw.contains("unknown"), "{raw}");
+    }
+
+    #[test]
+    fn a_finished_line_carries_the_pin_and_the_run_it_continues() {
+        let old: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        let folded = stories(std::slice::from_ref(&old));
+        assert!(folded[0].resumed_from.is_none() && folded[0].base_repo.is_none());
+        let raw = serde_json::to_string(&old).unwrap();
+        assert!(
+            !raw.contains("resumed_from") && !raw.contains("base_repo"),
+            "{raw}"
+        );
+
+        let line = OLD_FINISHED.replace(
+            r#""sampled":true"#,
+            r#""sampled":true,"resumed_from":"z","base_repo":{"tree":"/r/.git/worktrees/w","common":"/r/.git"}"#,
+        );
+        let event: Event = serde_json::from_str(&line).unwrap();
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["resumed_from"], "z");
+        assert_eq!(json["base_repo"]["tree"], "/r/.git/worktrees/w");
+        assert_eq!(json["base_repo"]["common"], "/r/.git");
+        let folded = stories(&[event]);
+        assert_eq!(folded[0].resumed_from.as_deref(), Some("z"));
+        assert_eq!(
+            folded[0].base_repo.as_ref().unwrap().common,
+            PathBuf::from("/r/.git")
+        );
+        // A story never shows its pin.
+        let shown = serde_json::to_value(&folded[0]).unwrap();
+        assert!(shown.get("base_repo").is_none(), "{shown}");
+
+        // A pin that is not absolute paths does not parse.
+        let forged = line.replace("/r/.git\"}", "--exec=x\"}");
         assert!(serde_json::from_str::<Event>(&forged).is_err());
     }
 

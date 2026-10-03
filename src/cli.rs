@@ -263,6 +263,7 @@ pub enum Tier {
     /// Changes authority or learned state. Needs a terminal on stdin.
     Human,
     /// Reads and reports. No rule is printed for it, and none is needed.
+    /// `report` also files the survival it measured in the history.
     Inspect,
     /// cahoots calling itself.
     Internal,

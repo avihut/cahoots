@@ -104,6 +104,11 @@ pub struct RunRecord {
     /// is kept (`patch.diff`). `None` for every other run.
     #[serde(default)]
     pub patch: Option<PatchSummary>,
+    /// A fork's repository, pinned by the client at launch, before any
+    /// writer existed: what `survival` reads against later. Internal: never
+    /// in the envelope.
+    #[serde(default)]
+    pub base_repo: Option<crate::survival::RepoPin>,
     pub depth: u32,
     pub timeout_secs: u64,
     pub int_grace_secs: u64,
