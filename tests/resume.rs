@@ -118,7 +118,7 @@ fn only_a_finished_run_that_has_a_session_can_be_resumed() {
     });
     let early = world.ask(&["resume", &running, "--caller", "claude", "--brief", brief]);
     assert_eq!(early.code, 51, "{}", early.json);
-    assert_eq!(world.ask(&["cancel", &running]).code, 42);
+    assert_eq!(world.cancel_settled(&running).code, 42);
 
     // Cancelled runs ARE resumable: that is what the session id on disk is for.
     let after = world.ask(&["resume", &running, "--caller", "claude", "--brief", brief]);

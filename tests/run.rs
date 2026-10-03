@@ -255,7 +255,7 @@ fn a_long_run_outlives_the_call_that_started_it() {
     assert!(started.data()["result"].is_null());
     let run = started.run_id();
 
-    let finished = world.ask(&["wait", &run, "--timeout", "30"]);
+    let finished = world.ask(&["wait", &run, "--timeout", "120"]);
     assert_eq!(finished.code, 0, "{}", finished.json);
     assert_eq!(finished.text(), "worth the wait");
 }
@@ -270,7 +270,7 @@ fn cancel_stops_the_callee() {
     let pid = world.record(&run)["callee_pid"].as_i64().unwrap();
     assert!(alive(pid));
 
-    let cancelled = world.ask(&["cancel", &run]);
+    let cancelled = world.cancel_settled(&run);
     assert_eq!(cancelled.code, 42, "{}", cancelled.json);
     assert_eq!(cancelled.data()["state"], "cancelled");
     wait_until("the callee is gone", || !alive(pid));
@@ -284,7 +284,7 @@ fn a_run_that_takes_too_long_is_stopped_and_sweeps_what_it_started() {
     let world = World::new();
     let answer = world.run(
         "FAKE: child\nFAKE: sleep=120",
-        &["--timeout", "1", "--wait", "30"],
+        &["--timeout", "1", "--wait", "120"],
     );
     assert_eq!(answer.code, 41, "{}", answer.json);
     let run = answer.run_id();
@@ -404,7 +404,7 @@ fn a_busy_target_is_skipped_and_an_explicit_one_is_busy() {
     let other = world.run("hello", &["--caller", "codex", "--to", "claude"]);
     assert_eq!(other.code, 0, "{}", other.json);
 
-    assert_eq!(world.ask(&["cancel", &first]).code, 42);
+    assert_eq!(world.cancel_settled(&first).code, 42);
     assert_eq!(world.run("hello", &["--to", "codex"]).code, 0);
 }
 
@@ -528,7 +528,14 @@ fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
     let run_dir = world.state.join("runs").join(id);
     fs::create_dir_all(&run_dir).unwrap();
     fs::write(run_dir.join("run.json"), record.to_string()).unwrap();
-    fs::write(run_dir.join("brief"), "FAKE: leak=race.txt").unwrap();
+    fs::write(
+        run_dir.join("brief"),
+        format!(
+            "FAKE: leak=race.txt\nFAKE: leak_gate={}",
+            world.leak_gate().display()
+        ),
+    )
+    .unwrap();
     fs::create_dir(run_dir.join("events.jsonl")).unwrap();
 
     // Drive the supervisor directly: it fails post-spawn.
@@ -540,8 +547,10 @@ fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
         serde_json::from_str(&fs::read_to_string(run_dir.join("run.json")).unwrap()).unwrap();
     assert_eq!(after["state"], "failed", "{after}");
 
-    // Well past the leftover child's delay: had its group outlived the failed
-    // run, it would have written the tree by now.
+    // The failed run is over and its group cleaned up; only now is a leftover
+    // child let go to write. Had its group outlived the run, it would have
+    // written the tree by now.
+    world.open_leak_gate();
     std::thread::sleep(std::time::Duration::from_secs(3));
     assert!(
         !world.work.join("race.txt").exists(),

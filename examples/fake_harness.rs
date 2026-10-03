@@ -19,6 +19,9 @@
 //!                      for a newline and a tab); as many as the brief has
 //! FAKE: leak=<name>    leave a child in the callee's group that, a moment
 //!                      after the callee exits, writes <name> in the cwd
+//! FAKE: leak_gate=<path>  with `leak`: write <name> once <path> exists
+//!                      instead of after a moment (so a test, not the
+//!                      clock, says when the child is let go)
 //! FAKE: remove=<name>  delete <name> (before `write` and `append`)
 //! FAKE: rmdir=<dir>    remove the empty directory <dir> (after `remove`)
 //! FAKE: mkdir=<dir>    make the directory <dir> (after `rmdir`)
@@ -408,6 +411,10 @@ fn main() {
         eprintln!("left child {}", child.id());
     }
     if let Some(name) = directive("leak") {
+        let wait = match directive("leak_gate") {
+            Some(gate) => format!("while [ ! -e '{gate}' ]; do sleep 0.1; done"),
+            None => "sleep 1".to_string(),
+        };
         // A child left in the callee's OWN process group (no `process_group`),
         // stdio detached so it does not hold the supervisor's pipes open. It
         // waits, then writes `name` in the working directory: a writer that
@@ -417,7 +424,7 @@ fn main() {
         #[allow(clippy::zombie_processes)]
         let child = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("sleep 1; printf leaked > '{name}'"))
+            .arg(format!("{wait}; printf leaked > '{name}'"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

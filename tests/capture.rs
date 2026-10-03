@@ -455,7 +455,7 @@ fn a_cancelled_writer_keeps_what_it_had_written() {
                 .join("half.txt")
                 .exists()
     });
-    let cancelled = world.ask(&["cancel", &id]);
+    let cancelled = world.cancel_settled(&id);
     assert_eq!(cancelled.code, 42, "{}", cancelled.json);
     assert_eq!(cancelled.data()["state"], "cancelled");
     assert_eq!(paths(&cancelled), ["half.txt"]);
@@ -671,10 +671,18 @@ fn a_submodule_the_writer_populates_is_not_entered() {
 #[test]
 fn a_child_left_behind_does_not_change_the_patch() {
     let world = World::new();
-    let answer = fork(&world, "FAKE: leak=late.txt\nFAKE: write=x.txt", &[]);
+    let brief = format!(
+        "FAKE: leak=late.txt\nFAKE: leak_gate={}\nFAKE: write=x.txt",
+        world.leak_gate().display()
+    );
+    let answer = fork(&world, &brief, &[]);
     assert_eq!(answer.code, 0, "{}", answer.json);
     assert_eq!(paths(&answer), ["x.txt"]);
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // The child is gone with the run; only then is it let go to write.
+    let child = world.leaked_child(&answer.run_id());
+    common::wait_until("the leaked child is gone", || !common::alive(child));
+    world.open_leak_gate();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     assert!(!worktree(&answer).join("late.txt").exists());
 }
 

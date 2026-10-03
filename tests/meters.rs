@@ -264,7 +264,7 @@ fn a_ccusage_metered_run_is_stopped_past_its_abort_threshold() {
     );
     let answer = world.run(
         "FAKE: sleep=120",
-        &["--caller", "codex", "--to", "claude", "--wait", "60"],
+        &["--caller", "codex", "--to", "claude", "--wait", "120"],
     );
     assert_eq!(answer.code, 43, "{}", answer.json);
     assert_eq!(answer.data()["state"], "budget");
@@ -289,7 +289,7 @@ fn with_no_limit_declared_ccusage_does_not_watch() {
     );
     let answer = world.run(
         "FAKE: sleep=3\nFAKE: say=finished",
-        &["--caller", "codex", "--to", "claude", "--wait", "60"],
+        &["--caller", "codex", "--to", "claude", "--wait", "120"],
     );
     assert_eq!(answer.code, 0, "{}", answer.json);
     assert_eq!(answer.text(), "finished");

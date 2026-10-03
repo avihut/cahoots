@@ -647,19 +647,22 @@ fn a_child_left_behind_cannot_touch_the_tree_after_the_run() {
     // The callee leaves a child in its process group that writes the tree a
     // moment after the callee exits. The supervisor kills the group when the
     // run ends, before any reader reports it, so the child never writes.
-    let answer = implement(
-        &world,
-        "FAKE: leak=race-file.txt\nFAKE: write=edit.txt",
-        &["--in-place"],
+    let brief = format!(
+        "FAKE: leak=race-file.txt\nFAKE: leak_gate={}\nFAKE: write=edit.txt",
+        world.leak_gate().display()
     );
+    let answer = implement(&world, &brief, &["--in-place"]);
     assert_eq!(answer.code, 0, "{}", answer.json);
     assert!(
         world.work.join("edit.txt").is_file(),
         "the callee's own edit"
     );
-    // Well past the child's delay: had it outlived the run, it would have
-    // written by now.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // The child is gone with the run; only then is it let go to write. Had it
+    // outlived the run, it would have written by now.
+    let child = world.leaked_child(&answer.run_id());
+    common::wait_until("the leaked child is gone", || !common::alive(child));
+    world.open_leak_gate();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     assert!(
         !world.work.join("race-file.txt").exists(),
         "a child the callee left wrote the tree after the run"

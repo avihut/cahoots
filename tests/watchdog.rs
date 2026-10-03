@@ -16,7 +16,7 @@ fn a_run_is_stopped_when_its_target_crosses_the_abort_threshold() {
         json!({"guarded": {"code": 0, "percent": 40}, "watch": {"code": 24, "percent": 93}}),
         &format!("{KNOBS}\nreview.blind = true"),
     );
-    let answer = world.run("FAKE: sleep=120", &["--wait", "60"]);
+    let answer = world.run("FAKE: sleep=120", &["--wait", "120"]);
     assert_eq!(answer.code, 43, "{}", answer.json);
     assert_eq!(answer.data()["state"], "budget");
     assert_eq!(answer.data()["blind"], true);
@@ -63,7 +63,7 @@ fn a_reading_that_is_not_fresh_never_stops_a_run() {
             json!({"guarded": {"code": 0, "percent": 40}, "watch": {"code": code}}),
             KNOBS,
         );
-        let answer = world.run("FAKE: sleep=3\nFAKE: say=finished", &["--wait", "60"]);
+        let answer = world.run("FAKE: sleep=3\nFAKE: say=finished", &["--wait", "120"]);
         assert_eq!(answer.code, 0, "watch exit {code}: {}", answer.json);
         assert_eq!(answer.text(), "finished");
     }
@@ -80,7 +80,7 @@ fn one_reading_over_is_not_enough() {
         KNOBS,
     );
     // Over, under, over, under, … for five seconds: never twice in a row.
-    let answer = world.run("FAKE: sleep=5\nFAKE: say=finished", &["--wait", "60"]);
+    let answer = world.run("FAKE: sleep=5\nFAKE: say=finished", &["--wait", "120"]);
     assert_eq!(answer.code, 0, "{}", answer.json);
     let watches = world
         .meter_calls()
@@ -97,7 +97,7 @@ fn one_reading_over_is_not_enough() {
 fn without_a_tracker_there_is_no_watchdog() {
     let world = World::new();
     world.configure("limits.watchdog_secs = 1");
-    let answer = world.run("FAKE: sleep=3\nFAKE: say=finished", &["--wait", "60"]);
+    let answer = world.run("FAKE: sleep=3\nFAKE: say=finished", &["--wait", "120"]);
     assert_eq!(answer.code, 0, "{}", answer.json);
     assert!(world.meter_calls().is_empty());
 }

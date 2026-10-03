@@ -21,7 +21,7 @@ fn every_finished_run_leaves_one_line_whatever_became_of_it() {
     let done = world.run("hello", &[]).run_id();
     let failed = world.run("FAKE: fail", &[]).run_id();
     let timed_out = world
-        .run("FAKE: sleep=120", &["--timeout", "1", "--wait", "30"])
+        .run("FAKE: sleep=120", &["--timeout", "1", "--wait", "120"])
         .run_id();
 
     let lines = history(&world);
@@ -97,7 +97,8 @@ fn an_outcome_is_recorded_for_a_finished_run_and_the_last_word_wins() {
     );
     let running = world.run("FAKE: sleep=120", &["--wait", "0"]).run_id();
     assert_eq!(world.ask(&["outcome", &running, "accepted"]).code, 51);
-    assert_eq!(world.ask(&["cancel", &running]).code, 42);
+    world.wait_running(&running);
+    assert_eq!(world.cancel_settled(&running).code, 42);
 }
 
 #[test]

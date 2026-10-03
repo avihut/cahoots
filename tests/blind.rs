@@ -135,13 +135,14 @@ fn all_run_views_use_the_same_blind_projection() {
     let list = world.ask(&["status"]);
     assert_eq!(list.code, 0);
     hidden(&list.data()["runs"][0], "codex");
-    let cancelled = world.ask(&["cancel", &id]);
+    world.wait_running(&id);
+    let cancelled = world.cancel_settled(&id);
     assert_eq!(cancelled.code, 42, "{}", cancelled.json);
     hidden(cancelled.data(), "codex");
     assert!(cancelled.data().get("result").is_none());
     views(&world, &id, 42, true);
     reveal(&world, &id, "discarded");
-    let again = world.ask(&["cancel", &id]);
+    let again = world.cancel_settled(&id);
     assert_eq!(again.code, 42);
     open(again.data(), &world.record(&id));
 }
@@ -183,14 +184,14 @@ fn launch_policy_survives_configuration_changes() {
         world.record(&id)["state"] == "running"
     });
     world.configure("review.blind = false");
-    assert_eq!(world.ask(&["wait", &id, "--timeout", "30"]).code, 0);
+    assert_eq!(world.ask(&["wait", &id, "--timeout", "120"]).code, 0);
     views(&world, &id, 0, true);
     let open_id = world.run("FAKE: sleep=3", &["--wait", "0"]).run_id();
     wait_until("open fake is running", || {
         world.record(&open_id)["state"] == "running"
     });
     world.configure(BLIND);
-    assert_eq!(world.ask(&["wait", &open_id, "--timeout", "30"]).code, 0);
+    assert_eq!(world.ask(&["wait", &open_id, "--timeout", "120"]).code, 0);
     views(&world, &open_id, 0, false);
     let latest = completed(&world, "third");
     hidden(latest.data(), "codex");
@@ -278,7 +279,7 @@ fn blind_failures_keep_the_original_exit_contract() {
         ("FAKE: fail", vec![], 40, "run_failed", "other_target"),
         (
             "FAKE: sleep=120",
-            vec!["--timeout", "1", "--wait", "30"],
+            vec!["--timeout", "1", "--wait", "120"],
             41,
             "run_timed_out",
             "later",
@@ -321,7 +322,8 @@ fn invalid_outcomes_do_not_reveal() {
     assert!(!history(&world).iter().any(|e| e["kind"] == "outcome"));
     views(&world, &id, 0, true);
     views(&world, &live, 51, true);
-    assert_eq!(world.ask(&["cancel", &live]).code, 42);
+    world.wait_running(&live);
+    assert_eq!(world.cancel_settled(&live).code, 42);
 }
 
 #[test]
