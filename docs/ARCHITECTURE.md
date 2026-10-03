@@ -72,6 +72,9 @@ supervisor, and there is no second, foreground path to keep honest.
   the run id. `wait`, `status`, `result` and `cancel` complete the set.
 - **The run directory is the source of truth:**
   `<state>/runs/<id>/{run.json, brief, events.jsonl, final.md, supervisor.log, patch.diff, lock, cancel}`.
+  The callee's `TMPDIR` is `/tmp/cahoots-<id>`: private, made just before it
+  starts, removed once the run is over, and never inside cahoots' own
+  directories, since Codex makes it writable.
   `run.json` has one writer — the supervisor — and is replaced atomically. Ids
   are time-sortable and match `^[0-9A-Za-z_-]{1,64}$`. There is no separate
   ledger file; `report` reads the folded history, which outlives a run's
@@ -191,6 +194,26 @@ file too, but only through human verbs (`settings`, `enable`, `install`),
 and in place (`config::edit`, on `toml_edit`): a setting changes, the rest
 of the file — its comments, its order, its tables — stays as the person
 wrote it, and nothing is written that `UserConfig::parse` would refuse.
+
+**The programs cahoots runs come from pins** (`src/tools.rs`, and
+`src/spawn`, which alone starts them). `git` and `ps` run only from
+`[tools.<name>] binary`, each harness only from `harness.<id>.binary`, daft
+only from `fork.daft.binary`, a meter only from its table's `binary`: there
+is no PATH lookup outside a person's verb (`install` and `enable` pin what
+the person's own PATH finds, `settings` what the person chooses), and
+`scripts/guard.sh` holds where one may appear. Every verb that starts `git`
+or `ps` locates both first (`tools::locate`: the pin, the binary policy, then
+the fingerprint — git's `--version` and its floors, ps answering for this
+process) and passes them down; each use holds the pin to the binary policy
+again for that use's roots (`Tool::at`). Every program cahoots starts gets a
+PATH it builds (`spawn::own_path`): the pinned program's directories (not a
+temp one, nor one everyone can write), the pinned git's first for daft and the
+callee, then `/usr/bin:/bin:/usr/sbin:/sbin`, then `tools.path`, the PATH a
+person recorded with `install`, as it still qualifies — never the caller's.
+The callee's `TMPDIR` is the run's own, under `/tmp`, its `SHELL` comes from
+passwd, and its settings folder (`CODEX_HOME`,
+`CLAUDE_CONFIG_DIR`) from `harness.<id>.home` or nowhere
+(docs/THREAT-MODEL.md, Binaries and The callee's environment).
 
 **Task kinds are routing under roles.** Optional `[kinds.<name>]` tables in
 config.toml each require a description, a role and an ordered list of typed

@@ -47,6 +47,7 @@ fn the_page_changes_a_setting_in_place_and_gives_the_terminal_back() {
     let file = world.config.join("config.toml");
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
+    terminal.resize(40, 120);
     for shown in [" Claude Code", " Codex", " Usage meter", "• 60%"] {
         terminal.wait_for(shown);
     }
@@ -467,9 +468,9 @@ fn the_page_edits_a_kind_role_and_candidate_order() {
         };
         terminal.wait_for("❯ Enabled");
         terminal.resize(40, 180);
-        // Claude, Codex, meter, runs, worktrees, review, roles, then the
-        // first kind.
-        for _ in 0..7 {
+        // Claude, Codex, meter, runs, worktrees, tools, review, roles, then
+        // the first kind.
+        for _ in 0..8 {
             terminal.press(TAB);
         }
         terminal.wait_for("❯ Description");
@@ -536,8 +537,8 @@ fn blind_setting_toggles_sets_and_resets_without_touching_other_config() {
     assert!(!default.locked);
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
-    // Claude, Codex, meter, runs, worktrees, then review.
-    for _ in 0..5 {
+    // Claude, Codex, meter, runs, worktrees, tools, then review.
+    for _ in 0..6 {
         terminal.press(TAB);
     }
     terminal.wait_for("❯ Review runs");
@@ -766,8 +767,8 @@ fn the_page_edits_role_and_kind_exploration_shares() {
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
     terminal.resize(40, 180);
-    // Claude, Codex, meter, runs, worktrees, review: then the roles.
-    for _ in 0..6 {
+    // Claude, Codex, meter, runs, worktrees, tools, review: then the roles.
+    for _ in 0..7 {
         terminal.press(TAB);
     }
     terminal.wait_for("❯ Advise");

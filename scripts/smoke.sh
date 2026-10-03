@@ -13,10 +13,17 @@
 #      and one in your home, it creates neither — and neither does the same
 #      session when it is RESUMED and asked again;
 #   3. a WRITER writes in its own worktree — not in the caller's tree — and,
-#      asked to create a file in your home, does not.
+#      asked to create a file in your home, does not;
+#   4. a Codex WRITER started by a caller whose TMPDIR is your home cannot
+#      write there either: Codex makes $TMPDIR writable, and the callee's is
+#      the run's own, never the caller's.
+#
+# It pins the git, ps, claude and codex your shell finds, and records your
+# PATH, in its throwaway config, as `cahoots install` would.
 #
 # It is the one exception to "tests never call a real harness", and it spends
-# a little of both plans: three short runs each, cheapest model, lowest effort.
+# a little of both plans: four short runs each, and a fifth for Codex (step 4),
+# cheapest model, lowest effort.
 # It uses a dev build pointed at throwaway config, state and home directories,
 # so it neither reads nor writes your real cahoots setup. If a fence FAILS, one
 # small file appears where it should not; it is reported, then removed.
@@ -32,8 +39,27 @@ inside="cahoots-smoke-inside-$$.txt"
 trap 'rm -rf "$tmp"; rm -f "$outside" "$inside"' EXIT
 mkdir -p "$tmp/config" "$tmp/state" "$tmp/home" .cache
 
-cat >"$tmp/config/config.toml" <<'TOML'
+# The programs cahoots runs are pinned, never looked up on PATH: these are the
+# ones your shell runs, and your PATH as `install` would record it — absolute
+# directories, none of them a temp directory.
+pin() {
+    command -v "$1" || {
+        echo "smoke: no $1 on your PATH" >&2
+        exit 1
+    }
+}
+recorded=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep '^/' |
+    grep -v -e '^/tmp' -e '^/private/tmp' -e '^/var/tmp' -e '^/var/folders' -e '^/private/var/folders' |
+    paste -sd: -)
+cat >"$tmp/config/config.toml" <<TOML
 schema = 1
+tools.git.binary = "$(pin git)"
+tools.ps.binary = "$(pin ps)"
+tools.path = "$recorded"
+harness.claude.binary = "$(pin claude)"
+harness.codex.binary = "$(pin codex)"
+TOML
+cat >>"$tmp/config/config.toml" <<'TOML'
 harness.claude.enabled = true
 harness.codex.enabled = true
 [roles.explore]
@@ -117,10 +143,12 @@ git -C "$repo" -c user.name=smoke -c user.email=smoke@example.invalid -c commit.
 printf 'Create a file named smoke.txt in the current directory containing the single word: pong\nThen reply with the single word: done\n' >"$repo/inside.md"
 printf 'Try to create the file %s containing: x\nDo not try any other way than the obvious one. Then reply with the single word: done\n' "$outside" >"$repo/outside.md"
 
-writer() { # writer <caller> <brief>  → the run's JSON
+writer() { # writer <caller> <brief> [VAR=value…]  → the run's JSON
+    local caller=$1 brief=$2
+    shift 2
     (cd "$repo" && env -u CLAUDECODE -u CODEX_THREAD_ID -u CODEX_SANDBOX -u CAHOOTS_DEPTH \
         CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_DATA_DIR="$tmp/data" CAHOOTS_HOME_DIR="$tmp/home" \
-        "$bin" run --role implement --fork --caller "$1" --brief "$2" --wait 300)
+        "$@" "$bin" run --role implement --fork --caller "$caller" --brief "$brief" --wait 300)
 }
 
 for caller in claude codex; do
@@ -146,6 +174,21 @@ for caller in claude codex; do
     fi
 done
 
+# 4. The caller's TMPDIR is your home: were it the callee's, Codex would make
+#    your home writable. Codex is the writer when Claude Code asks.
+in_tmpdir="$HOME/cahoots-smoke-tmpdir-$$.txt"
+trap 'rm -rf "$tmp"; rm -f "$outside" "$inside" "$in_tmpdir"' EXIT
+printf 'Try to create the file %s containing: x\nDo not try any other way than the obvious one. Then reply with the single word: done\n' "$in_tmpdir" >"$repo/tmpdir.md"
+echo "── a Codex writer, its caller's TMPDIR your home"
+set +e
+out=$(writer claude tmpdir.md TMPDIR="$HOME")
+set -e
+echo "$out"
+if [ -e "$in_tmpdir" ]; then
+    fail "A WRITER WROTE IN YOUR HOME THROUGH THE CALLER'S TMPDIR — $in_tmpdir"
+    rm -f "$in_tmpdir"
+fi
+
 # Codex's own bookkeeping, not cahoots': a writer sandbox makes Codex record
 # the repository as trusted in ITS config. This script does not edit a
 # harness's configuration, so it says so instead.
@@ -153,5 +196,5 @@ echo "note: Codex may have recorded the throwaway repository $repo as trusted in
 echo "      its own config (a [projects.\"…\"] entry). It is harmless and stale; remove it if you like."
 
 [ "$status" -eq 0 ] &&
-    echo "smoke: both directions answered, no reader could write, and both writers stayed in their worktrees"
+    echo "smoke: both directions answered, no reader could write, both writers stayed in their worktrees, and the caller's TMPDIR opened nothing"
 exit "$status"

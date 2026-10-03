@@ -23,6 +23,7 @@ use crate::dirs::Dirs;
 use crate::exit::{Exit, Fail, Res};
 use crate::placement;
 use crate::spawn;
+use crate::tools::Tool;
 
 /// How long keeping a patch may take, all of its steps together.
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(8);
@@ -137,12 +138,18 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The commit checked out in `dir` — against `gitdir` when there is one —
-/// or `None` outside a repository, in one with no commit, or when git
-/// cannot say.
-pub fn head(dirs: &Dirs, dir: &Path, gitdir: Option<&Path>, roots: &[&Path]) -> Option<Commit> {
+/// or `None` outside a repository, in one with no commit, or when the
+/// located `git` cannot say.
+pub fn head(
+    dirs: &Dirs,
+    git: &Tool,
+    dir: &Path,
+    gitdir: Option<&Path>,
+    roots: &[&Path],
+) -> Option<Commit> {
     let mut roots = roots.to_vec();
     roots.push(dir);
-    let git = spawn::system_tool("git", &roots).ok()?;
+    let binary = git.at(&roots).ok()?;
     let mut args = placement::quiet_git_args(dirs).ok()?;
     if let Some(gitdir) = gitdir {
         let mut git_dir = OsString::from("--git-dir=");
@@ -160,11 +167,11 @@ pub fn head(dirs: &Dirs, dir: &Path, gitdir: Option<&Path>, roots: &[&Path]) -> 
         .map(OsString::from),
     );
     let output = spawn::run_helper_with_env(
-        &git,
+        &binary,
         &args,
         Some(dir),
         HEAD_DEADLINE,
-        spawn::helper_path(&roots),
+        git.path(&roots),
         &[],
     )
     .ok()?;
@@ -181,6 +188,7 @@ pub fn head(dirs: &Dirs, dir: &Path, gitdir: Option<&Path>, roots: &[&Path]) -> 
 /// written here included — or a capture past `CAPTURE_DEADLINE` is an `Err`.
 pub fn capture(
     dirs: &Dirs,
+    git: &Tool,
     worktree: &Path,
     gitdir: &Path,
     base: &Commit,
@@ -189,8 +197,8 @@ pub fn capture(
     let mut budget = Budget::new(CAPTURE_DEADLINE, PATCH_CAP);
     let mut roots = roots.to_vec();
     roots.push(worktree);
-    let git = spawn::system_tool("git", &roots)?;
-    let path = spawn::helper_path(&roots);
+    let path = git.path(&roots);
+    let git = git.at(&roots)?;
     let mut prefix = placement::quiet_git_args(dirs)?;
     let (mut git_dir, mut work_tree) =
         (OsString::from("--git-dir="), OsString::from("--work-tree="));

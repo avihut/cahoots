@@ -6,6 +6,7 @@
 //! new runs, swap the first two entries BEFORE that walk (`explore.rs`). Every
 //! candidate then passes the same checks, in the order that swap leaves.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use crate::model::{Candidate, HarnessId, Role};
 use crate::registry::{Registry, Routing};
 use crate::run::record::try_lock_file;
 use crate::spawn;
+use crate::tools::{Tool, Tools};
 
 #[derive(Debug, Serialize)]
 pub struct Skip {
@@ -111,20 +113,79 @@ fn slot_free(dirs: &Dirs, registry: &Registry, harness: HarnessId) -> bool {
     })
 }
 
-/// The harness binary, held to the binary policy and to its fingerprint. Its
-/// `--version` runs on the PATH the system tools get (`spawn::helper_path`):
-/// what a launcher looks up for itself comes from no workspace directory.
-pub fn locate(registry: &Registry, id: HarnessId, workspace: &[&Path]) -> Res<(PathBuf, Version)> {
+/// The harness binary: the one a person pinned (`harness.<id>.binary`),
+/// never a PATH lookup, held to the binary policy and to its fingerprint,
+/// and its settings folder, if one is set. Unpinned is the person's setup to
+/// fix (34); missing or not the harness is 31, and a candidate is skipped
+/// for it. `git` is the located git, whose directories come first on the
+/// PATH (`None` where git cannot be located: doctor).
+pub fn locate(
+    registry: &Registry,
+    git: Option<&Tool>,
+    id: HarnessId,
+    workspace: &[&Path],
+) -> Res<(PathBuf, Version)> {
+    let entry = registry.harness(id);
+    let pinned = entry.binary.as_deref().ok_or_else(|| {
+        Fail::config(format!(
+            "{id} has no pinned program — `cahoots enable {id}` or `cahoots install` pins the one \
+             on your PATH, or choose one with `cahoots settings` (harness.{id}.binary)"
+        ))
+    })?;
+    let git = git.map(Tool::pinned);
+    let recorded = registry.tools.recorded();
+    locate_at(
+        id,
+        pinned,
+        entry.home.as_deref(),
+        git,
+        recorded.as_deref(),
+        workspace,
+    )
+}
+
+/// The harness at `path`, for a person choosing one (`settings`, `enable`,
+/// `install`): held to exactly what a run holds it to. `pins` give the PATH
+/// it is asked its version on: the pinned git's directory, if that pin
+/// passes the binary policy, and the recorded PATH.
+pub fn locate_pinned(
+    id: HarnessId,
+    path: &Path,
+    home: Option<&Path>,
+    pins: &crate::tools::Pins,
+) -> Res<(PathBuf, Version)> {
+    let git = pins
+        .git
+        .as_deref()
+        .filter(|git| spawn::pinned_system_tool("git", git, &[]).is_ok());
+    let recorded = pins.recorded();
+    locate_at(id, path, home, git, recorded.as_deref(), &[])
+}
+
+fn locate_at(
+    id: HarnessId,
+    pinned: &Path,
+    home: Option<&Path>,
+    git: Option<&Path>,
+    recorded: Option<&OsStr>,
+    workspace: &[&Path],
+) -> Res<(PathBuf, Version)> {
     let tool = harness::harness(id);
-    let configured = registry.harness(id).binary.as_deref();
-    let binary = spawn::resolve_binary(tool.binary_name(), configured, workspace)?;
+    let binary = spawn::resolve_binary(pinned, workspace)?;
+    if let Some(home) = home {
+        usable_home(id, home, workspace)?;
+    }
+    // The PATH and the settings folder the callee will get: a harness that
+    // cannot start under them fails here, not halfway through a run. From
+    // `/`, so that no repository's files shape the answer.
+    let binaries: Vec<&Path> = git.into_iter().chain([pinned]).collect();
     let version = spawn::run_helper_with_env(
         &binary,
         &["--version"],
-        None,
+        Some(Path::new("/")),
         Duration::from_secs(15),
-        spawn::helper_path(workspace),
-        &[],
+        spawn::own_path(&binaries, recorded, workspace),
+        &spawn::home_vars(id, home),
     )
     .ok()
     .and_then(|output| tool.fingerprint(&output.stdout))
@@ -146,12 +207,53 @@ pub fn locate(registry: &Registry, id: HarnessId, workspace: &[&Path]) -> Res<(P
     Ok((binary, version))
 }
 
+/// A harness's settings folder, before a run uses it: not inside the
+/// workspace or a temp directory (33), and there, this user's and writable
+/// by no one else (31).
+pub fn usable_home(id: HarnessId, home: &Path, workspace: &[&Path]) -> Res<()> {
+    let key = format!("harness.{id}.home");
+    let canonical = std::fs::canonicalize(home).map_err(|error| {
+        Fail::new(
+            Exit::TargetUnavailable,
+            format!("{key} {}: {error}", home.display()),
+        )
+    })?;
+    let inside = |root: &Path| {
+        canonical.starts_with(root)
+            || std::fs::canonicalize(root).is_ok_and(|root| canonical.starts_with(root))
+    };
+    if let Some(root) = workspace.iter().find(|root| inside(root)) {
+        return Err(Fail::policy(format!(
+            "refusing to use {key} {}: it is inside the workspace {}",
+            home.display(),
+            root.display()
+        )));
+    }
+    if let Some(root) = crate::tools::fixed_temp_roots()
+        .iter()
+        .find(|root| inside(root))
+    {
+        return Err(Fail::policy(format!(
+            "refusing to use {key} {}: it is inside the temp directory {}",
+            home.display(),
+            root.display()
+        )));
+    }
+    crate::tools::check_home(home).map_err(|why| {
+        Fail::new(
+            Exit::TargetUnavailable,
+            format!("{key} {}: {why}", home.display()),
+        )
+    })
+}
+
 /// Whether ONE candidate can take a run right now: a free slot, a real binary,
 /// and the gate. `resume` uses this directly — a session belongs to the
 /// harness and model that started it, so there is nobody to fall through to.
 pub fn eligible(
     dirs: &Dirs,
     registry: &Registry,
+    tools: &Tools,
     candidate: &Candidate,
     role: Role,
     workspace: &[&Path],
@@ -165,17 +267,19 @@ pub fn eligible(
             ),
         ));
     }
-    let (binary, version) = locate(registry, candidate.harness, workspace)?;
+    let (binary, version) = locate(registry, Some(&tools.git), candidate.harness, workspace)?;
     let admission = gate::admit(dirs, registry, candidate, role)?;
     Ok((binary, version, admission))
 }
 
+/// The target for `routing`: who asks (`caller`) and who it must be, if
+/// anyone (`to`), then the first candidate `eligible` admits.
 pub fn choose(
     dirs: &Dirs,
     registry: &Registry,
+    tools: &Tools,
     routing: &Routing<'_>,
-    caller: Option<HarnessId>,
-    to: Option<HarnessId>,
+    (caller, to): (Option<HarnessId>, Option<HarnessId>),
     selection: Selection,
     workspace: &[&Path],
 ) -> Res<Choice> {
@@ -187,7 +291,7 @@ pub fn choose(
     };
     let promote = share > 0.0 && selection == Selection::Drawn(true);
     let walked = walk(list, promote, |candidate| {
-        eligible(dirs, registry, candidate, routing.role, workspace)
+        eligible(dirs, registry, tools, candidate, routing.role, workspace)
     })?;
     let (binary, version, admission) = walked.admitted;
     Ok(Choice {

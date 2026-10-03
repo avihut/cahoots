@@ -34,6 +34,15 @@ pub fn passwd_home() -> Res<PathBuf> {
     }
 }
 
+/// The current user's login shell, from the passwd database: a callee's
+/// `SHELL`, never the caller's. `None` when passwd names none.
+pub fn passwd_shell() -> Option<PathBuf> {
+    match User::from_uid(Uid::current()) {
+        Ok(Some(user)) if user.shell.is_absolute() => Some(user.shell),
+        _ => None,
+    }
+}
+
 impl Dirs {
     pub fn resolve() -> Res<Dirs> {
         let overrides = [

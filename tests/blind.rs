@@ -203,16 +203,21 @@ fn launch_policy_survives_configuration_changes() {
             blind
         );
     }
-    // Existing lookup still works when current config is malformed.
+    // A run's blindness is its record's, whatever config.toml says now. A
+    // config.toml that does not load is the person's to fix: every verb that
+    // starts a tool reads the pinned tools from it, so it is refused (34).
     world.configure("review.blind = 'wrong'");
     for verb in ["status", "result"] {
-        let answer = world.ask(&[verb, &id]);
-        assert_eq!(answer.code, 0);
-        hidden(answer.data(), "codex");
+        assert_eq!(world.ask(&[verb, &id]).code, 34, "{verb}");
     }
-    // Wait retains its existing registry load, even with an explicit timeout.
     assert_eq!(world.ask(&["wait", &id, "--timeout", "0"]).code, 34);
     assert_eq!(world.run("new", &[]).code, 34);
+    world.configure("");
+    for verb in ["status", "result"] {
+        let answer = world.ask(&[verb, &id]);
+        assert_eq!(answer.code, 0, "{}", answer.json);
+        hidden(answer.data(), "codex");
+    }
 }
 
 #[test]

@@ -168,6 +168,47 @@ impl RunRecord {
     }
 }
 
+/// The callee's `TMPDIR`: a directory of the run's own under `/tmp` —
+/// never the caller's `TMPDIR`, and never inside cahoots' own directories,
+/// since a Codex writer may write wherever `TMPDIR` points (Codex already
+/// writes `/tmp`, so this adds no place it may write). Made private just
+/// before the callee starts, refused if anything is there already, and
+/// removed once the run is over.
+pub fn callee_tmpdir(id: &str) -> PathBuf {
+    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    tmp.join(format!("cahoots-{id}"))
+}
+
+/// Makes the run's `callee_tmpdir`, private, where nothing was: a name
+/// someone else took first is a refusal, never a directory shared with them.
+pub fn make_callee_tmpdir(id: &str) -> Res<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = callee_tmpdir(id);
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .map_err(|error| {
+            Fail::internal(format!(
+                "cannot make the run's temp directory {}: {error}",
+                path.display()
+            ))
+        })?;
+    Ok(path)
+}
+
+/// Removes the run's `callee_tmpdir` and what the callee left in it — only
+/// a real directory of this user's, never what a link points at.
+pub fn remove_callee_tmpdir(id: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let path = callee_tmpdir(id);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.is_dir() && meta.uid() == nix::unistd::geteuid().as_raw())
+    {
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
 /// Time-sortable, and safe as a directory name and as an argument.
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()

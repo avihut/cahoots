@@ -191,11 +191,25 @@ fn the_callee_gets_a_scrubbed_environment() {
             .env("LD_PRELOAD", "/tmp/evil.so")
             .env("HOME", "/tmp/not-my-home")
             .env("GIT_NO_LAZY_FETCH", "0")
+            .env("TMPDIR", &world.home)
+            .env("SHELL", world.root.join("planted/sh"))
             .env("LC_ALL", "C"),
     );
     assert_eq!(answer.code, 0, "{}", answer.json);
     let dump: serde_json::Value = serde_json::from_str(answer.text()).unwrap();
     let env = dump["env"].as_object().unwrap();
+    // PATH, TMPDIR and SHELL are cahoots' own, never the caller's.
+    let tmp = common::callee_tmpdir(&answer.run_id());
+    assert_eq!(env["TMPDIR"], common::path_str(&tmp));
+    assert_eq!(dump["tmpdir_mode"], 0o700);
+    assert_ne!(
+        env["SHELL"],
+        common::path_str(&world.root.join("planted/sh"))
+    );
+    assert_eq!(
+        env["PATH"],
+        common::own_path(&[&common::real("git"), &world.bin.join("codex")], &[]).as_str()
+    );
     for gone in [
         "CLAUDECODE",
         "OPENAI_API_KEY",
@@ -222,7 +236,8 @@ fn the_callee_gets_a_scrubbed_environment() {
 fn an_api_key_passes_only_when_billing_says_api() {
     let world = World::new();
     let text = format!(
-        "schema = 1\n[harness.codex]\nenabled = true\nbinary = {:?}\nbilling = \"api\"\n",
+        "schema = 1\n{}[harness.codex]\nenabled = true\nbinary = {:?}\nbilling = \"api\"\n",
+        world.tools_toml(),
         world.bin.join("codex")
     );
     fs::write(world.config.join("config.toml"), text).unwrap();

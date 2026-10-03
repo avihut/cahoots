@@ -75,6 +75,26 @@ run `cahoots doctor` again to check them. If you run Claude Code with its
 sandbox on, also list `cahoots` in `sandbox.excludedCommands`, because a run
 has to reach the other agent's vendor.
 
+`install` also pins the programs cahoots runs: the `git`, `ps`, `claude` and
+`codex` your PATH finds first, written to cahoots' `config.toml`, and it
+records your PATH there (`tools.path`). From then on cahoots runs only those
+programs, never one an agent's PATH puts first, and every program it starts,
+the agents it delegates to included, gets a PATH built from them, the
+system's folders and the PATH you recorded — never the agent's. A copy in a
+temp folder, in a folder everyone can write, or in the repository you run
+`install` from, is never pinned; none of those folders is recorded, nor is
+one your group can write. `enable` pins
+the agent it turns on, if nothing is pinned for it yet. To choose another
+program, open `cahoots settings` (the **Tools** section, and **Program** under
+each agent); `cahoots doctor` shows each pin and whether it still runs. If
+you run Codex with a `CODEX_HOME`, or Claude Code with a `CLAUDE_CONFIG_DIR`,
+`install` records the one your terminal sets as that agent's settings folder;
+a delegated run uses the one in `config.toml`, never the one the asking agent
+has.
+
+After upgrading cahoots, run `cahoots install` again: until git and ps are
+pinned, agents' runs are refused (exit 34, with the fix in the message).
+
 Every agent starts switched off as a target, because a run sends your code to
 that agent's vendor. Read [where the vendors stand](#your-accounts-and-the-vendors-terms)
 before you enable one. `install`, `enable`, `settings` and the other commands

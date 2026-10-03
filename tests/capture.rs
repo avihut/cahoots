@@ -808,8 +808,8 @@ fn real_git() -> PathBuf {
         .expect("git on PATH")
 }
 
-/// A `git` of the test's own, first on PATH and outside the workspace, that
-/// logs each call to `bin/git.calls` and passes it to the real one — except
+/// A `git` of the test's own, pinned and outside the workspace, that logs
+/// each call to `bin/git.calls` and passes it to the real one — except
 /// what it is told to do instead when its argv holds `diff` or `ls-files`,
 /// the index's own listing (`ls-files --cached`) aside.
 fn capture_git(world: &World, diff: &str, ls_files: &str) {
@@ -835,7 +835,7 @@ fn capture_git_with(world: &World, diff: &str, ls_files: &str, cached: Option<&s
             calls = world.bin.join("git.calls").display(),
         ),
     );
-    world.prefix_path(&world.bin);
+    world.pin_tool("git", Some(&world.bin.join("git")));
 }
 
 /// The writer did what it did and its run ended as it would have; only the

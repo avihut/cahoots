@@ -12,7 +12,8 @@
 //! FAKE: say=<text>     the answer (default: pong)
 //! FAKE: sleep=<secs>   think for a while first
 //! FAKE: fail           report a failed run and exit 1
-//! FAKE: dump           answer with this process's argv, cwd and environment
+//! FAKE: dump           answer with this process's argv, cwd and environment,
+//!                      and its TMPDIR's mode
 //! FAKE: child          leave a long-lived child in its own process group
 //! FAKE: write=<name>   "edit": create <name> in the working directory
 //! FAKE: append=<file>::<text>  add <text> to <file> there (`\n`, `\t`
@@ -29,6 +30,9 @@
 //! FAKE: link=<name>=<target>  make <name> a link to <target>
 //! FAKE: hardlink=<name>=<target>  make <name> a hard link to <target>
 //! ```
+//!
+//! Asked `--version` with a `<name>.version-env` file beside it, it appends
+//! `{"path", "cwd", "codex_home", "claude_config_dir"}` to that file first.
 //!
 //! In this order: `child`, `leak`, `remove`, `rmdir`, `mkdir`, `rename`,
 //! `write`, every `append`, then `commit`, `bytes`, `link`, `hardlink`, and
@@ -352,6 +356,22 @@ fn main() {
     }
 
     if argv.iter().any(|arg| arg == "--version") {
+        // With `<name>.version-env` beside it, where it was asked and on what
+        // PATH and settings folder, one JSON line each time.
+        let asked = exe.with_file_name(format!("{flavor}.version-env"));
+        if asked.exists() {
+            let mut log = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&asked)
+                .expect("version-env");
+            let call = json!({
+                "path": std::env::var("PATH").ok(),
+                "cwd": std::env::current_dir().ok(),
+                "codex_home": std::env::var("CODEX_HOME").ok(),
+                "claude_config_dir": std::env::var("CLAUDE_CONFIG_DIR").ok(),
+            });
+            let _ = writeln!(log, "{call}");
+        }
         let overridden = std::fs::read_to_string(exe.with_file_name(format!("{flavor}.version")));
         match (overridden, flavor.as_str()) {
             (Ok(text), _) => println!("{}", text.trim()),
@@ -501,10 +521,15 @@ fn main() {
     }
 
     let answer = if directive("dump").is_some() {
+        use std::os::unix::fs::PermissionsExt;
         json!({
             "argv": argv,
             "cwd": std::env::current_dir().ok(),
             "env": std::env::vars().collect::<std::collections::BTreeMap<_, _>>(),
+            // Its TMPDIR as it is while it runs: there, and whose.
+            "tmpdir_mode": std::env::var_os("TMPDIR")
+                .and_then(|dir| std::fs::metadata(dir).ok())
+                .map(|meta| meta.permissions().mode() & 0o777),
         })
         .to_string()
     } else {

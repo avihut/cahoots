@@ -32,6 +32,7 @@ use crate::patch::Commit;
 use crate::paths::{self, Workspace};
 use crate::registry::{self, Registry};
 use crate::spawn;
+use crate::tools::Tool;
 use provider::{Checkout, CutSpec, Owner, Place, ProviderId};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +56,9 @@ pub fn decide(
     dir: Option<&Path>,
     workspace: &Workspace,
     registry: &Registry,
+    git: &Tool,
 ) -> Res<(Placement, PathBuf)> {
-    let base = paths::run_dir(dir, workspace)?;
+    let base = paths::run_dir(dir, workspace, git)?;
     if role.is_read_only() {
         if fork || in_place {
             return Err(Fail::new(
@@ -70,7 +72,7 @@ pub fn decide(
         (true, false) => {
             let mut roots = workspace.roots();
             roots.push(&base);
-            if spawn::git_roots(&base, &roots)?.is_none() {
+            if spawn::git_roots(git, &base, &roots)?.is_none() {
                 return Err(Fail::policy(format!(
                     "--fork needs a git repository to cut a worktree from, and {} is not in one",
                     base.display()
@@ -116,32 +118,36 @@ pub struct Cut {
 /// writer (`unfit`). Each tool runs in a process group of its own, killed
 /// when it returns. `roots` are the directories no tool started here may
 /// come from; `deadline` is the run's own timeout, which shortens the cut's.
-/// `at` is the commit to cut at — the one the run recorded — and with none,
-/// the base's HEAD.
+/// `base` is the tree it is cut from, and `at` the commit to cut at — the
+/// one the run recorded — and with none, the base's HEAD. `git` is the
+/// located git: every git the cut runs, or the provider starts, is that one.
 pub fn cut(
     dirs: &Dirs,
     fork: &registry::Fork,
-    base: &Path,
+    git: &Tool,
+    (base, at): (&Path, Option<&Commit>),
     run_id: &str,
     roots: &[&Path],
     deadline: Duration,
-    at: Option<&Commit>,
 ) -> Res<Cut> {
-    let (top, common) = spawn::git_roots(base, roots)?
+    let (top, common) = spawn::git_roots(git, base, roots)?
         .ok_or_else(|| cut_failed("the base is no longer a repository"))?;
     let mut roots = roots.to_vec();
     roots.extend([base, top.as_path()]);
 
     let id = provider::provider_for(fork.provider, top.join("daft.yml").is_file());
     let tool = provider::provider(id);
-    let (binary, _) = provider::locate(id, fork, &roots)?;
-    // A tool that runs git of its own finds it on the PATH it is given: that
-    // git is held to the binary policy and the version floor before the tool
-    // starts (`spawn::path_for_git_users`). git itself was, by `locate`.
-    let path = if tool.binary_name() == "git" {
-        spawn::helper_path(&roots)
-    } else {
-        spawn::path_for_git_users(&roots)?
+    let (binary, _) = provider::locate(id, fork, git, &roots)?;
+    // A tool that runs git of its own finds it on the PATH it is given, whose
+    // first directories are the pinned git's: the git it starts is the one
+    // located, fingerprint and floor and all (`provider::daft_path`).
+    let path = match id {
+        ProviderId::Git => git.path(&roots),
+        ProviderId::Daft => provider::daft_path(
+            fork.daft_binary.as_deref().unwrap_or(&binary),
+            Some(git),
+            &roots,
+        ),
     };
     let hooks = id == ProviderId::Daft && fork.daft_hooks;
 
@@ -158,13 +164,13 @@ pub fn cut(
     let filters = match tool.checkout() {
         Checkout::Cahoots => BTreeSet::new(),
         Checkout::Tool => {
-            let listing = config_listing(dirs, base, &roots).map_err(|why| {
+            let listing = config_listing(dirs, git, base, &roots).map_err(|why| {
                 cut_failed(&format!(
                     "the git configuration could not be read ({why}), so its filters cannot be \
                      turned off"
                 ))
             })?;
-            let reached = include_closure(dirs, base, &listing, &roots)?;
+            let reached = include_closure(dirs, git, base, &listing, &roots)?;
             if hooks
                 && let Some(key) = provider::steering_daft_hooks(&listing)
                     .into_iter()
@@ -228,7 +234,7 @@ pub fn cut(
             ),
             None => fail,
         };
-        let now = config_listing(dirs, base, &roots).map_err(|why| {
+        let now = config_listing(dirs, git, base, &roots).map_err(|why| {
             left(cut_failed(&format!(
                 "the git configuration could not be read again after the cut ({why}), so a \
                  filter it gained cannot be ruled out"
@@ -236,7 +242,7 @@ pub fn cut(
         })?;
         let mut named = provider::filter_drivers(&now);
         named.extend(
-            include_closure(dirs, base, &now, &roots)
+            include_closure(dirs, git, base, &now, &roots)
                 .map_err(left)?
                 .filters,
         );
@@ -263,7 +269,7 @@ pub fn cut(
             }
             // A refused pin leaves the worktree where it is: no run on record
             // points at it, so the refusal names it, for a person to remove.
-            let gitdir = pin(dirs, &path, &common, &roots, &before).map_err(|why| {
+            let gitdir = pin(dirs, git, &path, &common, &roots, &before).map_err(|why| {
                 Fail::policy(format!(
                     "cannot cut a worktree: {}, {why} — refusing to run a writer there, and the \
                      worktree is left there for a person to remove",
@@ -283,11 +289,11 @@ pub fn cut(
                     tool.what()
                 ))
             };
-            if let Some(why) = unfit(dirs, &printed, &top, &common, &roots) {
+            if let Some(why) = unfit(dirs, git, &printed, &top, &common, &roots) {
                 return Err(refuse(why));
             }
             let worktree = fs::canonicalize(&printed).map_err(|_| refuse("is not a directory"))?;
-            let gitdir = pin(dirs, &worktree, &common, &roots, &before).map_err(|why| {
+            let gitdir = pin(dirs, git, &worktree, &common, &roots, &before).map_err(|why| {
                 Fail::policy(format!(
                     "cannot cut a worktree: {} printed {printed}, {why} — refusing to run a \
                      writer there",
@@ -300,7 +306,7 @@ pub fn cut(
     if tool.checkout() == Checkout::Cahoots {
         check_out(
             dirs,
-            &binary,
+            git,
             &quiet,
             (&worktree, &gitdir),
             &roots,
@@ -323,7 +329,7 @@ pub fn cut(
 /// for a person to remove: no run on record points at it yet.
 fn check_out(
     dirs: &Dirs,
-    git: &Path,
+    git: &Tool,
     quiet: &[OsString],
     (worktree, gitdir): (&Path, &Path),
     roots: &[&Path],
@@ -335,7 +341,7 @@ fn check_out(
             worktree.display()
         )
     };
-    let listing = worktree_config_listing(dirs, worktree, gitdir, roots).map_err(|why| {
+    let listing = worktree_config_listing(dirs, git, worktree, gitdir, roots).map_err(|why| {
         cut_failed(&left(&format!(
             "the new worktree's git configuration could not be read ({why}), so its filters \
              cannot be turned off"
@@ -344,15 +350,15 @@ fn check_out(
     let filters = provider::filter_drivers(&listing);
     let argv = checkout_line(quiet, gitdir, worktree)?;
     let ran = spawn::run_helper_grouped(
-        git,
+        &git.at(roots)?,
         &argv,
         None,
         deadline.saturating_sub(started.elapsed()),
-        spawn::helper_path(roots),
+        git.path(roots),
         &cut_git_env(dirs, &filters)?,
     );
     // Whether or not it checked out: a filter named meanwhile may have run.
-    let now = worktree_config_listing(dirs, worktree, gitdir, roots).map_err(|why| {
+    let now = worktree_config_listing(dirs, git, worktree, gitdir, roots).map_err(|why| {
         cut_failed(&left(&format!(
             "the new worktree's git configuration could not be read again after the checkout \
              ({why}), so a filter it gained cannot be ruled out"
@@ -430,7 +436,13 @@ struct Reached {
 /// git would, a file that cannot be read, or a chain past git's own limit
 /// refuses the cut (33): a file not read is a filter that might not be
 /// turned off.
-fn include_closure(dirs: &Dirs, base: &Path, listing: &[u8], roots: &[&Path]) -> Res<Reached> {
+fn include_closure(
+    dirs: &Dirs,
+    git: &Tool,
+    base: &Path,
+    listing: &[u8],
+    roots: &[&Path],
+) -> Res<Reached> {
     let home = crate::dirs::passwd_home()?;
     let mut waiting: Vec<(provider::Include, usize)> = provider::includes(listing, base)
         .into_iter()
@@ -464,7 +476,7 @@ fn include_closure(dirs: &Dirs, base: &Path, listing: &[u8], roots: &[&Path]) ->
         if !read.insert((target.clone(), include.repository)) {
             continue;
         }
-        let bytes = file_listing(dirs, &target, roots)
+        let bytes = file_listing(dirs, git, &target, roots)
             .map_err(|why| refuse(&format!("cannot be read ({why})")))?;
         reached.filters.extend(provider::filter_drivers(&bytes));
         if include.repository {
@@ -483,17 +495,17 @@ fn include_closure(dirs: &Dirs, base: &Path, listing: &[u8], roots: &[&Path]) ->
 
 /// One configuration file as git reads it, its includes not followed
 /// (`config --file <file> --list -z --no-includes`), run from `/`.
-fn file_listing(dirs: &Dirs, file: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
-    let git = spawn::system_tool("git", roots).map_err(|fail| fail.message)?;
+fn file_listing(dirs: &Dirs, git: &Tool, file: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
+    let binary = git.at(roots).map_err(|fail| fail.message)?;
     let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
     args.extend([OsString::from("config"), "--file".into(), file.into()]);
     args.extend(["--list", "-z", "--no-includes"].map(OsString::from));
     let output = spawn::run_helper_with_env(
-        &git,
+        &binary,
         &args,
         Some(Path::new("/")),
         Duration::from_secs(10),
-        spawn::helper_path(roots),
+        git.path(roots),
         &[],
     )
     .map_err(|fail| fail.message)?;
@@ -613,6 +625,7 @@ fn did_not_finish(what: &str, started: Instant, deadline: Duration, fail: Fail) 
 /// may. In this order, and the first that fails is the reason.
 fn unfit(
     dirs: &Dirs,
+    git: &Tool,
     printed: &str,
     top: &Path,
     common: &Path,
@@ -641,7 +654,7 @@ fn unfit(
     {
         return Some("is inside cahoots' own directories");
     }
-    match spawn::git_roots(&canonical, roots) {
+    match spawn::git_roots(git, &canonical, roots) {
         Ok(Some((toplevel, theirs))) if toplevel == canonical && theirs == common => None,
         _ => Some("is not a worktree of the repository it was cut from"),
     }
@@ -654,12 +667,13 @@ fn unfit(
 /// worktree's `.git` names later is the writer's to change; this is not.
 fn pin(
     dirs: &Dirs,
+    git: &Tool,
     worktree: &Path,
     common: &Path,
     roots: &[&Path],
     before: &[OsString],
 ) -> Result<PathBuf, &'static str> {
-    let gitdir = git_dir_of(dirs, worktree, roots)
+    let gitdir = git_dir_of(dirs, git, worktree, roots)
         .filter(|gitdir| is_linked_gitdir(gitdir, common))
         .ok_or("whose git directory is not the repository's")?;
     if gitdir
@@ -695,10 +709,15 @@ fn linked_worktrees(common: &Path) -> Res<Vec<OsString>> {
 }
 
 /// The git directory git takes `worktree` to have now, canonical.
-pub(crate) fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Option<PathBuf> {
+pub(crate) fn git_dir_of(
+    dirs: &Dirs,
+    git: &Tool,
+    worktree: &Path,
+    roots: &[&Path],
+) -> Option<PathBuf> {
     let mut roots = roots.to_vec();
     roots.push(worktree);
-    let git = spawn::system_tool("git", &roots).ok()?;
+    let binary = git.at(&roots).ok()?;
     let mut args = quiet_git_args(dirs).ok()?;
     args.extend([
         OsString::from("-C"),
@@ -707,11 +726,11 @@ pub(crate) fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Optio
         "--absolute-git-dir".into(),
     ]);
     let output = spawn::run_helper_with_env(
-        &git,
+        &binary,
         &args,
         None,
         Duration::from_secs(10),
-        spawn::helper_path(&roots),
+        git.path(&roots),
         &[],
     )
     .ok()?;
@@ -735,6 +754,7 @@ pub(crate) fn is_linked_gitdir(gitdir: &Path, common: &Path) -> bool {
 /// following the worktree's `.git`, which the writer could have rewritten.
 pub fn changes(
     dirs: &Dirs,
+    git: &Tool,
     worktree: &Path,
     base: &Path,
     gitdir: Option<&Path>,
@@ -745,8 +765,8 @@ pub fn changes(
     }
     let mut roots = roots.to_vec();
     roots.push(worktree);
-    let gitdir = fork_git_dir(dirs, worktree, base, gitdir, &roots)?;
-    status(dirs, worktree, Some(&gitdir), &roots)
+    let gitdir = fork_git_dir(dirs, git, worktree, base, gitdir, &roots)?;
+    status(dirs, git, worktree, Some(&gitdir), &roots)
 }
 
 /// [`changes`] for a writer that worked in the caller's own tree, which a
@@ -756,6 +776,7 @@ pub fn changes(
 /// (`before`, from [`config_listing`]); otherwise this says why it did not.
 pub fn changes_in_place(
     dirs: &Dirs,
+    git: &Tool,
     tree: &Path,
     before: Option<&[u8]>,
     roots: &[&Path],
@@ -774,8 +795,8 @@ pub fn changes_in_place(
     let Some(before) = before else {
         return Err(not_run("was not recorded before the run"));
     };
-    match config_listing(dirs, tree, &roots) {
-        Ok(now) if now == before => status(dirs, tree, None, &roots),
+    match config_listing(dirs, git, tree, &roots) {
+        Ok(now) if now == before => status(dirs, git, tree, None, &roots),
         Ok(_) => Err(not_run("changed during the run")),
         Err(_) => Err(not_run("could not be read after the run")),
     }
@@ -787,8 +808,13 @@ pub fn changes_in_place(
 /// nothing. The snapshot taken before an in-place run and the reading
 /// compared with it after are both this, so that they can only differ where
 /// the configuration did.
-pub fn config_listing(dirs: &Dirs, dir: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
-    listing(dirs, dir, None, roots)
+pub fn config_listing(
+    dirs: &Dirs,
+    git: &Tool,
+    dir: &Path,
+    roots: &[&Path],
+) -> Result<Vec<u8>, String> {
+    listing(dirs, git, dir, None, roots)
 }
 
 /// [`config_listing`] as git reads it for the worktree whose pinned git
@@ -797,33 +823,35 @@ pub fn config_listing(dirs: &Dirs, dir: &Path, roots: &[&Path]) -> Result<Vec<u8
 /// as its checkout weighs it.
 fn worktree_config_listing(
     dirs: &Dirs,
+    git: &Tool,
     worktree: &Path,
     gitdir: &Path,
     roots: &[&Path],
 ) -> Result<Vec<u8>, String> {
-    listing(dirs, worktree, Some(gitdir), roots)
+    listing(dirs, git, worktree, Some(gitdir), roots)
 }
 
 fn listing(
     dirs: &Dirs,
+    git: &Tool,
     dir: &Path,
     gitdir: Option<&Path>,
     roots: &[&Path],
 ) -> Result<Vec<u8>, String> {
     let mut roots = roots.to_vec();
     roots.push(dir);
-    let git = spawn::system_tool("git", &roots).map_err(|fail| fail.message)?;
+    let binary = git.at(&roots).map_err(|fail| fail.message)?;
     let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
     if let Some(gitdir) = gitdir {
         args.extend(git_dir_args(gitdir, dir));
     }
     args.extend(["config", "--list", "--show-origin", "--show-scope", "-z"].map(OsString::from));
     let output = spawn::run_helper_with_env(
-        &git,
+        &binary,
         &args,
         Some(dir),
         Duration::from_secs(10),
-        spawn::helper_path(&roots),
+        git.path(&roots),
         &[],
     )
     .map_err(|fail| fail.message)?;
@@ -837,6 +865,7 @@ fn listing(
 /// the quiet settings.
 fn status(
     dirs: &Dirs,
+    git: &Tool,
     tree: &Path,
     gitdir: Option<&Path>,
     roots: &[&Path],
@@ -861,13 +890,13 @@ fn status(
         ]
         .map(OsString::from),
     );
-    let git = spawn::system_tool("git", roots).map_err(|fail| fail.message)?;
+    let binary = git.at(roots).map_err(|fail| fail.message)?;
     let output = spawn::run_helper_with_env(
-        &git,
+        &binary,
         &args,
         Some(tree),
         Duration::from_secs(30),
-        spawn::helper_path(roots),
+        git.path(roots),
         &[],
     )
     .map_err(|fail| fail.message)?;
@@ -897,12 +926,13 @@ fn status(
 /// the writer made, whose config would be the writer's.
 pub(crate) fn fork_git_dir(
     dirs: &Dirs,
+    git: &Tool,
     worktree: &Path,
     base: &Path,
     pinned: Option<&Path>,
     roots: &[&Path],
 ) -> Result<PathBuf, String> {
-    let common = spawn::git_roots(base, roots)
+    let common = spawn::git_roots(git, base, roots)
         .map_err(|fail| fail.message)?
         .map(|(_, common)| common);
     if let Some(pinned) = pinned {
@@ -925,11 +955,11 @@ pub(crate) fn fork_git_dir(
     let Some(common) = common else {
         return Err(gone());
     };
-    match spawn::git_roots(worktree, roots).map_err(|fail| fail.message)? {
+    match spawn::git_roots(git, worktree, roots).map_err(|fail| fail.message)? {
         Some((toplevel, theirs)) if theirs == common && toplevel == canonical_of(worktree) => {}
         _ => return Err(gone()),
     }
-    git_dir_of(dirs, worktree, roots)
+    git_dir_of(dirs, git, worktree, roots)
         .filter(|gitdir| is_linked_gitdir(gitdir, &common))
         .ok_or_else(gone)
 }
@@ -941,6 +971,7 @@ pub(crate) fn fork_git_dir(
 /// and is held to the path alone.
 pub fn discard(
     dirs: &Dirs,
+    git: &Tool,
     base: &Path,
     worktree: &Path,
     cut_by: Option<ProviderId>,
@@ -952,7 +983,7 @@ pub fn discard(
     if worktree == base || !worktree.starts_with(dirs.state.join("worktrees")) {
         return;
     }
-    if let (Ok(git), Ok(mut args)) = (spawn::system_tool("git", roots), quiet_git_args(dirs)) {
+    if let (Ok(binary), Ok(mut args)) = (git.at(roots), quiet_git_args(dirs)) {
         args.extend([
             OsString::from("-C"),
             base.into(),
@@ -962,11 +993,11 @@ pub fn discard(
             worktree.into(),
         ]);
         let _ = spawn::run_helper_with_env(
-            &git,
+            &binary,
             &args,
             None,
             Duration::from_secs(60),
-            spawn::helper_path(roots),
+            git.path(roots),
             &[],
         );
     }
@@ -1078,7 +1109,9 @@ mod tests {
         ] {
             fs::create_dir_all(dir).unwrap();
         }
-        let unfit_here = |path: &Path| unfit(&dirs, path.to_str().unwrap(), &top, &common, &[]);
+        let git = crate::tools::tests::tests_located().git;
+        let unfit_here =
+            |path: &Path| unfit(&dirs, &git, path.to_str().unwrap(), &top, &common, &[]);
 
         // A plain directory, so a git check would say "not a worktree": the
         // order makes it cahoots' directories that are named.
@@ -1108,7 +1141,7 @@ mod tests {
             Some("is the tree it was cut from, or inside it")
         );
         assert_eq!(
-            unfit(&dirs, "work", &top, &common, &[]),
+            unfit(&dirs, &git, "work", &top, &common, &[]),
             Some("is not an absolute path")
         );
         assert_eq!(
@@ -1216,8 +1249,10 @@ mod tests {
                 })
                 .collect()
         };
+        let git = crate::tools::tests::tests_located().git;
         let reached = include_closure(
             &dirs,
+            &git,
             &base,
             &listing(&[
                 ("local", "includeif.gitdir:**/worktrees/**.path", "a.cfg"),
@@ -1238,7 +1273,7 @@ mod tests {
         assert_eq!(reached.daft_hooks, ["daft.hooks.defaulttrust"]);
 
         // Nothing to reach: nothing read.
-        let none = include_closure(&dirs, &base, &listing(&[]), &[]).unwrap();
+        let none = include_closure(&dirs, &git, &base, &listing(&[]), &[]).unwrap();
         assert!(none.filters.is_empty() && none.daft_hooks.is_empty());
 
         // A file that cannot be read, or a path that cannot be resolved, is
@@ -1256,6 +1291,7 @@ mod tests {
         ] {
             let fail = include_closure(
                 &dirs,
+                &git,
                 &base,
                 &listing(&[("local", "include.path", path)]),
                 &[],
@@ -1279,6 +1315,7 @@ mod tests {
         );
         let fail = include_closure(
             &dirs,
+            &git,
             &base,
             &listing(&[("local", "include.path", "chain0.cfg")]),
             &[],

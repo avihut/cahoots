@@ -40,8 +40,10 @@ for a fork writer, it measures how much of its diff survived (Writers).
 
 **No flag widens authority.** There is no `--ungated`; the gate is bypassed
 only by configuration, which is a human's file. cahoots writes it only through
-human verbs — `settings`, `enable`, and `install` for the meter a person
-chose — and in place: the setting asked for changes, nothing else in the file
+human verbs — `settings`; `enable`, for the target, the program it pins, and
+the PATH and settings folder it records; and `install`, for the meter a person
+chose, the programs it pins, and the PATH and settings folders it records —
+and in place: the setting asked for changes, nothing else in the file
 does, and nothing is written that the config's own checks would refuse.
 `--in-place` works only if configuration allows it. Read-only roles are forced read-only by
 `validate_argv`, after every other decision.
@@ -110,10 +112,20 @@ touch the real directories — config, state, data, and the home `install`
 writes into — unless its developer sets `CAHOOTS_DEV_REAL_DIRS=1`, so a half-finished
 build or a test run cannot damage a working setup.
 
-**The callee's environment** is cleared and rebuilt from an allowlist. Vendor
-API keys are stripped unless that harness is configured for API billing: an
-inherited key silently moves the callee onto per-token billing that no meter
-sees — a budget bypass, not just a surprise.
+**The callee's environment** is cleared and rebuilt. From the caller it keeps
+only what cannot steer anything: `USER`, `LOGNAME`, `LANG`, `TERM`, `TZ` and
+`LC_*`. Everything else is cahoots' own. `PATH` is built as below (Binaries).
+`HOME` and `SHELL` come from the passwd database. `TMPDIR` is a private
+directory of the run's own under `/tmp` — never inside cahoots' own
+directories, since Codex makes it writable — removed once the run is over. The harness's settings
+folder (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) is the one config.toml names
+(`harness.<id>.home`, which `install` records from a person's terminal), or the
+harness's default under the passwd home, and never one inside the workspace or
+a temp directory. The caller's choice would be the callee's whole
+configuration: its hooks, its `notify` command and its MCP servers, which run
+unsandboxed. Vendor API keys are stripped unless that harness is configured
+for API billing: an inherited key silently moves the callee onto per-token
+billing that no meter sees — a budget bypass, not just a surprise.
 
 **A callee inherits the user's configuration of its harness** — their models
 and login, but also their approval settings and allow-rules, and those can
@@ -129,31 +141,51 @@ the writer sandbox — and cahoots says so rather than pretending otherwise.
 `mise run smoke` tries to cross each fence with the real CLIs, under your
 configuration.
 
-**Binaries** — the harness, the meter, `git`, `daft`, `ps` — resolve to
-canonical absolute paths; one inside the workspace (the caller's working
+**Binaries** run only from a path a person pinned, never from a PATH lookup:
+`git` and `ps` (`tools.<name>.binary`), each harness (`harness.<name>.binary`),
+`daft` (`fork.daft.binary`, and only once a person chose it with
+`fork.provider = "daft"`) and the usage meter. `install`, `enable` and
+`settings` pin them, from a terminal: each takes the first copy on the
+person's own PATH that passes the checks below — never one in a temp
+directory, a directory everyone can write, or the repository it is run in,
+which is not even asked its version — or the one the person names. At every use, the pinned path resolves
+to a canonical absolute path; one inside the workspace (the caller's working
 directory and repository, the directory a run works in, and the worktree cut
-for it), or group- or world-writable, is refused. `daft` runs only from the
-path a person chose (`fork.daft.binary`), never from a PATH lookup, and only
-once a person chose it (`fork.provider = "daft"`). A provider that cuts a
-worktree — `git` or `daft` — must identify itself by its `--version`, at a
-version cahoots was written against, before it cuts; that check runs from
-`/`. `git`, `daft`, `ps`, and a harness or a provider asked its version, look
-things up on a PATH without the workspace's directories in it, so `daft`
-cannot find a `git` that cahoots refused. `git`, `ps`, and a harness with no
-pinned binary still come from the caller's PATH, outside the workspace,
-until #61 pins them as `daft` is pinned here.
+for it), or group- or world-writable, is refused. Before a verb uses one, it
+must identify itself: `git`, a harness and `daft` by their `--version`, asked
+from `/`, at a version cahoots was written against (for `git`, also one that
+never fetches lazily: No lazy fetch, below), `ps` by answering for cahoots' own
+process. A pin that is missing or fails these refuses the verb (34), naming
+the fix; a harness without one is not a candidate. A pin is as trustworthy as
+the directory it names: cahoots refuses one others can write, and a person
+chooses it, but a directory the person lets their own agents write is one an
+agent could replace it in.
+
+**What the caller's PATH decides: nothing, on an agent verb.** Every program
+cahoots starts gets a PATH cahoots builds: the pinned program's own
+directories (not one everyone can write, nor a temp directory: others could
+put a program of their own beside the pin) — for `daft` and a harness, the
+pinned `git`'s first, so the `git` they start is the pinned one — then the
+system's (`/usr/bin:/bin:/usr/sbin:/sbin`), then the PATH a person recorded
+(`tools.path`; `install` records theirs, leaving out temp directories, any
+directory its group or everyone can write, and the repository it is run in).
+A recorded directory comes last, so it adds tools and never shadows a pinned
+or a system one. The callee gets the same PATH, so
+the interpreter a harness script names, and the `git`, hooks and tools the
+harness runs for itself unsandboxed, come from directories a person chose and
+never from the caller. The caller's PATH is read only by a person's verb,
+looking for something to pin or record, and by `doctor`, which only compares.
 
 **The usage meter decides admission, so the caller must not reach it.** It
 is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
 a meter that said "plenty left" whenever the caller liked would turn every cap
 off. So it runs only from a path a person pinned (`install` records where it
 found each, from a terminal; config.toml may name one) and never from a PATH
-lookup:
-the caller sets PATH, and a `ccusage` it planted in a directory it can write —
-a temp directory, say — would come first. It runs with a PATH of its own (its
-directories, then the system's — never the caller's, which would pick the
-interpreter a script meter runs on), HOME from the passwd database and no other
-variable, so the caller cannot point it at an empty log directory; and it runs
+lookup, as every binary is (above): a `ccusage` the caller planted in a
+directory it can write would otherwise come first. It runs with a PATH of its
+own, as every binary does (its directories, then the system's — never the
+caller's, which would pick the interpreter a script meter runs on), HOME from
+the passwd database and no other variable, so the caller cannot point it at an empty log directory; and it runs
 from `/`, where no repository can leave it a config file. ccusage always gets
 `--offline`, its own switch against fetching a price list; run with the
 network and every write under the home directory denied, it gave the same
@@ -284,12 +316,12 @@ clears it and sets `GIT_NO_LAZY_FETCH=1` after everything a caller passes —
 an empty list included — so nothing can drop or relax it, and
 `scripts/guard.sh` holds that shape. Every `git` cahoots runs gets it; so
 does `daft`, which hands it to the `git` it starts (it removes only git's
-discovery variables) — and that `git`, the first on the PATH daft is given,
-which need not be the one cahoots finds on its own, is held to the binary
-policy and the floor below before daft starts — and so does the callee, whose harness runs `git` of
-its own outside its tool sandbox. A step that needs an object the
-repository lacks fails as it would for one it cannot read: no base commit is
-recorded, the cut fails and the writer never starts, no patch is kept,
+discovery variables) — and that `git`, the first on the PATH daft is given, is
+the pinned one, held to the binary policy and the floor below before daft
+starts — and so does the callee, whose harness runs `git` of its own outside
+its tool sandbox, the pinned one first on its PATH too. A step that needs an
+object the repository lacks fails as it would for one it cannot read: no base
+commit is recorded, the cut fails and the writer never starts, no patch is kept,
 `changes_error` says why — and no transport starts. Only a `git` that
 honours the variable on every path to a fetch is run at all: 2.46 or later,
 or a May 2024 security release of an earlier line (2.39.4, 2.40.2, 2.41.1,
@@ -305,7 +337,7 @@ command line, whatever a builder does:
 
 | | Reader | Writer |
 |---|---|---|
-| Codex | `--sandbox read-only` | `--sandbox workspace-write`: writes under its working directory **and the temp directories** (`/tmp`, `$TMPDIR` — Codex's design, which build tools rely on), nowhere else; no network; Codex's repository check stays on |
+| Codex | `--sandbox read-only` | `--sandbox workspace-write`: writes under its working directory and `/tmp`, where cahoots puts **the run's own `$TMPDIR`** (Codex makes `$TMPDIR` writable by design, and build tools rely on it), nowhere else. The caller cannot widen that: Codex reads its writable roots from `TMPDIR`, and the callee's `TMPDIR` is never the caller's; no network; Codex's repository check stays on |
 | Claude Code | `--tools Read,Grep,Glob` · `dontAsk` | `--tools Read,Grep,Glob,Edit,Write` · `acceptEdits`: Claude Code confines edits to the working directory; **no Bash**, because without a sandbox a shell writes anywhere |
 
 `validate` also refuses each harness's own worktree flag (Claude Code's
@@ -327,8 +359,8 @@ sandbox here", and it shapes how their later interactive Codex sessions start
 in that repository. Readers do not cause it. cahoots neither writes that entry
 nor removes it.
 
-**What a writer can still do:** anything inside its worktree, and in the temp
-directories under Codex. That is why the caller is told to READ a change
+**What a writer can still do:** anything inside its worktree, and in `/tmp`
+under Codex (its run's own `$TMPDIR` is there). That is why the caller is told to READ a change
 before running anything in it. A writer cannot commit to the caller's branch,
 and cahoots never merges for anyone. `changes` is read with `git status`
 against the git directory recorded when the worktree was cut, never the one

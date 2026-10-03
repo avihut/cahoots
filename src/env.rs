@@ -95,6 +95,9 @@ pub fn dumb_terminal() -> bool {
     var("TERM").as_deref() == Some("dumb")
 }
 
+/// This process's PATH. Read only by a person's verb, looking for something
+/// to pin or a PATH to record, and by `doctor`, which only compares: no
+/// program cahoots starts ever gets it (`spawn::own_path`).
 pub fn path_var() -> Option<OsString> {
     std::env::var_os("PATH").filter(|value| !value.is_empty())
 }
@@ -103,24 +106,29 @@ pub fn tmpdir() -> Option<PathBuf> {
     var("TMPDIR").map(PathBuf::from)
 }
 
-/// The variables a callee inherits, by allowlist. Everything else — the
-/// caller's harness markers, tokens, proxies, `LD_PRELOAD` — is dropped.
-/// `HOME` is absent on purpose: the spawner sets it from the passwd database.
-pub fn callee_passthrough(harness: HarnessId) -> Vec<(OsString, OsString)> {
-    const ALWAYS: [&str; 8] = [
-        "PATH", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR", "SHELL", "TZ",
-    ];
-    let own_home: &[&str] = match harness {
-        HarnessId::Claude => &["CLAUDE_CONFIG_DIR"],
-        HarnessId::Codex => &["CODEX_HOME"],
-    };
+/// The settings folder a person's terminal names for Codex (`CODEX_HOME`):
+/// what `install` and `enable` record as `harness.codex.home`. Never passed
+/// on: a callee's comes from config.toml.
+pub fn codex_home() -> Option<PathBuf> {
+    var("CODEX_HOME").map(PathBuf::from)
+}
+
+/// The same for Claude Code (`CLAUDE_CONFIG_DIR`).
+pub fn claude_config_dir() -> Option<PathBuf> {
+    var("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+}
+
+/// The variables a callee inherits, by allowlist: only what cannot steer
+/// anything. Everything else — the caller's harness markers, tokens,
+/// proxies, `LD_PRELOAD`, and its `PATH`, `TMPDIR`, `SHELL` and settings
+/// folders — is dropped; the spawner sets those from what the caller cannot
+/// reach (`spawn::callee_environment`).
+pub fn callee_passthrough() -> Vec<(OsString, OsString)> {
+    const ALWAYS: [&str; 5] = ["USER", "LOGNAME", "LANG", "TERM", "TZ"];
     std::env::vars_os()
         .filter(|(name, value)| {
             let name = name.to_string_lossy();
-            !value.is_empty()
-                && (ALWAYS.contains(&name.as_ref())
-                    || own_home.contains(&name.as_ref())
-                    || name.starts_with("LC_"))
+            !value.is_empty() && (ALWAYS.contains(&name.as_ref()) || name.starts_with("LC_"))
         })
         .collect()
 }

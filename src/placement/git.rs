@@ -22,16 +22,15 @@ impl Provider for Git {
         "git"
     }
 
-    /// `git version 2.50.1 (Apple Git-155)`.
+    /// `git version 2.50.1 (Apple Git-155)`: git's one definition
+    /// (`tools::fingerprint_git`).
     fn fingerprint(&self, version_output: &str) -> Option<Version> {
-        let line = version_output.lines().next()?;
-        line.strip_prefix("git version ").and_then(Version::find_in)
+        crate::tools::fingerprint_git(version_output)
     }
 
-    /// 2.31 is where `rev-parse --path-format=absolute` came, which finding
-    /// a repository's top needs (`spawn::git_roots`).
+    /// `tools::GIT_TESTED`: the located git is held to it.
     fn tested(&self) -> (Version, Version) {
-        (Version(2, 31, 0), Version(3, 0, 0))
+        crate::tools::GIT_TESTED
     }
 
     fn deadline(&self) -> Duration {

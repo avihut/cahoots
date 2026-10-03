@@ -205,6 +205,14 @@ trips src/spawn.rs 'pub fn grouped(command: &mut Command) { command.env_clear();
 trips src/main.rs 'const LAZY: (&str, &str) = ("GIT_NO_LAZY_FETCH", "0");'
 trips src/tui/mod.rs 'use crate::meter::MeterId;'
 trips src/gate.rs 'use crate::tui::Rail;'
+# Rule 14: only a person's verb looks a program up on PATH, the old lookups
+# stay gone, and the variables that steer a callee stay in env and spawn.
+trips src/gate.rs 'fn git() -> Option<std::path::PathBuf> { crate::spawn::find_on_path("git", None) }'
+trips src/gate.rs 'fn path() -> Option<std::ffi::OsString> { crate::env::path_var() }'
+trips src/gate.rs 'fn git() { let _ = crate::spawn::system_tool("git", &[]); }'
+trips src/gate.rs 'fn home() -> Option<std::path::PathBuf> { crate::env::codex_home() }'
+trips src/gate.rs 'const HOME: &str = "CODEX_HOME";'
+trips src/gate.rs 'const TMP: &str = "TMPDIR";'
 # Rule 12: a PR's code never meets a secret. Rule 13: the release app's key is
 # named in release-flow.yml alone.
 trips .github/workflows/ci.yml 'on: pull_request_target'
@@ -233,6 +241,17 @@ git reset -q --hard "$base"
 sed -i.bak 's/^    name: gate$/    name: Gate/' .github/workflows/ci.yml && rm .github/workflows/ci.yml.bak
 fails "$scripts/guard.sh"
 git reset -q --hard "$base"
+
+# A pin is no lookup: `pinned_system_tool` passes rule 14, and so do the
+# lookups where a person's verb pins from them.
+printf 'fn daft(p: &std::path::Path) { let _ = crate::spawn::pinned_system_tool("daft", p, &[]); }\n' >>src/gate.rs
+mkdir -p src/meter
+printf 'fn found() { let _ = crate::spawn::find_on_path("ccusage", None); }\n' >>src/meter/detect.rs
+git add -A
+passes "$scripts/guard.sh"
+passes "$scripts/guard.sh" --staged
+git reset -q --hard "$base"
+git clean -qfd
 
 # --staged reads the INDEX: a violation staged and then fixed only in the
 # working tree is still what the commit would record.

@@ -5,7 +5,7 @@
 //! the gaps their words, `envelope` makes the checks the one JSON envelope, and
 //! a person at a terminal reads the same checks in words (`cli::endings`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::json;
@@ -25,6 +25,7 @@ use crate::pick;
 use crate::placement::provider::{self, ProviderId};
 use crate::registry::{Origin, Registry};
 use crate::spawn;
+use crate::tools::{self, Tool, ToolId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -193,10 +194,47 @@ pub fn checks() -> Res<Diagnostics> {
         }
     };
 
+    // The tools, located as every verb that starts one locates them, around
+    // the working directory: a pin there is refused, and never asked.
+    let around: Vec<PathBuf> = std::env::current_dir()
+        .map(|cwd| spawn::around(&cwd))
+        .unwrap_or_default();
+    let around: Vec<&Path> = around.iter().map(PathBuf::as_path).collect();
+    let recorded = registry.tools.recorded();
+    let locate =
+        |id: ToolId| tools::locate_one(id, registry.tools.of(id), recorded.as_deref(), &around);
+    let (git, ps) = (locate(ToolId::Git), locate(ToolId::Ps));
+    checks.push(match &git {
+        Ok(git) => {
+            let version = git.version().unwrap_or(Version(0, 0, 0));
+            let newer = version >= tools::GIT_TESTED.1;
+            check(
+                "tools: git",
+                if newer { Status::Warn } else { Status::Ok },
+                format!(
+                    "{} {version}{}",
+                    git.pinned().display(),
+                    if newer {
+                        " — newer than the versions cahoots was tested against"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+        }
+        Err(fail) => check("tools: git", Status::Fail, fail.message.clone()),
+    });
+    checks.push(match &ps {
+        Ok(ps) => check("tools: ps", Status::Ok, ps.pinned().display().to_string()),
+        Err(fail) => check("tools: ps", Status::Fail, fail.message.clone()),
+    });
+    checks.push(path_check(&registry));
+    let git = git.ok();
+
     for id in HarnessId::ALL {
         let entry = registry.harness(id);
         let tool = harness::harness(id);
-        match pick::locate(&registry, id, &[]) {
+        match pick::locate(&registry, git.as_ref(), id, &[]) {
             Ok((binary, version)) => {
                 let newer = version >= tool.tested().1;
                 checks.push(check(
@@ -222,6 +260,16 @@ pub fn checks() -> Res<Diagnostics> {
                 },
                 fail.message,
             )),
+        }
+        if let Some(home) = &entry.home {
+            checks.push(match pick::usable_home(id, home, &around) {
+                Ok(()) => check(
+                    format!("{id}: home"),
+                    Status::Ok,
+                    home.display().to_string(),
+                ),
+                Err(fail) => check(format!("{id}: home"), Status::Fail, fail.message),
+            });
         }
         checks.push(check(
             format!("{id}: target"),
@@ -257,7 +305,7 @@ pub fn checks() -> Res<Diagnostics> {
         });
     }
 
-    checks.push(fork_check(&registry));
+    checks.push(fork_check(&registry, git.as_ref()));
 
     let stale = crate::install::files::stale(&dirs, &registry.kinds);
     checks.push(if stale.is_empty() {
@@ -292,16 +340,94 @@ pub fn checks() -> Res<Diagnostics> {
     Ok(Diagnostics { checks, gaps })
 }
 
+/// The PATH a person recorded for the programs cahoots starts (`tools.path`):
+/// a warning when there is none, when some of it no longer qualifies, or
+/// when the PATH doctor runs with has qualifying directories it lacks. Never
+/// a failure: a missing tail costs function, not safety. It reads PATH only
+/// to compare, and writes nothing.
+fn path_check(registry: &Registry) -> Check {
+    let name = "tools: path";
+    let Some(recorded) = &registry.tools.path else {
+        return check(
+            name,
+            Status::Warn,
+            "not recorded — delegated agents find only their own, git's and the system's \
+             programs; `cahoots install` records your PATH",
+        );
+    };
+    let dirs: Vec<&str> = recorded.split(':').collect();
+    let fixed = tools::fixed_temp_roots();
+    let stale: Vec<&str> = dirs
+        .iter()
+        .copied()
+        .filter(|dir| tools::qualifies(Path::new(dir), &fixed).is_err())
+        .collect();
+    if !stale.is_empty() {
+        return check(
+            name,
+            Status::Warn,
+            format!(
+                "recorded, but {} no longer qualify — `cahoots install` records it again",
+                stale.join(", ")
+            ),
+        );
+    }
+    let around = std::env::current_dir()
+        .map(|cwd| tools::repository_around(&cwd))
+        .unwrap_or_default();
+    let now = tools::record_path(
+        env::path_var().as_deref(),
+        &tools::recording_temp_roots(),
+        &around,
+    );
+    let behind: Vec<String> = now
+        .path
+        .as_deref()
+        .unwrap_or_default()
+        .split(':')
+        .filter(|dir| !dir.is_empty() && !dirs.contains(dir))
+        .map(str::to_string)
+        .collect();
+    if !behind.is_empty() {
+        return check(
+            name,
+            Status::Warn,
+            format!(
+                "recorded, but your PATH now also has {} — `cahoots install` records it again",
+                behind.join(", ")
+            ),
+        );
+    }
+    check(
+        name,
+        Status::Ok,
+        format!(
+            "recorded: {} director{}",
+            dirs.len(),
+            if dirs.len() == 1 { "y" } else { "ies" }
+        ),
+    )
+}
+
 /// What cuts a writer's worktree, and whether it can: the provider a person
 /// chose, held to the same checks a cut makes, and — where git cuts in a
 /// repository that has a `daft.yml` — that daft could. Read around the
-/// working directory: the repository it is in, if any.
-fn fork_check(registry: &Registry) -> Check {
+/// working directory: the repository it is in, if any, as the located git
+/// reads it.
+fn fork_check(registry: &Registry, git: Option<&Tool>) -> Check {
     let fork = &registry.fork;
+    let Some(git) = git else {
+        return check(
+            "fork",
+            Status::Fail,
+            "cahoots cannot see a repository without its git, so --fork is refused until one \
+             is pinned (tools: git says why)",
+        );
+    };
     let cwd = std::env::current_dir().ok();
-    // A `git` planted in the workspace is refused here as everywhere, and
+    // A `git` pinned in the workspace is refused here as everywhere, and
     // never asked its version: that refusal is the check's answer.
-    let workspace = match cwd.as_deref().map(Workspace::around) {
+    let workspace = match cwd.as_deref().map(|cwd| Workspace::around(cwd, git)) {
         Some(Err(fail)) if fail.exit == Exit::Policy => {
             return check("fork", Status::Fail, fail.message);
         }
@@ -326,19 +452,9 @@ fn fork_check(registry: &Registry) -> Check {
     };
     match fork.provider {
         ProviderId::Git => {
-            // The provider's binary is missing: a failure, as for any provider.
-            // Without a git nothing is a repository either, so it is said so.
-            // A git that is there but refused — by the binary policy, or as
-            // too old to be held to never fetching lazily — says why itself.
-            if spawn::find_on_path("git", env::path_var().as_deref()).is_none() {
-                return check(
-                    "fork",
-                    Status::Fail,
-                    "no git on PATH — cahoots cannot see a repository without one, so --fork is \
-                     refused until git is there",
-                );
-            }
-            match provider::locate(ProviderId::Git, fork, &roots) {
+            // A git that is pinned but refused here — by the binary policy for
+            // this workspace — says why itself.
+            match provider::locate(ProviderId::Git, fork, git, &roots) {
                 Err(fail) => check("fork", Status::Fail, fail.message),
                 Ok((_, version)) if daft_yml => check(
                     "fork",
@@ -370,7 +486,7 @@ fn fork_check(registry: &Registry) -> Check {
             "cahoots needs `daft`: none is chosen — fork.provider is \"daft\"; choose one with \
              fork.daft.binary (`cahoots settings`)",
         ),
-        ProviderId::Daft => match provider::locate(ProviderId::Daft, fork, &roots) {
+        ProviderId::Daft => match provider::locate(ProviderId::Daft, fork, git, &roots) {
             Err(fail) => check("fork", Status::Fail, fail.message),
             Ok((binary, version)) => {
                 let what = format!(
