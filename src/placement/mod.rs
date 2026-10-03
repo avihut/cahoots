@@ -1185,6 +1185,7 @@ mod tests {
             home: root.join("home"),
             config: root.join("config"),
             state: root.join("state"),
+            data: root.join("data"),
             overridden: true,
         };
         let base = root.join("repo");
