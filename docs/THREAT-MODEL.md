@@ -349,11 +349,11 @@ repository's own HEAD is used. The output is compared in memory and only
 counts and a hash are kept. A failure of any step — including a refused `git`
 — records "unknown" and never changes an exit code. What remains: an agent
 with write access to the real git directory can change that repository, which
-is the person's own. Under these options nothing it writes there can run a
-command, with one exception, open until every `git` cahoots starts refuses
-to fetch: in a partial clone, a missing object is fetched from the promisor
-remote the repository's configuration names, and that remote's transport can
-be a command (an `ext::` URL). Survival is data (rule 6): nothing in routing reads it.
+is the person's own; nothing it writes there — hooks, fsmonitor, a diff
+driver, a filter, or a promisor remote, since no `git` cahoots starts ever
+fetches lazily (No lazy fetch, above) — can run a command under these
+options. In a partial clone, an object the diff needs and the repository
+lacks makes the measurement "unknown". Survival is data (rule 6): nothing in routing reads it.
 
 ## Learning is an injection channel
 

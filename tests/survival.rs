@@ -902,3 +902,52 @@ fn outcome_is_recorded_whatever_survival_says() {
     assert_eq!(lines.len(), 2);
     assert!(lines.iter().all(|line| line["unknown"] == "pin_changed"));
 }
+
+/// A writer's edit, accepted, in a partial clone that has lost its copy of
+/// the accepted file (`World::promisor`). The control shows the survival
+/// diff reads that object: without `GIT_NO_LAZY_FETCH`, it fetches.
+fn accepted_in_a_partial_clone(world: &World) -> String {
+    let run = writer(world);
+    let tip = accept_in(&world.work);
+    let blob = git_out(&world.work, &["rev-parse", "HEAD:keep.txt"]);
+    let base = lines_of(world, "finished", &run)[0]["base_commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    world.promisor();
+    world.lose(&blob);
+    assert!(
+        world.fetches_without_the_variable(&world.work, &["diff", &base, &tip]),
+        "the diff does not read the lost object, so this test could not fail"
+    );
+    let _ = fs::remove_file(world.root.join("fetch-tried"));
+    run
+}
+
+#[test]
+fn outcome_never_fetches_a_missing_object() {
+    let world = World::new();
+    let run = accepted_in_a_partial_clone(&world);
+    outcome(&world, &run);
+    outcome_recorded(&world, &run);
+    assert_eq!(survivals(&world, &run)[0]["unknown"], "git_failed");
+    assert!(
+        !world.fetch_tried(),
+        "survival started the promisor's transport"
+    );
+}
+
+#[test]
+fn report_never_fetches_a_missing_object() {
+    let world = World::new();
+    let run = accepted_in_a_partial_clone(&world);
+    world.age_history(&run, 15 * DAY);
+    let answer = report(&world);
+    assert_eq!(answer.data()["survival"]["measured"], 1);
+    assert_eq!(row_survival(&answer)["unknown"], 1);
+    assert_eq!(survivals(&world, &run)[0]["unknown"], "git_failed");
+    assert!(
+        !world.fetch_tried(),
+        "survival started the promisor's transport"
+    );
+}
