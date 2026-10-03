@@ -60,6 +60,9 @@ pub enum Event {
         target: Candidate,
         #[serde(default)]
         blind: bool,
+        /// Exploration promoted this run's target, fixed when it was chosen.
+        #[serde(default)]
+        exploration: bool,
         dir: PathBuf,
         state: State,
         exit: u8,
@@ -148,6 +151,7 @@ pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
         caller: record.caller,
         target: record.target.clone(),
         blind: record.blind,
+        exploration: record.exploration,
         dir: record.base.clone().unwrap_or_else(|| record.cwd.clone()),
         state: record.state,
         exit: record.exit_code.unwrap_or(1),
@@ -170,6 +174,7 @@ pub struct Story {
     pub caller: Option<HarnessId>,
     pub target: Candidate,
     pub blind: bool,
+    pub exploration: bool,
     pub dir: PathBuf,
     pub state: State,
     pub exit: u8,
@@ -195,6 +200,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                 caller,
                 target,
                 blind,
+                exploration,
                 dir,
                 state,
                 exit,
@@ -215,6 +221,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                         caller: *caller,
                         target: target.clone(),
                         blind: *blind,
+                        exploration: *exploration,
                         dir: dir.clone(),
                         state: *state,
                         exit: *exit,
@@ -417,5 +424,65 @@ mod tests {
         assert_eq!(error.exit, crate::exit::Exit::Internal);
         assert!(read(&dirs).is_empty());
         assert_eq!(std::fs::read_dir(path(&dirs)).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn old_records_and_finished_events_default_to_nonexploration() {
+        let event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        let Event::Finished { exploration, .. } = &event else {
+            panic!("not a finished event")
+        };
+        assert!(!exploration);
+        assert!(!stories(std::slice::from_ref(&event))[0].exploration);
+        // Written back, the boolean is explicit — false as well as true.
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["exploration"], false, "{json}");
+        // #29's own defaults are still what they were.
+        assert!(stories(&[event])[0].base_commit.is_none());
+    }
+
+    #[test]
+    fn exploration_round_trips_into_finished_stories() {
+        for label in [true, false] {
+            let mut event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+            let sha = "0123456789abcdef0123456789abcdef01234567";
+            let summary = crate::patch::summarize(b"diff --git a/f b/f\n@@ -0,0 +1 @@\n+x\n");
+            if let Event::Finished {
+                exploration,
+                blind,
+                task_kind,
+                base_commit,
+                patch,
+                ..
+            } = &mut event
+            {
+                *exploration = label;
+                *blind = true;
+                *task_kind = Some(TaskKindName::try_from("rust-review".to_string()).unwrap());
+                *base_commit = Commit::parse(sha);
+                *patch = Some(summary.clone());
+            }
+            let raw = serde_json::to_string(&event).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(json["exploration"], label);
+            let events = [
+                serde_json::from_str::<Event>(&raw).unwrap(),
+                Event::Outcome {
+                    t: 12,
+                    run: "a".into(),
+                    outcome: Outcome::Discarded,
+                },
+            ];
+            let folded = stories(&events);
+            // Beside kind, blind, base commit and patch; an outcome never
+            // changes the private value.
+            assert_eq!(folded[0].exploration, label);
+            assert!(folded[0].blind);
+            assert_eq!(folded[0].kind.as_ref().unwrap().as_str(), "rust-review");
+            assert_eq!(folded[0].base_commit.as_ref().unwrap().as_str(), sha);
+            assert_eq!(folded[0].patch.as_ref(), Some(&summary));
+            assert_eq!(folded[0].outcome, Some(Outcome::Discarded));
+            assert_eq!(stories(&events[..1])[0].exploration, label);
+        }
     }
 }

@@ -37,6 +37,8 @@ pub struct UserConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub review: ReviewConfig,
+    #[serde(default)]
+    pub explore: ExploreConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -84,6 +86,25 @@ pub struct KindConfig {
     pub description: String,
     pub role: Role,
     pub candidates: Vec<Candidate>,
+    #[serde(default)]
+    pub explore: KindExploreConfig,
+}
+
+/// `[explore]`: the share of new runs that try the next listed candidate
+/// first, per role. A role left out explores nothing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExploreConfig {
+    #[serde(default)]
+    pub share: BTreeMap<Role, f64>,
+}
+
+/// `[kinds.<name>.explore]`: this kind's own share, replacing its role's —
+/// zero included.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KindExploreConfig {
+    pub share: Option<f64>,
 }
 
 pub const MAX_KIND_DESCRIPTION_CHARS: usize = 1024;
@@ -170,6 +191,8 @@ pub const MAX_DATA_AGE_SECS: RangeInclusive<u64> = 60..=86_400;
 /// 0 is a real setting: no runs at all.
 pub const MAX_RUNS_PER_HOUR: RangeInclusive<u32> = 0..=600;
 pub const SAMPLE_RATE: RangeInclusive<f64> = 0.0..=1.0;
+/// A share of new runs, as a fraction. Containment refuses NaN and infinities.
+pub const EXPLORE_SHARE: RangeInclusive<f64> = 0.0..=1.0;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,8 +300,18 @@ impl UserConfig {
                 )));
             }
         }
+        for (role, share) in &self.explore.share {
+            in_range(&format!("explore.share.{role}"), *share, &EXPLORE_SHARE)?;
+        }
         for (name, entry) in &self.kinds {
             validate_kind_description(name, &entry.description)?;
+            if let Some(share) = entry.explore.share {
+                in_range(
+                    &format!("kinds.{name}.explore.share"),
+                    share,
+                    &EXPLORE_SHARE,
+                )?;
+            }
             if entry.candidates.is_empty() {
                 return Err(Fail::config(format!(
                     "kinds.{name}.candidates must contain at least one candidate"
@@ -614,5 +647,102 @@ mod tests {
         ] {
             assert!(UserConfig::parse(&format!("schema = 1\n{KIND}{field}")).is_err());
         }
+    }
+
+    #[test]
+    fn exploration_config_defaults_inherits_and_refuses_bad_data() {
+        let none = UserConfig::parse("schema = 1").unwrap();
+        assert!(none.explore.share.is_empty(), "every omitted share is zero");
+        let config = UserConfig::parse(&format!(
+            "schema = 1\n[explore]\nshare = {{ advise = 0.1, review = 0.05, implement = 1 }}\n{KIND}[kinds.rust-review.explore]\nshare = 0.0\n"
+        ))
+        .unwrap();
+        assert_eq!(config.explore.share[&Role::Advise], 0.1);
+        assert_eq!(config.explore.share[&Role::Implement], 1.0);
+        assert!(!config.explore.share.contains_key(&Role::Explore));
+        assert_eq!(
+            config.kinds.values().next().unwrap().explore.share,
+            Some(0.0),
+            "an explicit zero is a value, not an absence"
+        );
+        assert_eq!(
+            UserConfig::parse(&format!("schema = 1\n{KIND}"))
+                .unwrap()
+                .kinds
+                .values()
+                .next()
+                .unwrap()
+                .explore
+                .share,
+            None
+        );
+        // The endpoints are fine.
+        for share in ["0", "0.0", "1", "1.0"] {
+            assert!(
+                UserConfig::parse(&format!("schema = 1\n[explore.share]\nadvise = {share}"))
+                    .is_ok()
+            );
+        }
+        // Out of range, not a number, NaN and infinities: all refused, by key.
+        for (share, shown) in [
+            ("1.5", "1.5"),
+            ("-0.1", "-0.1"),
+            ("nan", "NaN"),
+            ("inf", "inf"),
+            ("-inf", "-inf"),
+        ] {
+            let fail = UserConfig::parse(&format!("schema = 1\n[explore.share]\nadvise = {share}"))
+                .unwrap_err();
+            assert_eq!(fail.exit, Exit::Config, "{share}");
+            assert_eq!(
+                fail.message,
+                format!("explore.share.advise = {shown}: must be 0–1"),
+                "{share}"
+            );
+            let fail = UserConfig::parse(&format!(
+                "schema = 1\n{KIND}[kinds.rust-review.explore]\nshare = {share}"
+            ))
+            .unwrap_err();
+            assert_eq!(fail.exit, Exit::Config, "{share}");
+            assert_eq!(
+                fail.message,
+                format!("kinds.rust-review.explore.share = {shown}: must be 0–1"),
+                "{share}"
+            );
+        }
+        for text in [
+            "schema = 1\n[explore.share]\nadvise = \"high\"",
+            "schema = 1\n[explore.share]\nadvise = true",
+            "schema = 1\n[explore.share]\ndeploy = 0.5",
+            "schema = 1\n[explore]\nrate = 0.5",
+            "schema = 1\n[explore]\nflags = []",
+            "schema = 1\n[explore]\nshare = 0.5",
+        ] {
+            assert_eq!(
+                UserConfig::parse(text).unwrap_err().exit,
+                Exit::Config,
+                "{text}"
+            );
+        }
+        for extra in [
+            "[kinds.rust-review.explore]\nrate = 0.5",
+            "[kinds.rust-review.explore]\ncandidates = []",
+            "[kinds.rust-review.explore]\nshare = \"1\"",
+        ] {
+            assert_eq!(
+                UserConfig::parse(&format!("schema = 1\n{KIND}{extra}"))
+                    .unwrap_err()
+                    .exit,
+                Exit::Config,
+                "{extra}"
+            );
+        }
+        // A nested exploration table cannot make a kind exist.
+        assert_eq!(
+            UserConfig::parse("schema = 1\n[kinds.rust-review.explore]\nshare = 0.2")
+                .unwrap_err()
+                .exit,
+            Exit::Config
+        );
     }
 }

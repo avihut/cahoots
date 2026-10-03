@@ -622,3 +622,218 @@ fn blind_setting_rejects_nonbooleans_and_remains_human_only() {
         assert!(!world.state.join("runs").exists());
     }
 }
+
+/// config.toml with its blank lines folded away: a table taken out of the
+/// file leaves the blank line that was above it, above whatever follows.
+fn squeezed(file: &std::path::Path) -> String {
+    fs::read_to_string(file).unwrap().replace("\n\n", "\n")
+}
+
+#[test]
+fn exploration_shares_set_and_reset_without_changing_neighboring_config() {
+    let world = World::new();
+    world.configure(&format!(
+        "[review]\n# Kept by hand.\nblind = true # mine\n{TASK_KINDS}"
+    ));
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let run = |args: &[&str]| {
+        let mut argv = vec!["settings"];
+        argv.extend(args);
+        let done = world.at_terminal(&argv).finish();
+        assert_eq!(done.code, 0, "{args:?}: {}", done.json);
+        done.json["data"]["changed"].clone()
+    };
+    assert_eq!(
+        run(&["set", "explore.share.review", "0.25"]),
+        json!([{"key": "explore.share.review", "value": 0.25, "origin": "config"}])
+    );
+    // The kind inherits it until it has a share of its own, zero included.
+    assert_eq!(
+        run(&["set", "kinds.rust-review.explore.share", "0"]),
+        json!([{"key": "kinds.rust-review.explore.share", "value": 0.0, "origin": "config"}])
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    for kept in [
+        "# Kept by hand.",
+        "blind = true # mine",
+        "# my kinds",
+        "# my description",
+        "[kinds.zed]",
+    ] {
+        assert!(text.contains(kept), "{kept}: {text}");
+    }
+    let config = cahoots::config::UserConfig::load(&file).unwrap();
+    assert_eq!(config.explore.share[&cahoots::model::Role::Review], 0.25);
+    let kind = config
+        .kinds
+        .values()
+        .find(|k| k.description == "Review Rust.")
+        .unwrap();
+    assert_eq!((kind.explore.share, kind.candidates.len()), (Some(0.0), 2));
+    // Resetting the kind restores inheritance — its role's share is the
+    // default it shows — and keeps its description, role and candidates.
+    assert_eq!(
+        run(&["reset", "kinds.rust-review.explore.share"]),
+        json!([{"key": "kinds.rust-review.explore.share", "value": 0.25, "origin": "default"}])
+    );
+    let config = cahoots::config::UserConfig::load(&file).unwrap();
+    let kind = config
+        .kinds
+        .values()
+        .find(|k| k.description == "Review Rust.")
+        .unwrap();
+    assert_eq!((kind.explore.share, kind.candidates.len()), (None, 2));
+    // A role's reset puts zero back, and takes only its own share.
+    assert_eq!(
+        run(&["reset", "explore.share.review"]),
+        json!([{"key": "explore.share.review", "value": 0.0, "origin": "default"}])
+    );
+    assert_eq!(squeezed(&file), before.replace("\n\n", "\n"));
+}
+
+#[test]
+fn exploration_share_edits_refuse_invalid_values_and_unknown_kinds() {
+    let world = World::new();
+    world.configure(TASK_KINDS);
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    for (key, value) in [
+        ("explore.share.advise", "-0.1"),
+        ("explore.share.advise", "1.5"),
+        ("explore.share.advise", "nan"),
+        ("explore.share.advise", "inf"),
+        ("explore.share.advise", "-inf"),
+        ("explore.share.advise", "50%"),
+        ("explore.share.advise", "half"),
+        ("kinds.rust-review.explore.share", "2"),
+        ("kinds.rust-review.explore.share", "nan"),
+        ("explore.share.deploy", "0.5"),
+        ("kinds.missing.explore.share", "0.5"),
+    ] {
+        let after = world.at_terminal(&["settings", "set", key, value]).finish();
+        assert_eq!(after.code, 2, "{key} {value}: {}", after.json);
+        assert_eq!(after.json["class"], "usage_error");
+        assert_eq!(fs::read_to_string(&file).unwrap(), before, "{key} {value}");
+    }
+    let after = world
+        .at_terminal(&["settings", "set", "kinds.missing.explore.share", "0.5"])
+        .finish();
+    assert!(
+        after.json["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown task kind \"missing\""),
+        "{}",
+        after.json
+    );
+    let after = world
+        .at_terminal(&["settings", "reset", "kinds.missing.explore.share"])
+        .finish();
+    assert_eq!(after.code, 2, "{}", after.json);
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+    // A stored value out of range is a configuration error, whoever wrote it.
+    world.configure("[explore.share]\nadvise = 1.5");
+    let stored = world.ask(&["pick", "--role", "advise"]);
+    assert_eq!(stored.code, 34, "{}", stored.json);
+    assert_eq!(stored.json["class"], "config_error");
+    assert_eq!(stored.json["retry"], "fix_config");
+    assert!(
+        stored
+            .message()
+            .ends_with("explore.share.advise = 1.5: must be 0–1"),
+        "{}",
+        stored.message()
+    );
+    let page = world.at_terminal(&["settings"]).finish();
+    assert_eq!(page.code, 34, "{}", page.json);
+    assert_eq!(world.run("answer", &[]).code, 34);
+    assert!(!world.state.join("runs").exists());
+    // Not at a terminal that can draw it, the page names its flags.
+    let dumb = world
+        .at_terminal_with(&["settings"], &[("TERM", "dumb")])
+        .finish();
+    assert_ne!(dumb.code, 0);
+}
+
+#[test]
+fn the_page_edits_role_and_kind_exploration_shares() {
+    let world = World::new();
+    world.configure(TASK_KINDS);
+    let file = world.config.join("config.toml");
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.resize(40, 180);
+    // Claude, Codex, meter, runs, review: then the roles.
+    for _ in 0..5 {
+        terminal.press(TAB);
+    }
+    terminal.wait_for("❯ Advise");
+    terminal.press(DOWN);
+    terminal.wait_for("❯ Exploration share: advise");
+    terminal.wait_for(
+        "The share of new runs that try the next listed candidate first. Every candidate passes the usual checks. Does not apply with --to or resume.",
+    );
+    terminal.press(ENTER);
+    terminal.wait_for("◀  0%  ▶");
+    terminal.press(RIGHT);
+    terminal.press(RIGHT);
+    terminal.wait_for("◀  10%  ▶");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [explore.share] advise = 0.1");
+    // Reset puts the default back, which takes the key out.
+    terminal.press(ENTER);
+    terminal.wait_for("◀  10%  ▶");
+    terminal.press(b"r");
+    terminal.wait_for("◀  0%  ▶");
+    terminal.press(ENTER);
+    terminal.wait_for("Took [explore.share] advise out of config.toml: back to 0%");
+    // Next to the kind: its share is inherited until it is set.
+    terminal.press(TAB);
+    terminal.wait_for("❯ Description");
+    for _ in 0..3 {
+        terminal.press(DOWN);
+    }
+    terminal.wait_for("❯ Exploration share");
+    terminal.wait_for(
+        "Inherited from this kind’s role. Set a share to override it; reset to inherit again.",
+    );
+    terminal.press(ENTER);
+    terminal.press(RIGHT);
+    terminal.wait_for("◀  5%  ▶");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [kinds.rust-review.explore] share = 0.05");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.text());
+    given_back(&after);
+    assert_eq!(
+        after.json["data"]["changed"],
+        json!([
+            {"key": "explore.share.advise", "value": 0.0, "origin": "default"},
+            {"key": "kinds.rust-review.explore.share", "value": 0.05, "origin": "config"},
+        ])
+    );
+    let config = cahoots::config::UserConfig::load(&file).unwrap();
+    assert!(config.explore.share.is_empty());
+    let kind = config
+        .kinds
+        .values()
+        .find(|k| k.description == "Review Rust.")
+        .unwrap();
+    assert_eq!((kind.explore.share, kind.candidates.len()), (Some(0.05), 2));
+    // Human-only, through the pure refusal and never by running a human verb
+    // against anything real.
+    for args in [
+        vec!["settings", "set", "explore.share.advise", "0.1"],
+        vec!["settings", "reset", "kinds.rust-review.explore.share"],
+    ] {
+        let mut argv = vec!["cahoots"];
+        argv.extend(args);
+        let cli = <cahoots::cli::Cli as clap::Parser>::try_parse_from(argv).unwrap();
+        assert_eq!(
+            cahoots::cli::refusal(&cli.verb, false).unwrap().exit.code(),
+            33
+        );
+    }
+}

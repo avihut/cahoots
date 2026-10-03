@@ -261,6 +261,54 @@ terminal says "not enough evidence". JSON keeps defined estimates and their
 sample size. `cahoots doctor` warns about current kind-list and
 person-supplied role-list candidates with no such evidence on record.
 
+### Exploration
+
+When one of your agents asks for help, the agent's own harness is left out of
+the list, so a role's later entries on the other harness may never get a turn
+and never earn a result you can learn from. Exploration gives a share of new
+runs to the next listed candidate. It is off until you set a share, per role
+or per task kind (a fraction from 0 to 1):
+
+```toml
+[explore]
+share = { advise = 0.1, review = 0.05 }
+
+[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [
+  { harness = "codex", model = "gpt-5.6-sol", effort = "high" },
+  { harness = "codex", model = "gpt-5.6-sol", effort = "medium" },
+]
+
+[kinds.rust-review.explore]
+share = 0.2
+```
+
+```sh
+cahoots settings set explore.share.advise 0.1
+cahoots settings set kinds.rust-review.explore.share 0.2
+cahoots settings reset kinds.rust-review.explore.share   # inherit the role's again
+```
+
+A role you leave out explores nothing. A kind takes its role's share unless
+it has its own, and its own `0` turns exploration off for it. For a selected
+run, the first two candidates left after the caller and disabled targets are
+removed swap places, and then every candidate is checked as usual: its slot,
+binary and usage cap still apply, and one that is refused is skipped like
+any other (the run is then not an exploration). There is no exploring with
+`--to` or in a `resume`, with one candidate left, or when the first two are
+the same model and effort. Efforts of one model count as different. For a
+second model or effort to be tried on the other harness, list it yourself;
+cahoots ships no such default.
+
+The run records `exploration: true` or `false`, in its record and in
+history, and shows it in its summaries — except in a [blind run](#learning-from-your-own-results)
+until you record an outcome for it. `pick` stays a preview of the ordinary
+first choice and adds `exploration_share`; a run that follows may try the
+next candidate. Results from explored runs count towards role calibration
+like any other.
+
 ### Usage meters
 
 cahoots reads your usage from one of these:
@@ -303,7 +351,7 @@ Set `[review] blind = true` (off by default) to judge results before seeing
 their model and effort. Each new run, including a resume, keeps its launch-time
 policy. Run envelopes and `review next` mark withheld identity with
 `blind: true` and omit model and effort; run envelopes also omit
-`model_reported`. After an honest `outcome` for that run, subsequent
+`model_reported` and the run's `exploration` label. After an honest `outcome` for that run, subsequent
 `status`/`result` views restore identity with `blind: false`. This works
 independently of review being enabled. The harness remains visible; `pick`,
 aggregate reports, config, answer and brief text, diagnostics, known kinds and

@@ -60,6 +60,18 @@ as a label, and resuming preserves the recorded kind, role and candidate
 under the existing resume checks; later edits to the kind cannot change
 that session's fence.
 
+**Exploration reorders a person's list; it adds no authority.** A person's
+exploration share may make a new run try the next listed candidate first.
+Exploration only reorders the selected list after the caller and disabled
+targets are removed. Every attempted candidate passes the existing binary
+policy, slots and gate, and the selected role supplies the same placement
+checks and final command-line fence. Exploration never applies with `--to` or
+to a resumed session. cahoots generates the run ID before selection; no
+caller flag, brief, repository value or callee output supplies the ID or draw
+seed. The label is recorded locally and changes no authority. The share is a
+typed fraction in the person's `config.toml` (`explore.share.<role>`,
+`kinds.<name>.explore.share`); learned data has no field for it.
+
 `install` writes a kind's description — the person's own text — into that
 kind's subagent definition in the caller's harness, where the caller's model
 reads it to decide when to hand a task over. It sits in the definition's
@@ -155,7 +167,13 @@ claim, not as instructions.
 is recorded for that run, its run envelopes and `review next` omit the
 target's model and effort; run envelopes also omit the model reported by
 the harness. They mark the run `blind: true`. Recording an outcome makes
-subsequent views show the identity and `blind: false`. The full identity
+subsequent views show the identity and `blind: false`. Until an outcome is
+recorded for that run, blind run envelopes omit its exploration label as well
+as the target's model and effort and the model reported by the harness. A
+known list order and an exploration label could otherwise identify the
+selected candidate. The private record and finished history retain the
+label; an outcome reveals its saved value in subsequent run views. A blind
+resume needs its own outcome to reveal its label. The full identity
 remains in local records for supervision, accounting and learning; routing,
 gates, command lines and sandbox fences are unchanged. The harness remains
 visible: with two harnesses, an agent caller already knows its target is

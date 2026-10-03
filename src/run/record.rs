@@ -72,6 +72,11 @@ pub struct RunRecord {
     /// Launch-time policy; an outcome changes the public view, not this flag.
     #[serde(default)]
     pub blind: bool,
+    /// Whether exploration promoted this run's target: the private label,
+    /// frozen when selection succeeded. Serialized always, false included.
+    /// Never in a blind envelope before the run has an outcome.
+    #[serde(default)]
+    pub exploration: bool,
     /// Where the callee works. For a fork this is the BASE until the
     /// supervisor has cut the worktree, and the worktree from then on.
     pub cwd: PathBuf,

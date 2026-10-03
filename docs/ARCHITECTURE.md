@@ -96,7 +96,8 @@ supervisor, and there is no second, foreground path to keep honest.
 Blind runs snapshot `[review] blind` at launch, including each new resume.
 Private records and Finished history keep the full candidate and original
 policy. Run envelopes and `review next` omit model and effort until a folded
-outcome for that run exists; run envelopes also omit `model_reported`. Older
+outcome for that run exists; run envelopes also omit `model_reported` and the
+private `exploration` label (the key is absent, not false). Older
 records and history default to open. The answer itself is never rewritten.
 
 ## The gate (M1)
@@ -211,6 +212,46 @@ registry show sorted `Kind · <name>` sections after Roles: the description
 is fixed display metadata with a CLI edit route; role is a choice and
 candidates are an order. Required kind fields have no defaults and cannot be
 reset individually.
+
+**Exploration.** A role has a share of new runs that try the NEXT listed
+candidate first, so a second model or effort on the non-caller harness can
+earn evidence: with a caller on one harness, a list's later entries on the
+other were otherwise never reached. Config: `[explore] share = { advise = 0.1 }`
+per role (`explore.share.<role>`) and `[kinds.<name>.explore] share = 0.2` per
+kind. Every omitted role share is `0.0`; a kind inherits its role's share
+unless it has its own, and an explicit kind `0.0` overrides a nonzero role. A
+share is a finite fraction from 0 to 1, inclusive; anything else is a config
+error (34). It needs neither `review.enabled`, `review.apply_routing` nor
+`calibrate`. The two-candidates-on-a-harness list is a person's own
+configuration, not a shipped default.
+
+`run` generates the run's ID after its preselection checks and before
+choosing a target, and that ID is the one recorded. The draw is a pure
+function of it and the share: `fnv1a64(b"cahoots-explore-v1\0" + id) % 10_000`
+is below `share * 10_000` (`src/explore.rs`; the prefix keeps it apart from the
+review sample). There is no seed, flag or environment hook, and nothing is
+drawn again after a target is chosen. The draw only reorders: caller, disabled
+and `--to` filtering happen first, then, for a selected draw, entries 0 and 1
+of the REMAINING list swap (at most one adjacent swap, tail untouched), then
+the usual eligibility walk runs every candidate through slots, binary policy
+and gate. Exploration is off with `--to`, with fewer than two candidates left,
+and when the first two are the same candidate (harness, model and effort —
+different efforts are distinct). It never falls back from a kind's list into
+its role's. A promoted candidate that is refused is skipped like any other:
+the run goes to the next one that passes and is labelled `exploration: false`.
+
+The label is `exploration: bool` on `run.json`, the finished history event
+and its folded story, and on open run summaries (and `status`'s run list).
+It is fixed when selection succeeds — a callee that then fails, times out or
+is cancelled keeps it — and a later config change relabels nothing. Older
+data means false. A resume draws nothing and records false; its
+`resumed_from` names the session it continues. A blind run's envelopes omit
+the key entirely until that run has its own outcome, then show the saved
+boolean; the private record and history keep it throughout. `pick` previews
+ordinary routing: no draw, no ID, and it adds `exploration_share` — the share
+a run would use, or zero where exploration is suppressed. A run after a pick
+may therefore pick the next candidate. Role calibration counts exploration
+runs like any other role-only run; kind runs stay out of it.
 
 Harness CLIs drift. That is detected, not templated around: a tested-version
 range per harness (`doctor`), checked-in `--help` captures with a test that
