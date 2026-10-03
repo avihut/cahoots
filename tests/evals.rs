@@ -320,7 +320,8 @@ fn an_unfinished_run_is_refused() {
         "{}",
         refused.json
     );
-    world.ask(&["cancel", &id]);
+    world.wait_running(&id);
+    world.cancel_settled(&id);
 }
 
 #[test]

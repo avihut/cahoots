@@ -391,7 +391,7 @@ fn a_refused_exploration_falls_back_without_a_false_label() {
         world.record(&answer.run_id())["target"]["harness"],
         "claude"
     );
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
 
     // Both first entries refused, the third admitted: the third, unlabelled.
     let list = [
@@ -423,7 +423,7 @@ fn a_refused_exploration_falls_back_without_a_false_label() {
     );
     assert!(first < second, "{message}");
     assert!(message.contains("is already running as many jobs as it may"));
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
 }
 
 #[test]
@@ -544,7 +544,7 @@ fn exploration_keeps_slots_depth_and_the_active_run_ceiling() {
     assert!(
         busy.message().contains("codex (m1, high)") && busy.message().contains("codex (m2, high)")
     );
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
     // A sole candidate keeps its own 32.
     let world = world_with(&format!(
         "{}{}",
@@ -557,7 +557,7 @@ fn exploration_keeps_slots_depth_and_the_active_run_ceiling() {
     let held = hold(&world, &["--to", "codex"]);
     let sole = world.run("hello", &[]);
     assert_eq!(sole.code, 32, "{}", sole.json);
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
     // Depth: a delegated run does not delegate, share or no share.
     let world = world_with(&config);
     let brief = world.brief("hello");
@@ -578,7 +578,7 @@ fn exploration_keeps_slots_depth_and_the_active_run_ceiling() {
     let full = world.run("hello", &[]);
     assert_eq!(full.code, 32, "{}", full.json);
     assert_eq!(full.json["class"], "busy");
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
 }
 
 #[test]
@@ -711,7 +711,8 @@ fn the_label_is_fixed_across_run_views_and_configuration_changes() {
     for open in views(&world, &id, 51) {
         assert_eq!(open["exploration"], true, "{open}");
     }
-    let cancelled = world.ask(&["cancel", &id]);
+    world.wait_running(&id);
+    let cancelled = world.cancel_settled(&id);
     assert_eq!(cancelled.code, 42, "{}", cancelled.json);
     assert_eq!(cancelled.data()["exploration"], true);
     for done in views(&world, &id, 42) {
@@ -794,7 +795,7 @@ fn resume_keeps_the_session_without_a_new_draw() {
         brief.to_str().unwrap(),
     ]);
     assert_eq!(busy.code, 51, "{}", busy.json);
-    assert_eq!(world.ask(&["cancel", &held]).code, 42);
+    assert_eq!(world.cancel_settled(&held).code, 42);
 }
 
 #[test]
@@ -988,7 +989,8 @@ fn a_blind_run_withholds_its_exploration_label_until_its_outcome() {
     let open_id = started.run_id();
     seen_hidden(&open_id, 51);
     assert_eq!(world.record(&open_id)["exploration"], true);
-    let cancelled = world.ask(&["cancel", &open_id]);
+    world.wait_running(&open_id);
+    let cancelled = world.cancel_settled(&open_id);
     assert_eq!(cancelled.code, 42, "{}", cancelled.json);
     hidden(cancelled.data(), "codex");
     finished(&world, &open_id);

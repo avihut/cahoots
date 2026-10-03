@@ -262,7 +262,7 @@ fn kind_runs_keep_gate_and_busy_refusals() {
         world.record(&running.run_id())["state"] == "running"
     });
     assert_eq!(run(&world, "hello", &["--to", "codex"]).code, 32);
-    assert_eq!(world.ask(&["cancel", &running.run_id()]).code, 42);
+    assert_eq!(world.cancel_settled(&running.run_id()).code, 42);
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn a_kind_is_recorded_in_every_run_summary_and_history() {
     common::wait_until("running", || {
         world.record(&running.run_id())["state"] == "running"
     });
-    let cancelled = world.ask(&["cancel", &running.run_id()]);
+    let cancelled = world.cancel_settled(&running.run_id());
     assert_eq!(cancelled.code, 42);
     assert_eq!(cancelled.data()["kind"], "rust-review");
     // Finishing writes the summary before appending history; wait for that append.

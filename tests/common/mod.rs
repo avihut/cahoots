@@ -677,6 +677,63 @@ impl World {
         serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// The path a `FAKE: leak_gate=` child waits on. Creating the file lets
+    /// the leaked child write, so a test makes it once the run is over and
+    /// the clock decides nothing.
+    pub fn leak_gate(&self) -> PathBuf {
+        self.root.join("leak-gate")
+    }
+
+    /// Lets a gated leaked child go (`leak_gate`).
+    pub fn open_leak_gate(&self) {
+        fs::write(self.leak_gate(), "").unwrap();
+    }
+
+    /// The pid of the child a `FAKE: leak=` run left in its group, from the
+    /// supervisor's log.
+    pub fn leaked_child(&self, run: &str) -> i64 {
+        let log = fs::read_to_string(self.run_file(run, "supervisor.log")).unwrap();
+        log.lines()
+            .find_map(|line| line.strip_prefix("[callee] left a child in the group: "))
+            .expect("the fake reports its leaked child")
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Waits until `run` is running: the supervisor has taken it up. A
+    /// launched run may be a long way from there on a loaded machine.
+    pub fn wait_running(&self, run: &str) {
+        let last = std::cell::RefCell::new(Value::Null);
+        wait_until_described(
+            || format!("run {run} is running (last seen state: {})", last.borrow()),
+            || {
+                *last.borrow_mut() = self.record(run)["state"].clone();
+                *last.borrow() == "running"
+            },
+        );
+    }
+
+    /// `cancel`, which answers 51 when its own patience runs out before the
+    /// run is over — true to its contract, and what a loaded machine makes of
+    /// a wind-down that takes longer than it. Then the test waits on the
+    /// state, the run reaching an end, and asks again: a finished run's
+    /// cancel is its report. What the caller asserts of the answer is
+    /// untouched.
+    pub fn cancel_settled(&self, run: &str) -> Answer {
+        let first = self.ask(&["cancel", run]);
+        if !cancel_is_pending(&first) {
+            return first;
+        }
+        wait_until(&format!("run {run} ends after its cancel"), || {
+            !matches!(
+                self.record(run)["state"].as_str(),
+                Some("starting" | "running")
+            )
+        });
+        self.ask(&["cancel", run])
+    }
+
     pub fn run_file(&self, run: &str, name: &str) -> PathBuf {
         self.state.join("runs").join(run).join(name)
     }
@@ -704,12 +761,42 @@ pub fn alive(pid: i64) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-pub fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+/// Whether a `cancel` answer is the legitimate "not over yet": 51 with a run
+/// that is `starting` or `running`. Any other 51 is a wrong answer, not a
+/// slow machine, and fails the test here; every other code is the caller's
+/// to judge.
+pub fn cancel_is_pending(answer: &Answer) -> bool {
+    if answer.code != 51 {
+        return false;
+    }
+    let state = &answer.data()["state"];
+    assert!(
+        state == "starting" || state == "running",
+        "cancel answered 51 for a run that is {state}, not unfinished: {}",
+        answer.json
+    );
+    true
+}
+
+/// How long a test waits on a state before it gives up. Generous: a machine
+/// under heavy load runs the same code, only far later, and the deadline is
+/// reached only when the wait fails.
+pub const WAIT_SECS: u64 = 120;
+
+pub fn wait_until(what: &str, check: impl FnMut() -> bool) {
+    wait_until_described(|| what.to_string(), check);
+}
+
+/// `wait_until`, with `what` worked out when the wait gives up, so it can say
+/// what the last look found.
+pub fn wait_until_described(what: impl Fn() -> String, mut check: impl FnMut() -> bool) {
     let started = std::time::Instant::now();
     while !check() {
         assert!(
-            started.elapsed().as_secs() < 30,
-            "timed out waiting until {what}"
+            started.elapsed().as_secs() < WAIT_SECS,
+            "timing wait gave up after {WAIT_SECS}s, still waiting until {} \
+             (a deadline passed, not a wrong answer)",
+            what()
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
