@@ -67,7 +67,12 @@ pub struct Evidence {
 pub fn evidence(stories: &[Story], role: Role, candidate: &Candidate, since: u64) -> Evidence {
     let mut e = Evidence::default();
     for story in stories {
-        if story.role != role || story.target != *candidate || story.t < since {
+        // Named task lists have their own order; only role-only runs calibrate roles.
+        if story.kind.is_some()
+            || story.role != role
+            || story.target != *candidate
+            || story.t < since
+        {
             continue;
         }
         match (story.outcome, story.state) {
@@ -135,6 +140,7 @@ mod tests {
                 run: format!("{}-{n}", target.model.as_str()),
                 t: 1000,
                 role: Role::Review,
+                kind: None,
                 caller: None,
                 target: target.clone(),
                 dir: PathBuf::from("/w"),
@@ -240,5 +246,28 @@ mod tests {
             let mut other = original.clone();
             assert!(!learned.apply(Role::Advise, &mut other));
         }
+    }
+
+    #[test]
+    fn kind_outcomes_do_not_calibrate_role_lists() {
+        let first = candidate(HarnessId::Codex, "m");
+        let mut second = first.clone();
+        second.effort = Effort::Medium;
+        let mut tagged = stories(&first, &all(Outcome::Discarded, 10));
+        tagged.extend(stories(&second, &all(Outcome::Accepted, 10)));
+        for story in &mut tagged {
+            story.kind =
+                Some(crate::model::TaskKindName::try_from("rust-review".to_string()).unwrap());
+        }
+        assert_eq!(evidence(&tagged, Role::Review, &first, 0).n, 0);
+        assert_eq!(
+            suggest(&tagged, Role::Review, &[first.clone(), second.clone()], 0),
+            None
+        );
+        tagged.extend(stories(&first, &all(Outcome::Discarded, 8)));
+        tagged.extend(stories(&second, &all(Outcome::Accepted, 8)));
+        assert_eq!(evidence(&tagged, Role::Review, &first, 0).n, 8);
+        assert_eq!(evidence(&tagged, Role::Review, &second, 0).accepted, 8);
+        assert_eq!(suggest(&tagged, Role::Review, &[first, second], 0), Some(0));
     }
 }

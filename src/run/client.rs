@@ -14,7 +14,7 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
 use crate::harness::Progress;
-use crate::model::{HarnessId, Role};
+use crate::model::{HarnessId, Role, TaskKindName};
 use crate::paths::{self, Workspace};
 use crate::pick;
 use crate::placement::{self, Placement};
@@ -31,7 +31,8 @@ const RETENTION_SECS: u64 = 7 * 24 * 3600;
 const RESULT_INLINE_BYTES: usize = 64 * 1024;
 
 pub struct RunArgs {
-    pub role: Role,
+    pub role: Option<Role>,
+    pub kind: Option<String>,
     pub brief: PathBuf,
     pub to: Option<HarnessId>,
     pub caller: Option<HarnessId>,
@@ -79,16 +80,23 @@ pub fn refuse_inside_a_sandbox(verb: &str) -> Res<()> {
 }
 
 /// `pick`: who `run` would ask right now, and why not the others. Read-only.
-pub fn pick_target(role: Role, caller: Option<HarnessId>, to: Option<HarnessId>) -> Res<Envelope> {
+pub fn pick_target(
+    role: Option<Role>,
+    kind: Option<&str>,
+    caller: Option<HarnessId>,
+    to: Option<HarnessId>,
+) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
     let registry = Registry::load(&dirs)?;
+    let routing = registry.routing(role, kind)?;
     let caller = resolve_caller(caller)?;
     let cwd = std::env::current_dir()
         .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
     let workspace = Workspace::around(&cwd)?;
-    let choice = pick::choose(&dirs, &registry, role, caller, to, &workspace.roots())?;
+    let choice = pick::choose(&dirs, &registry, &routing, caller, to, &workspace.roots())?;
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({
-        "role": role,
+        "role": routing.role,
+        "kind": routing.kind,
         "target": choice.target,
         "harness_version": choice.version.to_string(),
         "gate_notes": choice.admission.notes,
@@ -100,6 +108,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
     refuse_inside_a_sandbox("run")?;
     let dirs = Dirs::resolve()?;
     let registry = Registry::load(&dirs)?;
+    let routing = registry.routing(args.role, args.kind.as_deref())?;
     let caller = resolve_caller(args.caller)?;
 
     let depth = env::depth();
@@ -113,7 +122,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
     let workspace = Workspace::around(&cwd)?;
     let (placement, run_dir) = placement::decide(
-        args.role,
+        routing.role,
         args.fork,
         args.in_place,
         args.dir.as_deref(),
@@ -137,14 +146,15 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         ));
     }
 
-    let choice = pick::choose(&dirs, &registry, args.role, caller, args.to, &roots)?;
+    let choice = pick::choose(&dirs, &registry, &routing, caller, args.to, &roots)?;
     let target = choice.target;
 
     launch(
         &dirs,
         &registry,
         Launch {
-            role: args.role,
+            role: routing.role,
+            kind: routing.kind.cloned(),
             caller,
             target,
             placement,
@@ -168,6 +178,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
 /// supervised, stopped and reported exactly like any other.
 struct Launch {
     role: Role,
+    kind: Option<TaskKindName>,
     caller: Option<HarnessId>,
     target: crate::model::Candidate,
     placement: Placement,
@@ -198,6 +209,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         exit_code: None,
         message: None,
         role: launch.role,
+        kind: launch.kind,
         caller: launch.caller,
         target: launch.target,
         base: launch.base,
@@ -334,6 +346,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
         &registry,
         Launch {
             role: old.role,
+            kind: old.kind,
             caller,
             target: old.target,
             placement: old.placement,
@@ -456,6 +469,7 @@ fn summary(record: &RunRecord) -> Value {
         "run": record.id,
         "state": record.state,
         "role": record.role,
+        "kind": record.kind,
         "target": record.target,
         "model_reported": record.progress.model_reported,
         "cwd": record.cwd,

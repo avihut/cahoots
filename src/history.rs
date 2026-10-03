@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Fail, Res};
-use crate::model::{Candidate, HarnessId, Role};
+use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::run::record::{RunRecord, State, now};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,8 @@ pub enum Event {
         t: u64,
         run: String,
         role: Role,
+        #[serde(default)]
+        task_kind: Option<TaskKindName>,
         caller: Option<HarnessId>,
         target: Candidate,
         dir: PathBuf,
@@ -125,6 +127,7 @@ pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
         t: ended,
         run: record.id.clone(),
         role: record.role,
+        task_kind: record.kind.clone(),
         caller: record.caller,
         target: record.target.clone(),
         dir: record.base.clone().unwrap_or_else(|| record.cwd.clone()),
@@ -143,6 +146,7 @@ pub struct Story {
     pub run: String,
     pub t: u64,
     pub role: Role,
+    pub kind: Option<TaskKindName>,
     pub caller: Option<HarnessId>,
     pub target: Candidate,
     pub dir: PathBuf,
@@ -164,6 +168,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                 t,
                 run,
                 role,
+                task_kind,
                 caller,
                 target,
                 dir,
@@ -180,6 +185,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                         run: run.clone(),
                         t: *t,
                         role: *role,
+                        kind: task_kind.clone(),
                         caller: *caller,
                         target: target.clone(),
                         dir: dir.clone(),
@@ -263,5 +269,39 @@ mod tests {
             Some(Outcome::Reworked),
             "the last word wins"
         );
+    }
+
+    const OLD_FINISHED: &str = r#"{"kind":"finished","t":10,"run":"a","role":"review","caller":"claude","target":{"harness":"codex","model":"m","effort":"high"},"dir":"/w","state":"done","exit":0,"tokens_in":9,"tokens_out":1,"secs":3,"sampled":true}"#;
+
+    #[test]
+    fn task_kind_does_not_replace_the_history_event_kind() {
+        let mut event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        if let Event::Finished { task_kind, .. } = &mut event {
+            *task_kind = Some(TaskKindName::try_from("rust-review".to_string()).unwrap());
+        }
+        let raw = serde_json::to_string(&event).unwrap();
+        assert_eq!(raw.matches("\"kind\":").count(), 1);
+        assert_eq!(raw.matches("\"task_kind\":").count(), 1);
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["kind"], "finished");
+        assert_eq!(json["task_kind"], "rust-review");
+        let folded = stories(&[
+            serde_json::from_str(&raw).unwrap(),
+            Event::Outcome {
+                t: 12,
+                run: "a".into(),
+                outcome: Outcome::Accepted,
+            },
+        ]);
+        assert_eq!(folded[0].kind.as_ref().unwrap().as_str(), "rust-review");
+        assert_eq!(folded[0].outcome, Some(Outcome::Accepted));
+    }
+
+    #[test]
+    fn old_finished_events_have_no_task_kind() {
+        let event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        assert!(stories(std::slice::from_ref(&event))[0].kind.is_none());
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("task_kind").unwrap().is_null());
     }
 }

@@ -182,6 +182,29 @@ and in place (`config::edit`, on `toml_edit`): a setting changes, the rest
 of the file — its comments, its order, its tables — stays as the person
 wrote it, and nothing is written that `UserConfig::parse` would refuse.
 
+**Task kinds are routing under roles.** Optional `[kinds.<name>]` tables in
+config.toml each require a description, a role and an ordered list of typed
+candidates. No kinds ship by default. `pick --kind <name>` and
+`run --kind <name>` resolve that role and exact list together before any
+placement, brief access or candidate probe. An explicit `--role` must match;
+`--to` only narrows this list, and exhaustion never falls back to role
+candidates. Distinct efforts of one model stay distinct. Descriptions are
+metadata, never added to argv or a delegated brief.
+
+The selected label is `kind` on pick, run records, summaries and folded
+history stories; finished history events use `task_kind` because their
+`kind` field already tags the event as `finished`. Role-only runs serialize
+null; missing fields in older data mean none. Versions remain 1. Resume
+copies the saved label, role and candidate without resolving the current
+kind, so removal, rename or redefinition cannot change the session's fence.
+
+Complete definitions are created, renamed or removed in config.toml. Existing
+fields are editable through human settings commands. The page and human
+registry show sorted `Kind · <name>` sections after Roles: the description
+is fixed display metadata with a CLI edit route; role is a choice and
+candidates are an order. Required kind fields have no defaults and cannot be
+reset individually.
+
 Harness CLIs drift. That is detected, not templated around: a tested-version
 range per harness (`doctor`), checked-in `--help` captures with a test that
 every flag cahoots emits appears in them, and detection by fingerprint — a
@@ -189,7 +212,8 @@ binary named `agy` may be the Antigravity IDE launcher, not the agent CLI.
 
 ## Writers (M4)
 
-`cahoots run --role implement --fork` is the only way anything gets written.
+`cahoots run --role implement --fork`, or `run --kind <name> --fork` for a
+kind whose role is `implement`, selects the same writer.
 The client decides and checks (`placement::decide`: a writer without `--fork`
 is refused; `--in-place` needs `limits.allow_in_place`); the detached
 supervisor does the cutting (`placement::cut`), because in a daft repository
@@ -333,3 +357,9 @@ the default by itself.
 
 **Designed, not built:** tuning the effort level (the plan allowed one notch),
 and a `learn revert` finer than `learn reset`.
+
+Role calibration uses evidence only from runs without a task kind. Kind lists
+stay in the person's order even when learned routing is enabled. Ordinary
+report totals still include kind runs, and outcomes, sampling and role-scoped
+notes retain their behavior. No per-kind calibration or report grouping exists
+yet.

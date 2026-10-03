@@ -33,16 +33,19 @@ pub fn settings(action: Option<SettingsAction>, person: bool, title: String) -> 
             let now = current(&dirs)?;
             let setting = settings::find(&now, &key)?;
             let value = setting.parse(&value)?;
-            settings::set(&file, setting.key, &value)?;
-            (setting.key, said_set(setting.key, &value))
+            settings::set(&file, &setting.key, &value)?;
+            (setting.key.clone(), said_set(&setting.key, &value))
         }
         Some(SettingsAction::Reset { key: name }) => {
             // The file must be good to change it at all.
             let now = current(&dirs)?;
             let key = Key::parse(&name)
                 .ok_or_else(|| Fail::new(Exit::Usage, format!("no setting is called {name:?}")))?;
-            settings::reset(&file, key)?;
-            (key, said_reset(key, now.iter().find(|s| s.key == key)))
+            settings::reset(&file, &key)?;
+            (
+                key.clone(),
+                said_reset(&key, now.iter().find(|s| s.key == key)),
+            )
         }
     };
     let after = current(&dirs)?;
@@ -117,7 +120,7 @@ fn page(dirs: &Dirs, person: bool, title: String) -> Res<Said> {
                 Ok(done) => {
                     match saved.iter_mut().find(|(key, _)| *key == setting.key) {
                         Some((_, line)) => line.clone_from(&done),
-                        None => saved.push((setting.key, done.clone())),
+                        None => saved.push((setting.key.clone(), done.clone())),
                     }
                     now = current(dirs)?;
                     page.saved(rows(&now, &dirs.home), done);
@@ -128,7 +131,7 @@ fn page(dirs: &Dirs, person: bool, title: String) -> Res<Said> {
     }
     // The terminal is given back before anything more is said.
     drop(terminal);
-    let keys: Vec<Key> = saved.iter().map(|(key, _)| *key).collect();
+    let keys: Vec<Key> = saved.iter().map(|(key, _)| key.clone()).collect();
     let lines: Vec<String> = saved.into_iter().map(|(_, line)| line).collect();
     Ok(Said {
         envelope: changed(&keys, &now),
@@ -155,10 +158,10 @@ fn page_closed(title: String, lines: Vec<String>) -> Ending {
 pub(super) fn enabled(dirs: &Dirs, harness: HarnessId, on: bool, title: String) -> Res<Ending> {
     let key = Key::Enabled(harness);
     let said = if on {
-        said_set(key, &Value::Bool(true))
+        said_set(&key, &Value::Bool(true))
     } else {
         let now = current(dirs)?;
-        said_reset(key, now.iter().find(|s| s.key == key))
+        said_reset(&key, now.iter().find(|s| s.key == key))
     };
     Ok(Ending::just(Some(title), Last::Said(said)))
 }
@@ -206,7 +209,7 @@ fn in_order(entry: &RoleEntry) -> String {
     let list = entry
         .candidates
         .iter()
-        .map(|c| format!("{} {} {}", c.harness, c.model.as_str(), c.effort))
+        .map(candidate)
         .collect::<Vec<_>>()
         .join(", then ");
     match entry.learned_swap.and_then(|at| entry.candidates.get(at)) {
@@ -239,19 +242,19 @@ fn carry_out(file: &Path, setting: &Setting, answer: Answer) -> Res<String> {
     let chosen_meter = setting.key == Key::Meter;
     match chosen {
         Some(value) if chosen_meter || Some(&value) != setting.default.as_ref() => {
-            settings::set(file, setting.key, &value)?;
-            Ok(said_set(setting.key, &value))
+            settings::set(file, &setting.key, &value)?;
+            Ok(said_set(&setting.key, &value))
         }
         _ => {
-            settings::reset(file, setting.key)?;
-            Ok(said_reset(setting.key, Some(setting)))
+            settings::reset(file, &setting.key)?;
+            Ok(said_reset(&setting.key, Some(setting)))
         }
     }
 }
 
 /// What saving `value` as `key` wrote to config.toml: the line the page
 /// shows, and a verb's words say.
-fn said_set(key: Key, value: &Value) -> String {
+fn said_set(key: &Key, value: &Value) -> String {
     match value {
         Value::Candidates(list) if !list.is_empty() => {
             let (table, name) = split(key);
@@ -266,7 +269,7 @@ fn said_set(key: Key, value: &Value) -> String {
 
 /// What taking `key` out of config.toml did, and what it is back to: the
 /// setting's default, as it was before (`before`).
-fn said_reset(key: Key, before: Option<&Setting>) -> String {
+fn said_reset(key: &Key, before: Option<&Setting>) -> String {
     let (table, name) = split(key);
     match before {
         Some(setting) => {
@@ -299,7 +302,7 @@ fn saved(dotted: &str, value: impl std::fmt::Display) -> String {
 
 /// A key's table, and its own name: `harness.codex.cap` is `harness.codex`
 /// and `cap`.
-fn split(key: Key) -> (String, String) {
+fn split(key: &Key) -> (String, String) {
     split_dotted(&key.name())
 }
 
@@ -314,7 +317,7 @@ fn rows(settings: &[Setting], home: &Path) -> Vec<Row> {
     settings
         .iter()
         .map(|setting| {
-            let (label, help) = words(setting.key);
+            let (label, help) = words(&setting.key);
             Row {
                 id: setting.key.name(),
                 section: section(setting.key.section()).to_string(),
@@ -336,13 +339,14 @@ fn rows(settings: &[Setting], home: &Path) -> Vec<Row> {
         .collect()
 }
 
-fn section(section: Section) -> &'static str {
+fn section(section: Section) -> String {
     match section {
-        Section::Harness(id) => name(id),
-        Section::Meter => "Usage meter",
-        Section::Runs => "Runs",
-        Section::Review => "Review",
-        Section::Roles => "Roles",
+        Section::Harness(id) => name(id).to_string(),
+        Section::Meter => "Usage meter".to_string(),
+        Section::Runs => "Runs".to_string(),
+        Section::Review => "Review".to_string(),
+        Section::Roles => "Roles".to_string(),
+        Section::TaskKind(name) => format!("Kind · {name}"),
     }
 }
 
@@ -354,20 +358,20 @@ fn name(id: HarnessId) -> &'static str {
 }
 
 /// A setting's label, and what it does.
-fn words(key: Key) -> (String, String) {
+fn words(key: &Key) -> (String, String) {
     let (label, help): (&str, String) = match key {
         Key::Enabled(id) => (
             "Enabled",
             format!(
                 "Runs go to {} only while this is on. A run sends your code to its vendor.",
-                name(id)
+                name(*id)
             ),
         ),
         Key::Cap(id) => (
             "Usage cap",
             format!(
                 "A run starts only while less than this much of {}'s plan is used.",
-                name(id)
+                name(*id)
             ),
         ),
         Key::AbortAt(id) => (
@@ -375,18 +379,18 @@ fn words(key: Key) -> (String, String) {
             format!(
                 "A run that is already going is stopped once this much of {}'s plan is used. \
                  Above the usage cap.",
-                name(id)
+                name(*id)
             ),
         ),
         Key::MaxConcurrent(id) => (
             "Runs at once",
-            format!("How many runs {} takes at the same time.", name(id)),
+            format!("How many runs {} takes at the same time.", name(*id)),
         ),
         Key::Billing(id) => (
             "Billing",
-            format!("How {} is paid for when cahoots runs it.", name(id)),
+            format!("How {} is paid for when cahoots runs it.", name(*id)),
         ),
-        Key::Binary(id) => ("Program", format!("Which {} program runs.", name(id))),
+        Key::Binary(id) => ("Program", format!("Which {} program runs.", name(*id))),
         Key::Meter => (
             "Meter",
             "Where cahoots reads how much of each plan is used.".to_string(),
@@ -479,16 +483,19 @@ fn words(key: Key) -> (String, String) {
                 .to_string(),
         ),
         Key::Candidates(role) => (
-            role_label(role),
+            role_label(*role),
             format!(
                 "Who takes {} runs, first choice first. The next is tried when one is over its \
                  cap or busy.",
-                role_work(role)
+                role_work(*role)
             ),
         ),
+        Key::KindDescription(name) => ("Description", format!("When to use this task kind, in your words. Change it with settings set kinds.{name}.description or in config.toml.")),
+        Key::KindRole(_) => ("Role", "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own.".into()),
+        Key::KindCandidates(_) => ("Candidates", "Who takes this kind of task, first choice first. Only this list is tried; the role's list is not used.".into()),
         Key::Calibrate(role) => {
             return (
-                format!("{} learns", role_label(role)),
+                format!("{} learns", role_label(*role)),
                 "Let what reviews learn reorder this list of yours, by one place at most."
                     .to_string(),
             );
@@ -525,7 +532,7 @@ fn shown(value: Option<&Value>, kind: &Kind) -> String {
         (Some(Value::Share(share)), _) => format!("{}%", percent(*share)),
         (Some(Value::Candidates(list)), _) => list
             .iter()
-            .map(|c| format!("{} {}", c.harness, c.model.as_str()))
+            .map(candidate)
             .collect::<Vec<_>>()
             .join(", then "),
         (Some(value), _) => value.to_string(),
@@ -537,7 +544,12 @@ fn percent(share: f64) -> i64 {
 }
 
 fn candidate(candidate: &crate::model::Candidate) -> String {
-    format!("{} {}", candidate.harness, candidate.model.as_str())
+    format!(
+        "{} {} {}",
+        candidate.harness,
+        candidate.model.as_str(),
+        candidate.effort
+    )
 }
 
 fn tui_unit(unit: Unit) -> tui::Unit {
@@ -551,11 +563,17 @@ fn tui_unit(unit: Unit) -> tui::Unit {
 
 /// Where a value comes from, and what changing it does.
 fn note(setting: &Setting) -> String {
+    if matches!(
+        &setting.key,
+        Key::KindDescription(_) | Key::KindRole(_) | Key::KindCandidates(_)
+    ) {
+        return "Set in config.toml. This kind has no default; create, rename or remove its table in config.toml.".into();
+    }
     if setting.locked {
         return "Runs stop at 100% while the usage cap is 100%: lower the cap to set this."
             .to_string();
     }
-    match (setting.origin, setting.key, &setting.value) {
+    match (setting.origin, &setting.key, &setting.value) {
         (Origin::Config, _, _) => match &setting.default {
             Some(default) => format!(
                 "Set in config.toml. The default is {}.",
@@ -601,11 +619,12 @@ fn edit(setting: &Setting, home: &Path) -> Edit {
         _ => None,
     };
     match &setting.kind {
+        Kind::Text => Edit::Fixed,
         Kind::Toggle => Edit::Toggle,
         Kind::Choice(names) => Edit::Choose {
             choices: names
                 .iter()
-                .map(|n| Choice::new(*n, choice_hint(setting.key, n)))
+                .map(|n| Choice::new(*n, choice_hint(&setting.key, n)))
                 .collect(),
             current: names
                 .iter()
@@ -669,13 +688,19 @@ fn edit(setting: &Setting, home: &Path) -> Edit {
     }
 }
 
-fn choice_hint(key: Key, choice: &str) -> &'static str {
+fn choice_hint(key: &Key, choice: &str) -> &'static str {
     match (key, choice) {
         (Key::Billing(_), "subscription") => "your signed-in plan: API keys are kept from the run",
         (Key::Billing(_), _) => "per-token API billing, on purpose: the key is passed through",
         (Key::Meter, "agent-usage") => MeterId::AgentUsage.summary(),
         (Key::Meter, "ccusage") => MeterId::Ccusage.summary(),
         (Key::Meter, _) => NO_METER,
+        (Key::KindRole(_), "advise") => "a second opinion; read-only",
+        (Key::KindRole(_), "review") => "find problems; read-only",
+        (Key::KindRole(_), "explore") => "read the codebase; read-only",
+        (Key::KindRole(_), "implement") => {
+            "make a change; writes in its own worktree or where you permit"
+        }
         _ => "",
     }
 }
@@ -739,13 +764,13 @@ mod tests {
         );
         let codex = Key::Enabled(HarnessId::Codex);
         assert_eq!(
-            said_set(codex, &Value::Bool(true)),
+            said_set(&codex, &Value::Bool(true)),
             "Saved to config.toml: [harness.codex] enabled = true",
             "what `enable codex` says"
         );
         let settings = now("schema = 1\nharness.codex.enabled = true");
         assert_eq!(
-            said_reset(codex, settings.iter().find(|s| s.key == codex)),
+            said_reset(&codex, settings.iter().find(|s| s.key == codex)),
             "Took [harness.codex] enabled out of config.toml: back to off",
             "what `enable codex --off` says"
         );
@@ -767,11 +792,7 @@ mod tests {
         advise.candidates.swap(0, 1);
         advise.learned_swap = Some(0);
         let first = candidate(&advise.candidates[0]);
-        let order: Vec<String> = advise
-            .candidates
-            .iter()
-            .map(|c| format!("{} {} {}", c.harness, c.model.as_str(), c.effort))
-            .collect();
+        let order: Vec<String> = advise.candidates.iter().map(candidate).collect();
 
         let ending = super::registry(&dirs, &registry, "cahoots registry".into()).unwrap();
         assert_eq!(ending.title.as_deref(), Some("cahoots registry"));
@@ -952,7 +973,109 @@ mod tests {
         .unwrap();
         assert_eq!(
             done,
-            "Saved to config.toml: [roles.explore] candidates, claude sonnet first"
+            "Saved to config.toml: [roles.explore] candidates, claude sonnet medium first"
+        );
+    }
+
+    fn kind_settings() -> Vec<Setting> {
+        settings::current(&UserConfig::parse(r#"schema = 1
+[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "codex", model = "m", effort = "medium" }]
+"#).unwrap(), None, None)
+    }
+
+    #[test]
+    fn kind_rows_have_words_choices_and_a_fixed_description() {
+        let now = kind_settings();
+        let rows = rows(&now, Path::new("/tmp"));
+        let kinds: Vec<_> = rows
+            .iter()
+            .filter(|r| r.section == "Kind · rust-review")
+            .collect();
+        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds[0].label, "Description");
+        assert_eq!(
+            kinds[0].help,
+            "When to use this task kind, in your words. Change it with settings set kinds.rust-review.description or in config.toml."
+        );
+        assert_eq!(kinds[0].edit, Edit::Fixed);
+        assert_eq!(kinds[1].label, "Role");
+        assert_eq!(
+            kinds[1].help,
+            "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own."
+        );
+        let Edit::Choose { choices, current } = &kinds[1].edit else {
+            panic!("not a choice")
+        };
+        assert_eq!(*current, Some(1));
+        assert_eq!(
+            choices,
+            &vec![
+                Choice::new("advise", "a second opinion; read-only"),
+                Choice::new("review", "find problems; read-only"),
+                Choice::new("explore", "read the codebase; read-only"),
+                Choice::new(
+                    "implement",
+                    "make a change; writes in its own worktree or where you permit"
+                )
+            ]
+        );
+        assert_eq!(kinds[2].label, "Candidates");
+        assert_eq!(
+            kinds[2].help,
+            "Who takes this kind of task, first choice first. Only this list is tried; the role's list is not used."
+        );
+        assert!(matches!(kinds[2].edit, Edit::Order { .. }));
+        assert_eq!(kinds[2].value, "codex m high, then codex m medium");
+        for row in kinds {
+            assert_eq!(
+                row.note,
+                "Set in config.toml. This kind has no default; create, rename or remove its table in config.toml."
+            );
+        }
+    }
+
+    #[test]
+    fn saving_a_kind_field_never_resets_its_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("config.toml");
+        let now = kind_settings();
+        let source = r#"schema = 1
+[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "codex", model = "m", effort = "medium" }]
+"#;
+        std::fs::write(&file, source).unwrap();
+        let role = settings::find(&now, "kinds.rust-review.role").unwrap();
+        assert_eq!(
+            carry_out(&file, role, Answer::Chose(1)).unwrap(),
+            "Saved to config.toml: [kinds.rust-review] role = \"review\""
+        );
+        let list = settings::find(&now, "kinds.rust-review.candidates").unwrap();
+        assert!(
+            carry_out(&file, list, Answer::Order(vec![0, 1]))
+                .unwrap()
+                .ends_with("codex m high first")
+        );
+        assert!(
+            carry_out(&file, list, Answer::Order(vec![1, 0]))
+                .unwrap()
+                .ends_with("codex m medium first")
+        );
+        let config = UserConfig::load(&file).unwrap();
+        let entry = config.kinds.values().next().unwrap();
+        assert_eq!(entry.description, "Review Rust.");
+        assert_eq!(entry.role, Role::Review);
+        assert_eq!(entry.candidates.len(), 2);
+        let after = settings::current(&config, None, None);
+        let envelope = changed(std::slice::from_ref(&list.key), &after);
+        let json = serde_json::to_value(envelope).unwrap();
+        assert_eq!(
+            json["data"]["changed"][0]["value"],
+            "codex:m:medium,codex:m:high"
         );
     }
 }

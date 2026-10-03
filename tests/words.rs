@@ -437,3 +437,54 @@ fn doctor_and_report_keep_the_envelope_when_stdin_is_not_a_terminal() {
     let json: serde_json::Value = serde_json::from_str(text[at..].trim()).unwrap();
     assert_eq!(json["class"], "usage_error");
 }
+
+#[test]
+fn registry_shows_kind_sections_and_efforts() {
+    let world = World::new();
+    world.configure(r#"[kinds.zed]
+description = "Last task."
+role = "advise"
+candidates = [{ harness = "claude", model = "other", effort = "low" }]
+[kinds.alpha]
+description = "First task."
+role = "review"
+candidates = [{ harness = "codex", model = "custom", effort = "high" }, { harness = "codex", model = "custom", effort = "medium" }]
+"#);
+    let after = world.as_a_person(&["registry"]).finish();
+    assert_eq!(after.code, 0);
+    no_json(&after);
+    let text = after.text();
+    assert!(text.find("◇  Roles").unwrap() < text.find("◇  Kind · alpha").unwrap());
+    assert!(text.find("◇  Kind · alpha").unwrap() < text.find("◇  Kind · zed").unwrap());
+    for shown in [
+        "Description",
+        "Role",
+        "Candidates",
+        "First task.",
+        "codex custom high, then codex custom medium",
+        "claude other low",
+    ] {
+        assert!(text.contains(shown), "{text}");
+    }
+    let piped = world.at_terminal(&["registry"]).finish();
+    assert_eq!(
+        piped.json["data"]["kinds"]["alpha"]["description"],
+        "First task."
+    );
+    assert_eq!(
+        piped.json["data"]["kinds"]["alpha"]["candidates"][1]["effort"],
+        "medium"
+    );
+    world.configure("");
+    assert_eq!(
+        world.at_terminal(&["registry"]).finish().json["data"]["kinds"],
+        serde_json::json!({})
+    );
+    assert!(
+        !world
+            .as_a_person(&["registry"])
+            .finish()
+            .text()
+            .contains("Kind ·")
+    );
+}

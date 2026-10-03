@@ -202,3 +202,81 @@ fn a_resumed_writer_goes_back_into_its_own_worktree() {
         "{argv}"
     );
 }
+
+#[test]
+fn resume_keeps_the_original_kind_after_config_changes() {
+    let world = World::new();
+    let definition = r#"[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [{ harness = "codex", model = "custom", effort = "medium" }]
+"#;
+    world.configure(definition);
+    let brief = world.brief("hello");
+    let first = world.ask(&[
+        "run",
+        "--kind",
+        "rust-review",
+        "--brief",
+        brief.to_str().unwrap(),
+    ]);
+    assert_eq!(first.code, 0, "{}", first.json);
+    let session = world.record(&first.run_id())["progress"]["session_id"].clone();
+    for new_config in [
+        String::new(),
+        definition.replace("rust-review", "renamed"),
+        definition
+            .replace("review\"", "implement\"")
+            .replace("codex", "claude"),
+    ] {
+        world.configure(&new_config);
+        let brief = world.brief("FAKE: dump");
+        let again = world.ask(&[
+            "resume",
+            &first.run_id(),
+            "--brief",
+            brief.to_str().unwrap(),
+        ]);
+        assert_eq!(again.code, 0, "{}", again.json);
+        assert_eq!(again.data()["kind"], "rust-review");
+        assert_eq!(again.data()["role"], "review");
+        assert_eq!(again.data()["target"], first.data()["target"]);
+        assert_eq!(
+            world.record(&again.run_id())["progress"]["session_id"],
+            session
+        );
+        assert!(
+            argv_of(&again)
+                .join(" ")
+                .contains(r#"sandbox_mode="read-only""#)
+        );
+    }
+    world.enable(&["claude"]);
+    assert_eq!(
+        world
+            .ask(&[
+                "resume",
+                &first.run_id(),
+                "--brief",
+                brief.to_str().unwrap()
+            ])
+            .code,
+        31
+    );
+    world.enable(&["claude", "codex"]);
+    world.meter(
+        serde_json::json!({"guarded": {"code": 24, "percent": 95}}),
+        "",
+    );
+    assert_eq!(
+        world
+            .ask(&[
+                "resume",
+                &first.run_id(),
+                "--brief",
+                brief.to_str().unwrap()
+            ])
+            .code,
+        24
+    );
+}

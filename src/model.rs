@@ -155,6 +155,49 @@ impl From<ModelName> for String {
     }
 }
 
+/// Stable identity of a person-defined task; never an argv value or path.
+pub const MAX_TASK_KIND_NAME_CHARS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TaskKindName(String);
+
+impl TaskKindName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TaskKindName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for TaskKindName {
+    type Error = String;
+    fn try_from(name: String) -> Result<Self, String> {
+        if (1..=MAX_TASK_KIND_NAME_CHARS).contains(&name.len())
+            && name.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-'))
+        {
+            Ok(Self(name))
+        } else {
+            Err(format!(
+                "task kind name {name:?} must be 1–64 of [a-z0-9_-] and start with a lowercase letter"
+            ))
+        }
+    }
+}
+
+impl From<TaskKindName> for String {
+    fn from(name: TaskKindName) -> String {
+        name.0
+    }
+}
+
 /// One way to staff a role: a harness, a model on it, and an effort level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,5 +244,33 @@ mod tests {
         assert!("deploy".parse::<Role>().is_err());
         assert!(!Role::Implement.is_read_only());
         assert!(Role::Implement.reserve() > Role::Review.reserve());
+    }
+
+    #[test]
+    fn task_kind_names_are_stable_bare_keys() {
+        for good in ["a".to_string(), "rust-review_2".into(), "a".repeat(64)] {
+            let name = TaskKindName::try_from(good.clone()).unwrap();
+            assert_eq!(name.to_string(), good);
+            assert_eq!(
+                serde_json::from_str::<TaskKindName>(&serde_json::to_string(&name).unwrap())
+                    .unwrap(),
+                name
+            );
+        }
+        for bad in [
+            "",
+            "1a",
+            "A",
+            "a.b",
+            "a/b",
+            "--flag",
+            " a",
+            "a ",
+            "a\n",
+            "é",
+            &"a".repeat(65),
+        ] {
+            assert!(TaskKindName::try_from(bad.to_string()).is_err(), "{bad:?}");
+        }
     }
 }

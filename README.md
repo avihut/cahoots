@@ -136,7 +136,8 @@ Settings live in `~/.config/cahoots/config.toml`, and that file stays yours.
 cahoots changes only the setting you changed, keeps your comments and the
 rest of your layout, and never writes a value the file couldn't hold; putting
 a setting back to its default takes it out of the file. Edit the file by hand
-whenever you like. All of it is optional, and `cahoots registry` shows what
+whenever you like. Definitions of task kinds are optional, but every field
+inside one is required. `cahoots registry` shows what
 is in effect. Without the page:
 
 ```sh
@@ -179,6 +180,66 @@ says no:
   from cahoots' own records.
 - **The usage meter** says how much of each plan you've used, so that `cap`
   and `abort_at` mean something. It is a tool you already run; see below.
+
+### Task kinds
+
+Define a recurring task in config.toml with its own role and exact candidate
+order. This list can differ from the role's list; only its candidates are
+tried, including different efforts of the same model:
+
+```toml
+[kinds.rust-review]
+description = "Review Rust changes for correctness and maintainability."
+role = "review"
+candidates = [
+  { harness = "codex", model = "gpt-5.6-sol", effort = "high" },
+  { harness = "codex", model = "gpt-5.6-sol", effort = "medium" },
+  { harness = "claude", model = "opus", effort = "high" },
+]
+```
+
+```sh
+cahoots pick --kind rust-review --caller claude
+cahoots run --kind rust-review --caller claude --brief review.md
+cahoots run --kind rust-review --role review --to codex --brief review.md
+```
+
+`--role` is optional with `--kind`; when supplied it asserts the configured
+role and must match exactly. `--to` narrows the kind's list to that harness,
+never falls back to the role's list. The caller exclusion, enabled targets,
+gate and slots apply as usual. A kind with `role = "implement"` requires
+`--fork`, or `--in-place` only when `limits.allow_in_place` permits it; reader
+kinds refuse placement flags.
+
+Names are 1–64 ASCII characters, start with a lowercase letter and contain
+only `[a-z0-9_-]`. Matching is exact. Descriptions must be nonblank, one line,
+at most 1024 Unicode characters and contain no control characters or Unicode
+line/paragraph separators. Description text is preserved as metadata and
+never added to argv or a brief. Candidate lists must be nonempty, with no
+exact duplicate harness/model/effort triples. Unknown fields are refused.
+
+Create, rename or remove a kind by editing its complete table in config.toml.
+No kinds ship by default. Description, role and candidates inside each
+one are all required, have no defaults and cannot be reset individually.
+For an existing definition:
+
+```sh
+cahoots settings set kinds.rust-review.description 'Review Rust for correctness.'
+cahoots settings set kinds.rust-review.role review
+cahoots settings set kinds.rust-review.candidates 'codex:gpt-5.6-sol:high,codex:gpt-5.6-sol:medium'
+```
+
+The settings page and registry show each kind after Roles, sorted by name.
+The page displays the description with its CLI edit route, chooses the role
+and reorders candidates with their efforts visible.
+
+Pick, run records and all run summaries retain the selected `kind`, or null
+for role-only runs. Finished history events retain `"kind":"finished"` and
+use `task_kind` for the task's label; folded stories use `kind`. Older records
+without a label read as none. Resume keeps the original kind, role and chosen
+candidate even after a definition is removed, renamed or redefined. Kind
+lists are not calibrated yet, and their runs do not feed role calibration;
+ordinary role report totals still include them.
 
 ### Usage meters
 

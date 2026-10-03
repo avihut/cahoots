@@ -263,6 +263,17 @@ or what was found — takes the key out of config.toml rather than write the
 default into it. Choosing the usage meter is the exception: a meter chosen
 is written even when it is the one found, because a person chose it.
 
+Each configured task kind adds a `Kind · <name>` section after Roles, in name
+order, with Description, Role and Candidates. The description is fixed:
+Enter opens no input, and its help names `settings set kinds.<name>.description`
+or config.toml as the edit route. Role chooses advise, review, explore or
+implement; Candidates reorders existing triples, with effort visible in the
+list and save text. No text-entry question is added. All three fields come
+from config.toml, have no default, and cannot be reset individually. Saving
+the current role or order preserves the definition. Create, rename or remove
+its complete table in config.toml. `registry` uses these same sections and
+candidate labels. An empty kinds map adds no section.
+
 ### The whole screen
 
 - **The alternate screen.** The page is drawn on it (`ESC [ ? 1049 h`), so

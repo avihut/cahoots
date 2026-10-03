@@ -23,7 +23,7 @@ use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::gate::Admission;
 use crate::harness::{Progress, Version};
-use crate::model::{Candidate, HarnessId, Role};
+use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::placement::Placement;
 
 pub fn now() -> u64 {
@@ -62,6 +62,8 @@ pub struct RunRecord {
     pub exit_code: Option<u8>,
     pub message: Option<String>,
     pub role: Role,
+    #[serde(default)]
+    pub kind: Option<TaskKindName>,
     pub caller: Option<HarnessId>,
     pub target: Candidate,
     /// Where the callee works. For a fork this is the BASE until the
