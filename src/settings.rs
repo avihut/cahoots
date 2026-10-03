@@ -901,7 +901,10 @@ pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
 /// Takes one setting out of config.toml, so its default applies again.
 pub fn reset(file: &Path, key: &Key) -> Res<UserConfig> {
     if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key {
-        UserConfig::load(file)?;
+        let config = UserConfig::load(file)?;
+        if !config.kinds.contains_key(name) {
+            return Err(unknown_kind(name));
+        }
         return Err(Fail::new(
             Exit::Usage,
             format!(
@@ -1272,6 +1275,13 @@ candidates = [{ harness = "claude", model = "custom", effort = "low" }]
             assert!(fail.message.contains("is required for this task kind"));
             assert_eq!(fs::read_to_string(&file).unwrap(), before);
             let unknown = Key::parse(&format!("kinds.missing.{leaf}")).unwrap();
+            let fail = reset(&file, &unknown).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert_eq!(
+                fail.message,
+                "unknown task kind \"missing\" — define description, role and candidates together in [kinds.missing] in config.toml first"
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
             assert_eq!(
                 set(&file, &unknown, &Value::Text("x".into()))
                     .unwrap_err()
@@ -1280,19 +1290,32 @@ candidates = [{ harness = "claude", model = "custom", effort = "low" }]
             );
             assert_eq!(fs::read_to_string(&file).unwrap(), before);
         }
-        let key = Key::parse("kinds.zed.candidates").unwrap();
-        let duplicate = Value::Candidates(vec![candidate("codex:m:high").unwrap(); 2]);
-        assert_eq!(set(&file, &key, &duplicate).unwrap_err().exit, Exit::Usage);
-        let key = Key::parse("kinds.zed.description").unwrap();
-        assert_eq!(
-            set(&file, &key, &Value::Text("bad\ntext".into()))
-                .unwrap_err()
-                .exit,
-            Exit::Usage
-        );
-        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        for (name, value, message) in [
+            (
+                "kinds.zed.candidates",
+                Value::Candidates(Vec::new()),
+                "kinds.zed.candidates must contain at least one candidate",
+            ),
+            (
+                "kinds.zed.candidates",
+                Value::Candidates(vec![candidate("codex:m:high").unwrap(); 2]),
+                "kinds.zed.candidates repeats codex:m:high",
+            ),
+            (
+                "kinds.zed.description",
+                Value::Text("bad\ntext".into()),
+                "kinds.zed.description must be nonblank, one line, at most 1024 characters, and contain no control characters",
+            ),
+        ] {
+            let key = Key::parse(name).unwrap();
+            let fail = set(&file, &key, &value).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage);
+            assert_eq!(fail.message, message);
+            assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        }
         // A stale page row cannot recreate a definition removed by hand.
         fs::write(&file, "schema = 1\n").unwrap();
+        let key = Key::parse("kinds.zed.description").unwrap();
         assert_eq!(
             set(&file, &key, &Value::Text("words".into()))
                 .unwrap_err()

@@ -48,9 +48,12 @@ fn argv(answer: &Answer) -> Vec<String> {
         .collect()
 }
 fn history(world: &World) -> Vec<Value> {
-    fs::read_to_string(world.state.join("history.jsonl"))
-        .unwrap()
-        .lines()
+    let text = match fs::read_to_string(world.state.join("history.jsonl")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("cannot read test history: {error}"),
+    };
+    text.lines()
         .map(|s| serde_json::from_str(s).unwrap())
         .collect()
 }
@@ -143,6 +146,11 @@ fn to_narrows_a_kind_without_falling_back_to_the_role() {
     world.enable(&["claude", "codex"]);
     let one = r#"[{ harness = "codex", model = "custom", effort = "medium" }]"#;
     world.configure(&kind("review", one));
+    world.enable(&["codex"]);
+    assert_eq!(picked(&world, &["--to", "claude"]).code, 31);
+    assert_eq!(run(&world, "hello", &["--to", "claude"]).code, 31);
+    assert!(!world.state.join("runs").exists());
+    world.enable(&["claude", "codex"]);
     assert_eq!(picked(&world, &["--to", "claude"]).code, 30);
     assert_eq!(picked(&world, &["--caller", "codex"]).code, 30);
     assert_eq!(
@@ -261,6 +269,7 @@ fn kind_runs_keep_gate_and_busy_refusals() {
 fn a_kind_is_recorded_in_every_run_summary_and_history() {
     let world = World::new();
     world.configure(&kind("review", LIST));
+    assert!(history(&world).is_empty());
     assert_eq!(picked(&world, &[]).data()["kind"], "rust-review");
     let done = run(&world, "hello", &[]);
     let id = done.run_id();

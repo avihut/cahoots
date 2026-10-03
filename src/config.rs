@@ -566,19 +566,31 @@ mod tests {
             &"é".repeat(1025),
         ] {
             let text = KIND.replace("\"Review Rust.\"", &serde_json::to_string(bad).unwrap());
+            let fail = UserConfig::parse(&format!("schema = 1\n{text}")).unwrap_err();
+            assert_eq!(fail.exit, Exit::Config, "{bad:?}");
             assert_eq!(
-                UserConfig::parse(&format!("schema = 1\n{text}"))
-                    .unwrap_err()
-                    .exit,
-                Exit::Config,
+                fail.message,
+                "kinds.rust-review.description must be nonblank, one line, at most 1024 characters, and contain no control characters",
                 "{bad:?}"
             );
         }
         let name = TaskKindName::try_from("rust-review".to_string()).unwrap();
         assert!(validate_kind_description(&name, &"é".repeat(1024)).is_ok());
+        for (text, message) in [
+            (
+                KIND.replace("effort = \"medium\"", "effort = \"high\""),
+                "kinds.rust-review.candidates repeats codex:m:high",
+            ),
+            (
+                KIND.replace("candidates = [", "candidates = []\n# ["),
+                "kinds.rust-review.candidates must contain at least one candidate",
+            ),
+        ] {
+            let fail = UserConfig::parse(&format!("schema = 1\n{text}")).unwrap_err();
+            assert_eq!(fail.exit, Exit::Config);
+            assert_eq!(fail.message, message);
+        }
         for text in [
-            KIND.replace("effort = \"medium\"", "effort = \"high\""),
-            KIND.replace("candidates = [", "candidates = []\n# ["),
             KIND.replace("role = \"review\"", "role = \"deploy\""),
             KIND.replace("harness = \"codex\"", "harness = \"other\""),
             KIND.replace("model = \"m\"", "model = \"--flag\""),

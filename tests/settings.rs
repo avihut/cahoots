@@ -419,6 +419,14 @@ fn kind_fields_are_set_without_changing_neighboring_config() {
         assert_eq!(fs::read_to_string(&file).unwrap(), before);
     }
     for leaf in ["description", "role", "candidates"] {
+        let missing = format!("kinds.missing.{leaf}");
+        let after = world.at_terminal(&["settings", "reset", &missing]).finish();
+        assert_eq!(after.code, 2, "{}", after.json);
+        assert_eq!(
+            after.json["message"],
+            "unknown task kind \"missing\" — define description, role and candidates together in [kinds.missing] in config.toml first"
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
         let key = format!("kinds.rust-review.{leaf}");
         let after = world.at_terminal(&["settings", "reset", &key]).finish();
         assert_eq!(after.code, 2, "{}", after.json);
