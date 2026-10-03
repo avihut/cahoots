@@ -127,6 +127,10 @@ run = "scripts/landed-check.sh"
 description = "Cut the release main has earned — bump, 'release: vX.Y.Z' commit, signed annotated tag. Never pushes (--dry-run for the verdict)"
 run = "scripts/release.sh"
 
+[tasks.formula]
+description = "Render the Homebrew formula dist would publish into target/distrib and check it against Cargo.toml (needs dist; checksums are placeholders; publishes nothing)"
+run = "scripts/formula.sh"
+
 [tasks.release-check]
 description = "pre-push: every release commit/tag on stdin is whole — version, annotated tag, tag on the commit"
 run = "scripts/release-check.sh"

@@ -294,5 +294,125 @@ git commit -q --allow-empty -m 'feat(cli)!: a verb changed its meaning'
 passes "$scripts/release.sh"
 passes test "$(git log -1 --format=%s)" = 'release: v0.4.0'
 
+# ── formula.sh ──────────────────────────────────────────────────────────────
+# A formula written the way dist 0.30 writes one (platform branches, the alias
+# table, the install method), filled in from this repository's own Cargo.toml,
+# which the check reads too; no dist, no network.
+cargo_field() { sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" "$root/Cargo.toml" | head -1; }
+formula="$tmp/cahoots.rb"
+release_url="$(cargo_field repository)/releases/download/v$(cargo_field version)"
+sum=$(printf '%064d' 0)
+cat >"$formula" <<RUBY
+class Cahoots < Formula
+  desc "$(cargo_field description)"
+  homepage "$(cargo_field homepage)"
+  version "$(cargo_field version)"
+  if OS.mac?
+    if Hardware::CPU.arm?
+      url "$release_url/cahoots-aarch64-apple-darwin.tar.xz"
+      sha256 "$sum"
+    end
+    if Hardware::CPU.intel?
+      url "$release_url/cahoots-x86_64-apple-darwin.tar.xz"
+      sha256 "$sum"
+    end
+  end
+  if OS.linux?
+    if Hardware::CPU.arm?
+      url "$release_url/cahoots-aarch64-unknown-linux-gnu.tar.xz"
+      sha256 "$sum"
+    end
+    if Hardware::CPU.intel?
+      url "$release_url/cahoots-x86_64-unknown-linux-gnu.tar.xz"
+      sha256 "$sum"
+    end
+  end
+  license any_of: ["MIT", "Apache-2.0"]
+
+  BINARY_ALIASES = {
+    "aarch64-apple-darwin": {},
+    "aarch64-unknown-linux-gnu": {},
+    "x86_64-apple-darwin": {},
+    "x86_64-unknown-linux-gnu": {}
+  }
+
+  def target_triple
+    cpu = Hardware::CPU.arm? ? "aarch64" : "x86_64"
+    os = OS.mac? ? "apple-darwin" : "unknown-linux-gnu"
+
+    "#{cpu}-#{os}"
+  end
+
+  def install_binary_aliases!
+    BINARY_ALIASES[target_triple.to_sym].each do |source, dests|
+      dests.each do |dest|
+        bin.install_symlink bin/source.to_s => dest
+      end
+    end
+  end
+
+  def install
+    if OS.mac? && Hardware::CPU.arm?
+      bin.install "cahoots"
+    end
+    if OS.mac? && Hardware::CPU.intel?
+      bin.install "cahoots"
+    end
+    if OS.linux? && Hardware::CPU.arm?
+      bin.install "cahoots"
+    end
+    if OS.linux? && Hardware::CPU.intel?
+      bin.install "cahoots"
+    end
+
+    install_binary_aliases!
+
+    # Homebrew will automatically install these, so we don't need to do that
+    doc_files = Dir["README.*", "readme.*", "LICENSE", "LICENSE.*", "CHANGELOG.*"]
+    leftover_contents = Dir["*"] - doc_files
+
+    pkgshare.install(*leftover_contents) unless leftover_contents.empty?
+  end
+end
+RUBY
+passes "$scripts/formula.sh" --check "$formula"
+fails "$scripts/formula.sh" --check "$tmp/no-such-formula.rb"
+fails "$scripts/formula.sh" --check
+# Each thing the check reads, taken out of (or changed in) an otherwise good
+# formula. Real files, not process substitution: the check reads one many times.
+broken="$tmp/broken.rb"
+refuses_formula() { # <what the refusal says> <command that rewrites a file…>
+    local says=$1
+    shift
+    "$@" "$formula" >"$broken"
+    fails "$scripts/formula.sh" --check "$broken"
+    grep -q -- "$says" "$out" || {
+        cat "$out" >&2
+        echo "test-hooks: formula.sh refused, but not over: $says" >&2
+        exit 1
+    }
+}
+refuses_formula 'desc' sed 's/^  desc .*/  desc "something else"/'
+refuses_formula 'Apache-2.0' sed 's/"MIT", "Apache-2.0"/"MIT"/'
+# The archive branches: one gone, a checksum gone, the two CPUs swapped (here
+# and in the install branches alike), an extra archive.
+refuses_formula 'archive for each platform' awk '/x86_64-apple-darwin.tar.xz/{getline;next}1'
+refuses_formula 'archive for each platform' awk '/^      sha256 /&&!done{done=1;next}1'
+refuses_formula 'archive for each platform' sed '1,/^  license /{s/CPU\.arm?/CPU.@@?/;s/CPU\.intel?/CPU.arm?/;s/CPU\.@@?/CPU.intel?/;}'
+refuses_formula 'binary installed on each platform' sed '/^  def install$/,/install_binary_aliases!/{s/CPU\.arm?/CPU.@@?/;s/CPU\.intel?/CPU.arm?/;s/CPU\.@@?/CPU.intel?/;}'
+refuses_formula 'archive for each platform' sed '/^  license /i\
+  if OS.linux?\
+    url "https://example.com/extra.tar.xz"\
+  end'
+# The binary: the wrong name, one install more (inside the method and out of
+# it), a platform left without one, an alias for another name.
+refuses_formula 'binary installed on each platform' awk '/bin.install "cahoots"/&&!done{done=1;sub(/cahoots/,"other")}1'
+refuses_formula 'binary installed on each platform' sed '/^    install_binary_aliases!$/i\
+    bin.install "wrong"'
+refuses_formula 'exactly four bin.install' sed '/^    install_binary_aliases!$/a\
+    bin.install "wrong"'
+refuses_formula 'binary installed on each platform' awk '/bin.install "cahoots"/&&!done{done=1;next}1'
+refuses_formula 'BINARY_ALIASES should be empty' sed 's/^    "x86_64-apple-darwin": {},/    "x86_64-apple-darwin": { cahoots: %w[extra] },/'
+
 cd "$root"
 echo "test-hooks: $checks checks passed"
