@@ -70,7 +70,7 @@ supervisor, and there is no second, foreground path to keep honest.
   `--wait` (default 90 s), and returns either the result or *not finished* plus
   the run id. `wait`, `status`, `result` and `cancel` complete the set.
 - **The run directory is the source of truth:**
-  `<state>/runs/<id>/{run.json, brief, events.jsonl, final.md, supervisor.log, lock, cancel}`.
+  `<state>/runs/<id>/{run.json, brief, events.jsonl, final.md, supervisor.log, patch.diff, lock, cancel}`.
   `run.json` has one writer — the supervisor — and is replaced atomically. Ids
   are time-sortable and match `^[0-9A-Za-z_-]{1,64}$`. There is no separate
   ledger file; `report` scans run directories. Content is kept 7 days.
@@ -232,7 +232,11 @@ a writer runs in it (`placement::unfit`), and the worktree's git directory is
 read once, at the cut, and recorded (`gitdir`). The run reports `worktree` and
 `changes`, a `git status` read against that recorded git directory — or, when
 the status cannot be read, `changes: null` and `changes_error`, which says
-why. In place, the supervisor records the git configuration status would
+why. Every run records the commit it started from (`base_commit`), and a fork
+is cut at exactly that commit; a fork writer's patch against it is kept in the
+run directory (`patch.diff`), and a summary of it — paths, line counts and a
+hash per changed block — in the run and in the history, which outlives the
+patch (`src/patch.rs`). In place, the supervisor records the git configuration status would
 read (`git config --list --show-origin`) before the writer starts, in the run
 directory, and status runs afterwards only if it is unchanged. Bringing the change over is the caller's job, after reading it. A
 worktree cahoots cut itself is removed once the last run on record that

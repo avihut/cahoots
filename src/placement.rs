@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::model::Role;
+use crate::patch::Commit;
 use crate::paths::{self, Workspace};
 use crate::registry::Registry;
 use crate::spawn;
@@ -94,13 +95,15 @@ pub fn decide(
 /// is a plain detached `git worktree` under cahoots' state directory, outside
 /// every workspace. No repository hook runs either way. `roots` are the
 /// directories no tool started here may come from; `deadline` is the run's
-/// own timeout, which shortens the cut's.
+/// own timeout, which shortens the cut's. `at` is the commit to cut at — the
+/// one the run recorded — and with none, the base's HEAD.
 pub fn cut(
     dirs: &Dirs,
     base: &Path,
     run_id: &str,
     roots: &[&Path],
     deadline: Duration,
+    at: Option<&Commit>,
 ) -> Res<(PathBuf, PathBuf)> {
     let (top, common) = spawn::git_roots(base, roots)?
         .ok_or_else(|| cut_failed("the base is no longer a repository"))?;
@@ -110,7 +113,7 @@ pub fn cut(
     if top.join("daft.yml").is_file() {
         match spawn::system_tool("daft", &roots) {
             Ok(daft) => {
-                return cut_with_daft(dirs, &daft, base, &top, &common, &roots, deadline);
+                return cut_with_daft(dirs, &daft, base, (&top, &common), &roots, deadline, at);
             }
             Err(fail) if fail.exit == Exit::Policy => {
                 return Err(Fail::policy(format!(
@@ -137,7 +140,7 @@ pub fn cut(
         "add".into(),
         "--detach".into(),
         path.clone().into(),
-        "HEAD".into(),
+        at.map_or("HEAD", Commit::as_str).into(),
     ]);
     let started = Instant::now();
     let output =
@@ -162,19 +165,22 @@ pub fn cut(
 
 /// `daft start --fork`, with no hook of the repository's: `--skip-hooks all`
 /// for daft's own, and for the `git` it runs, the same empty hooks directory
-/// cahoots' own git gets.
+/// cahoots' own git gets. `--no-carry`, so that a person's carry setting
+/// never brings their uncommitted work into the writer's tree (and from
+/// there into its patch), and the commit to fork from, when there is one.
+/// `repository` is the base's: its toplevel and its common directory.
 fn cut_with_daft(
     dirs: &Dirs,
     daft: &Path,
     base: &Path,
-    top: &Path,
-    common: &Path,
+    (top, common): (&Path, &Path),
     roots: &[&Path],
     deadline: Duration,
+    at: Option<&Commit>,
 ) -> Res<(PathBuf, PathBuf)> {
     let deadline = deadline.min(DAFT_DEADLINE);
     let before = linked_worktrees(common)?;
-    let args = [
+    let mut args = vec![
         OsStr::new("-C"),
         base.as_os_str(),
         OsStr::new("start"),
@@ -182,7 +188,9 @@ fn cut_with_daft(
         OsStr::new("--no-cd"),
         OsStr::new("--skip-hooks"),
         OsStr::new("all"),
+        OsStr::new("--no-carry"),
     ];
+    args.extend(at.map(|commit| OsStr::new(commit.as_str())));
     let started = Instant::now();
     let output = spawn::run_helper_with_env(
         daft,
@@ -512,7 +520,7 @@ fn status(
 /// still belong to the repository it was cut from, and the git directory its
 /// `.git` names now must be one git keeps for that repository — never one
 /// the writer made, whose config would be the writer's.
-fn fork_git_dir(
+pub(crate) fn fork_git_dir(
     dirs: &Dirs,
     worktree: &Path,
     base: &Path,
@@ -602,7 +610,7 @@ fn quiet_settings(dirs: &Dirs) -> Res<[(&'static str, OsString); 2]> {
 
 /// The quiet settings as `-c` arguments, first in argv: for the git cahoots
 /// runs itself, where a setting given on the command line is never ignored.
-fn quiet_git_args(dirs: &Dirs) -> Res<Vec<OsString>> {
+pub(crate) fn quiet_git_args(dirs: &Dirs) -> Res<Vec<OsString>> {
     Ok(quiet_settings(dirs)?
         .into_iter()
         .flat_map(|(key, value)| {

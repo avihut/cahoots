@@ -110,7 +110,11 @@ fn a_daft_fork_runs_no_hooks_and_is_used() {
             "--fork",
             "--no-cd",
             "--skip-hooks",
-            "all"
+            "all",
+            "--no-carry",
+            answer.data()["base_commit"]
+                .as_str()
+                .expect("a base commit")
         ])
     );
     // The git daft runs is told where its hooks are: nowhere.

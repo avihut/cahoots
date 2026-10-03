@@ -7,6 +7,7 @@
 //! final.md        the callee's answer
 //! supervisor.log  what the supervisor saw, and the callee's stderr
 //! git-config      in place: the git configuration before the writer ran
+//! patch.diff      a fork writer's change since `base_commit`, for `git apply`
 //! lock            held exclusively for the supervisor's lifetime — liveness
 //! cancel          a marker the supervisor polls
 //! ```
@@ -25,6 +26,7 @@ use crate::exit::{Exit, Fail, Res};
 use crate::gate::Admission;
 use crate::harness::{Progress, Version};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
+use crate::patch::{Commit, PatchSummary};
 use crate::placement::Placement;
 
 pub fn now() -> u64 {
@@ -88,6 +90,15 @@ pub struct RunRecord {
     /// of them. Internal: never in the envelope.
     #[serde(default)]
     pub roots: Vec<PathBuf>,
+    /// The commit the run started from: the caller's HEAD when it was
+    /// launched, which a fork is cut at exactly. `None` outside a repository,
+    /// in one with no commit, or when git could not say.
+    #[serde(default)]
+    pub base_commit: Option<Commit>,
+    /// A fork writer's patch, summed up, once the run has ended and the patch
+    /// is kept (`patch.diff`). `None` for every other run.
+    #[serde(default)]
+    pub patch: Option<PatchSummary>,
     pub depth: u32,
     pub timeout_secs: u64,
     pub int_grace_secs: u64,
@@ -207,6 +218,10 @@ impl RunDir {
     /// (`placement::config_listing`).
     pub fn git_config_path(&self) -> PathBuf {
         self.path.join("git-config")
+    }
+    /// A fork writer's patch against the run's `base_commit`.
+    pub fn patch_path(&self) -> PathBuf {
+        self.path.join("patch.diff")
     }
 
     /// The run's log, to append a line to: what the supervisor saw, for a

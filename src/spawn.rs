@@ -10,6 +10,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill, killpg};
@@ -152,6 +154,34 @@ pub fn run_helper_with_env<S: AsRef<OsStr>>(
     path: Option<OsString>,
     vars: &[(OsString, OsString)],
 ) -> Res<Output> {
+    run_helper_inner(binary, args, cwd, deadline, path, vars, None).map(|(output, _)| output)
+}
+
+/// [`run_helper_with_env`], keeping no more than `cap` bytes of stdout: past
+/// them the helper is killed, and the `bool` (overflowed) is true. Its
+/// output is then not all of it, and the caller must not use it as if it
+/// were.
+pub fn run_helper_capped<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
+    vars: &[(OsString, OsString)],
+    cap: usize,
+) -> Res<(Output, bool)> {
+    run_helper_inner(binary, args, cwd, deadline, path, vars, Some(cap))
+}
+
+fn run_helper_inner<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
+    vars: &[(OsString, OsString)],
+    cap: Option<usize>,
+) -> Res<(Output, bool)> {
     let mut command = Command::new(binary);
     command
         .args(args)
@@ -172,20 +202,32 @@ pub fn run_helper_with_env<S: AsRef<OsStr>>(
     let mut child = command
         .spawn()
         .map_err(|error| Fail::internal(format!("cannot start {}: {error}", binary.display())))?;
+    let overflowed = Arc::new(AtomicBool::new(false));
     // Drained on its own thread: a helper that fills the pipe would otherwise
-    // block forever while this side waits for it to exit.
-    let reader = child.stdout.take().map(|mut pipe| {
+    // block forever while this side waits for it to exit. With a cap, it
+    // stops one byte past it and lets the pipe go, and says so.
+    let reader = child.stdout.take().map(|pipe| {
+        let overflowed = overflowed.clone();
         std::thread::spawn(move || {
             use std::io::Read;
+            let limit = cap.map_or(u64::MAX, |cap| (cap as u64).saturating_add(1));
             let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
+            let _ = pipe.take(limit).read_to_end(&mut bytes);
+            if cap.is_some_and(|cap| bytes.len() > cap) {
+                overflowed.store(true, Ordering::Relaxed);
+            }
             bytes
         })
     });
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if overflowed.load(Ordering::Relaxed) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
             Ok(None) if started.elapsed() < deadline => {
                 std::thread::sleep(Duration::from_millis(15))
             }
@@ -201,14 +243,37 @@ pub fn run_helper_with_env<S: AsRef<OsStr>>(
             Err(error) => return Err(Fail::internal(format!("waiting for a helper: {error}"))),
         }
     };
-    let bytes = reader
+    // Something the helper started can hold its stdout open after it has
+    // exited. A capped call keeps its deadline while the pipe drains, and a
+    // pipe that stays open past it is the helper not finishing; the reader
+    // is left to end when the pipe does.
+    if cap.is_some() {
+        while reader.as_ref().is_some_and(|thread| !thread.is_finished()) {
+            if started.elapsed() >= deadline {
+                return Err(Fail::internal(format!(
+                    "{} did not finish within {}s: its stdout stayed open",
+                    binary.display(),
+                    deadline.as_secs()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+    let mut bytes = reader
         .and_then(|thread| thread.join().ok())
         .unwrap_or_default();
-    Ok(Output {
-        status: status.code(),
-        stdout: String::from_utf8(bytes.clone()).unwrap_or_default(),
-        bytes,
-    })
+    let overflowed = overflowed.load(Ordering::Relaxed);
+    if let Some(cap) = cap {
+        bytes.truncate(cap);
+    }
+    Ok((
+        Output {
+            status: status.and_then(|status| status.code()),
+            stdout: String::from_utf8(bytes.clone()).unwrap_or_default(),
+            bytes,
+        },
+        overflowed,
+    ))
 }
 
 /// A system tool cahoots itself needs (`git`, `daft`, `ps`), held to the same
@@ -624,6 +689,32 @@ mod tests {
         fs::write(&path, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         path
+    }
+
+    #[test]
+    fn a_capped_helper_is_stopped_past_its_cap() {
+        // `yes` never stops by itself: only the cap ends it before the deadline.
+        let yes = Path::new("/usr/bin/yes");
+        let started = Instant::now();
+        let (output, overflowed) =
+            run_helper_capped(yes, &["x"], None, Duration::from_secs(20), None, &[], 1000).unwrap();
+        assert!(overflowed);
+        assert_eq!(output.bytes.len(), 1000);
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let printf = Path::new("/usr/bin/printf");
+        let (output, overflowed) = run_helper_capped(
+            printf,
+            &["abc"],
+            None,
+            Duration::from_secs(20),
+            None,
+            &[],
+            3,
+        )
+        .unwrap();
+        assert!(!overflowed, "exactly the cap is not past it");
+        assert_eq!((output.status, output.bytes), (Some(0), b"abc".to_vec()));
     }
 
     #[test]

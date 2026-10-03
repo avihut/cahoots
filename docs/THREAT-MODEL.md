@@ -186,11 +186,14 @@ agent made is a proposal, and the skill says so.
 defines. A repository's hooks are content an agent can write — `daft.yml` is
 a tracked file, and `core.hooksPath` may point into the tree — and the cut
 runs outside every sandbox, on an agent's verb. So `daft` runs with
-`--skip-hooks all`, and every `git` that cuts, reads or removes a worktree —
+`--skip-hooks all`, and with `--no-carry`, and at the exact commit the run
+recorded — as is a plain `git worktree` — and every `git` that cuts, reads or removes a worktree —
 and the one `daft` starts — is given an empty hooks directory of cahoots' own
 and `core.fsmonitor=false`, as configuration above every config file.
-(cahoots' other `git` calls only ask `rev-parse` where a repository is, which
-runs neither.) The worktree therefore comes up without the repository's
+(cahoots' other `git` calls read: `rev-parse` where a repository is, and the
+commit every run starts from; and, for a writer, the `diff` and `ls-files`
+that keep its patch. They get the same empty hooks directory and
+`core.fsmonitor=false`.) The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
 repository, not the tree it was cut from or inside it, not inside cahoots'
@@ -232,11 +235,29 @@ directories under Codex. That is why the caller is told to READ a change
 before running anything in it. A writer cannot commit to the caller's branch,
 and cahoots never merges for anyone. `changes` is read with `git status`
 against the git directory recorded when the worktree was cut, never the one
-the worktree's `.git` names now; and always with `--ignore-submodules=all`,
-so it never descends into a submodule, whose own git directory and config —
-where a writer could name a filter or an fsmonitor command — this does not
-see. A status that fails says so (`changes_error`), never "no changes". In
-place, where the writer had the caller's own tree and perhaps its `.git`,
+the worktree's `.git` names now; the writer's patch, kept in the run directory
+against the commit the run started from, is read the same way — against the
+pinned git directory, with `--ignore-submodules=all`, and only after the
+callee's process group is killed — and everything that shapes how it is
+written is fixed on the command line (`--no-ext-diff`, `--no-textconv`, the
+diff algorithm, prefixes, order, `--full-index`), so neither the person's git
+config nor the repository's can change it or run a diff helper. The capture
+has 8 seconds and 32 MiB for all of its steps together; past either, no patch
+is kept at all, and the run ends as the writer left it. What git
+still honours is what it converts on the way in: a clean filter that the
+repository's or the person's configuration defines for a path, the same
+exposure `changes` has, and `core.autocrlf`, which checkout applied already.
+A link is written as a link, from `read_link`, never followed. A file the
+patch would read that has more than one hard link — perhaps another file's,
+from outside the worktree, linked in — is never read, and a file that is
+replaced or written while git reads it fails the capture: its device, inode,
+type, link count, size, `ctime` and `mtime` are compared, since a replacement
+can get back the inode number it took the place of. No patch is kept either
+way. A submodule's changes are not in the patch. `changes` too always runs
+with `--ignore-submodules=all`, so it never descends into a submodule, whose own
+git directory and config — where a writer could name a filter or an
+fsmonitor command — it does not see. A status that fails says so
+(`changes_error`), never "no changes". In place, where the writer had the caller's own tree and perhaps its `.git`,
 `git status` runs only if the git configuration it would read — every scope
 and every included file, as git itself resolves them — is byte for byte what
 it was before the writer started; otherwise `changes_error` says the
@@ -299,6 +320,9 @@ order a person wrote is left alone. The worst a poisoned history can do is
 make a role try its second choice first.
 Role calibration uses only runs without a task kind; a kind's candidate
 list is left in the order a person wrote.
+The history keeps, for a writer, the repo-relative paths it touched and a
+hash and line count of each changed block — derived from content, never
+content — and like everything learned it stays on this machine.
 
 ## What cahoots never does
 

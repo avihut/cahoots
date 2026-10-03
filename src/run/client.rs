@@ -16,6 +16,7 @@ use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
 use crate::harness::Progress;
 use crate::model::{HarnessId, Role, TaskKindName};
+use crate::patch::{self, Commit};
 use crate::paths::{self, Workspace};
 use crate::pick;
 use crate::placement::{self, Placement};
@@ -149,6 +150,9 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
 
     let choice = pick::choose(&dirs, &registry, &routing, caller, args.to, &roots)?;
     let target = choice.target;
+    // The commit the run starts from: for a fork, the one it will be cut at;
+    // in place, the caller's tree as it is before the writer exists.
+    let base_commit = patch::head(&dirs, &run_dir, None, &roots);
     let roots = owned(&roots);
 
     launch(
@@ -164,6 +168,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             cwd: run_dir,
             gitdir: None,
             roots,
+            base_commit,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -191,6 +196,7 @@ struct Launch {
     gitdir: Option<PathBuf>,
     /// The asking client's workspace and the run's directory (`RunRecord::roots`).
     roots: Vec<PathBuf>,
+    base_commit: Option<Commit>,
     depth: u32,
     timeout_secs: Option<u64>,
     wait_secs: Option<u64>,
@@ -223,6 +229,8 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         base: launch.base,
         gitdir: launch.gitdir,
         roots: launch.roots,
+        base_commit: launch.base_commit,
+        patch: None,
         cwd: launch.cwd,
         placement: launch.placement,
         depth: launch.depth,
@@ -370,6 +378,13 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
     }
     let (binary, version, admission) =
         pick::eligible(&dirs, &registry, &old.target, old.role, &roots)?;
+    // A fork goes back into the worktree that was cut at its base, and its
+    // patch is the worktree's whole change since then. Any other tree is
+    // live, and may have moved.
+    let base_commit = match old.placement {
+        Placement::Fork => old.base_commit.clone(),
+        _ => patch::head(&dirs, &old.cwd, None, &roots),
+    };
     let roots = owned(&roots);
 
     launch(
@@ -385,6 +400,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             cwd: old.cwd,
             gitdir: old.gitdir,
             roots,
+            base_commit,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -533,6 +549,9 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
         },
         "resumable": record.progress.session_id.is_some(),
         "resumed_from": record.resumed_from,
+        // Neither says anything of the target, so a blind run shows both.
+        "base_commit": record.base_commit,
+        "patch": record.patch,
         "notes": record.progress.notes,
         "gate_notes": record.admission.notes,
     });

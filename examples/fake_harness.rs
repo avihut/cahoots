@@ -18,7 +18,15 @@
 //!                      for a newline and a tab); as many as the brief has
 //! FAKE: leak=<name>    leave a child in the callee's group that, a moment
 //!                      after the callee exits, writes <name> in the cwd
+//! FAKE: remove=<name>  delete <name> (before `write` and `append`)
+//! FAKE: commit         commit everything there (after `write` and `append`)
+//! FAKE: bytes=<name>   write bytes that are not UTF-8, with a CRLF
+//! FAKE: link=<name>=<target>  make <name> a link to <target>
+//! FAKE: hardlink=<name>=<target>  make <name> a hard link to <target>
 //! ```
+//!
+//! In this order: `child`, `leak`, `remove`, `write`, every `append`, then
+//! `commit`, `bytes`, `link`, `hardlink`, and last `sleep`.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -170,8 +178,9 @@ fn fake_ccusage(exe: &std::path::Path, argv: &[String]) {
 /// to the binary) says, and logged to `daft.calls`, one JSON object a call —
 /// its argv, where it ran, its PATH and every `GIT_CONFIG_*` it was given —
 /// with its pid in `daft.pid`. The plan: `{"sleep": s, "make":
-/// "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit": n}`; it makes
-/// a worktree and exits 0 unless it says otherwise.
+/// "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit": n, "at":
+/// "<commit-ish>"}`; it makes a worktree at the commit it was given (`at`
+/// overrides it) and exits 0 unless it says otherwise.
 fn fake_daft(exe: &Path, argv: &[String]) {
     let git_config: std::collections::BTreeMap<String, String> = std::env::vars()
         .filter(|(name, _)| name.starts_with("GIT_CONFIG"))
@@ -207,9 +216,23 @@ fn fake_daft(exe: &Path, argv: &[String]) {
                 .position(|arg| arg == "-C")
                 .and_then(|at| argv.get(at + 1))
                 .expect("daft -C <base>");
+            // At the commit it was given, as the real daft forks at its last
+            // positional; HEAD when there is none.
+            let last = argv.last().map(String::as_str).unwrap_or_default();
+            let commit = matches!(last.len(), 40 | 64)
+                && last
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            // Or where the plan's `at` says, whatever it was given: a daft
+            // that cuts somewhere else.
+            let at = match plan["at"].as_str() {
+                Some(at) => at,
+                None if commit => last,
+                None => "HEAD",
+            };
             // The environment cahoots gave daft, so the git it runs gets it too.
             let made = std::process::Command::new("git")
-                .args(["-C", base, "worktree", "add", "--detach", print, "HEAD"])
+                .args(["-C", base, "worktree", "add", "--detach", print, at])
                 .stdout(std::io::stderr())
                 .status()
                 .expect("git");
@@ -321,6 +344,9 @@ fn main() {
             .expect("leak");
         eprintln!("left a child in the group: {}", child.id());
     }
+    if let Some(name) = directive("remove") {
+        std::fs::remove_file(&name).expect("remove in cwd");
+    }
     if let Some(name) = directive("write") {
         std::fs::write(&name, "written by the callee\n").expect("write in cwd");
     }
@@ -338,6 +364,41 @@ fn main() {
             .open(file)
             .expect("append in cwd");
         out.write_all(text.as_bytes()).expect("append");
+    }
+    if directive("commit").is_some() {
+        for args in [
+            &["add", "-A"][..],
+            &[
+                "-c",
+                "user.name=Fake",
+                "-c",
+                "user.email=fake@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "fake: commit",
+            ],
+        ] {
+            let done = std::process::Command::new("git")
+                .args(args)
+                .stdout(std::io::stderr())
+                .status()
+                .expect("git");
+            assert!(done.success(), "git {args:?} failed");
+        }
+    }
+    if let Some(name) = directive("bytes") {
+        std::fs::write(&name, b"caf\xe9\r\nna\xefve\n").expect("bytes in cwd");
+    }
+    if let Some(spec) = directive("link") {
+        let (name, target) = spec.split_once('=').expect("link=<name>=<target>");
+        std::os::unix::fs::symlink(target, name).expect("a link in cwd");
+    }
+    if let Some(spec) = directive("hardlink") {
+        let (name, target) = spec.split_once('=').expect("hardlink=<name>=<target>");
+        std::fs::hard_link(target, name).expect("a hard link in cwd");
     }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));
