@@ -229,12 +229,14 @@ fn polling(status: Option<i32>, stdout: &str, harness: HarnessId, now: u64) -> P
     if beat.provider != harness.as_str() {
         return Polling::Unknown(format!("it answered for {}, not {harness}", beat.provider));
     }
-    if beat.generated > now + CLOCK_TOLERANCE || beat.next_poll < beat.generated {
+    if beat.generated > now.saturating_add(CLOCK_TOLERANCE) {
         return Polling::Unknown("its stamps do not fit this clock".into());
     }
     let silent = now.saturating_sub(beat.generated);
-    let horizon = beat.next_poll - beat.generated;
-    if silent > (2 * horizon).max(HEARTBEAT_FLOOR) {
+    // A next poll already due when it published (a timer that drifted) is
+    // a horizon of nothing, and the floor alone holds — as in the tracker.
+    let horizon = beat.next_poll.saturating_sub(beat.generated);
+    if silent > horizon.saturating_mul(2).max(HEARTBEAT_FLOOR) {
         Polling::Stopped {
             published_ago: silent,
             due_ago: now.saturating_sub(beat.next_poll),
@@ -376,10 +378,12 @@ mod tests {
         // A clock set back since: no age can be read off it.
         assert_eq!(at(9_940, &quiet), Polling::Yes, "within the tolerance");
         assert!(matches!(at(9_939, &quiet), Polling::Unknown(_)));
-        assert!(matches!(
-            at(12_000, &beat(10_000, 9_000)),
-            Polling::Unknown(_)
-        ));
+        // A poll already due when it published: the floor alone.
+        let overdue = beat(10_000, 9_000);
+        assert_eq!(at(10_100, &overdue), Polling::Yes);
+        assert!(matches!(at(10_181, &overdue), Polling::Stopped { .. }));
+        // A horizon too large to double is never a panic.
+        assert_eq!(at(12_000, &beat(10_000, u64::MAX)), Polling::Yes);
     }
 
     #[test]
