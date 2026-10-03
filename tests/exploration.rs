@@ -362,8 +362,11 @@ fn the_draw_matches_the_recorded_id() {
         let answer = world.run("hello", &[]);
         assert_eq!(answer.code, 0, "{}", answer.json);
         let id = answer.run_id();
-        // The id the run is recorded under is the one the draw was made from.
-        let drawn = cahoots::explore::drawn(&id, 0.5);
+        // The id the run is recorded under is the one the draw was made from,
+        // worked out here from the specified bytes, not by the module under test.
+        let mut bytes = b"cahoots-explore-v1\0".to_vec();
+        bytes.extend_from_slice(id.as_bytes());
+        let drawn = cahoots::history::fnv1a64(&bytes) % 10_000 < 5_000;
         ran(&world, &answer, if drawn { "m2" } else { "m1" }, drawn);
         assert_eq!(world.record(&id)["id"], id.as_str());
     }
