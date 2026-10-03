@@ -389,6 +389,11 @@ fn report_says_how_each_role_and_target_did() {
     );
 }
 
+/// The rail's lines joined into one, so a phrase the rail wrapped reads whole.
+fn unwrapped(text: &str) -> String {
+    text.replace("\n│  ", " ")
+}
+
 #[test]
 fn report_suggest_shows_each_role_s_order_with_its_evidence_and_the_swap() {
     let world = World::new();
@@ -396,21 +401,117 @@ fn report_suggest_shows_each_role_s_order_with_its_evidence_and_the_swap() {
     world.history_where_the_second_choice_does_better(8);
     let after = world.as_a_person(&["report", "--suggest"]).finish();
     assert_eq!(after.code, 0, "{}", after.text());
-    let text = after.text();
+    let text = unwrapped(&after.text());
     for shown in [
-        "●  Routing: shadow — shown, not used (review.apply_routing = true to use it)\n\
-         │  The rule: a candidate moves up ONE place",
-        "◇  advise\n\
-         │  1. codex gpt-6-astra high: score 0.00 from 8 runs (8 discarded)\n\
-         │  2. claude opus high: score 1.00 from 8 runs (8 accepted)\n\
-         │  claude opus high moves up past codex gpt-6-astra high: shown, not used\n",
-        "◇  review\n│  1. ",
-        "│  No change: the evidence does not support a change\n",
-        "└  16 runs in the last 30 days\n",
+        "●  Routing: shadow — shown, not used (review.apply_routing = true to use it) \
+         The rule: a candidate moves up ONE place",
+        // Eight is the floor: the score comes with its error, and so do the shares.
+        "1. codex gpt-6-astra high: score 0.00 (standard error 0.00) from 8 runs (8 discarded) \
+         Rates from 8 rated or failed runs: accepted 0.0% (standard error 0.0 percentage points), \
+         reworked 0.0% (standard error 0.0 percentage points), discarded 100.0% \
+         (standard error 0.0 percentage points), failed 0.0% \
+         (standard error 0.0 percentage points) 2. claude opus high: \
+         score 1.00 (standard error 0.00) from 8 runs (8 accepted) \
+         Rates from 8 rated or failed runs: accepted 100.0%",
+        "claude opus high moves up past codex gpt-6-astra high: shown, not used",
+        // Candidates nobody has rated yet are not judged.
+        "1. codex gpt-5.6-sol high: not enough evidence (0 rated or failed runs; need 8)",
+        "No change: the evidence does not support a change",
+        "└  16 runs in the last 30 days",
     ] {
         assert!(text.contains(shown), "{shown:?} in:\n{text}");
     }
     no_json(&after);
+}
+
+/// A history with these runs of one kind (codex custom medium, review), in
+/// order: each a state and an outcome, `""` for none.
+fn history_of_kind(world: &World, kind: &str, runs: &[(&str, &str)]) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut lines = String::new();
+    for (n, (state, outcome)) in runs.iter().enumerate() {
+        let run = format!("0198c0de-0000-7000-8000-{n:012}");
+        lines.push_str(&format!(
+            "{{\"kind\":\"finished\",\"t\":{now},\"run\":\"{run}\",\"role\":\"review\",\
+             \"task_kind\":\"{kind}\",\"caller\":null,\"target\":{{\"harness\":\"codex\",\
+             \"model\":\"custom\",\"effort\":\"medium\"}},\"dir\":\"/w\",\"state\":\"{state}\",\
+             \"exit\":0,\"tokens_in\":1,\"tokens_out\":1,\"secs\":1,\"sampled\":false}}\n"
+        ));
+        if !outcome.is_empty() {
+            lines.push_str(&format!(
+                "{{\"kind\":\"outcome\",\"t\":{now},\"run\":\"{run}\",\"outcome\":\"{outcome}\"}}\n"
+            ));
+        }
+    }
+    fs::create_dir_all(&world.state).unwrap();
+    fs::write(world.state.join("history.jsonl"), lines).unwrap();
+}
+
+const KIND_CONFIG: &str = "[kinds.rust-review]\ndescription = \"Review Rust.\"\nrole = \"review\"\n\
+     candidates = [{ harness = \"codex\", model = \"custom\", effort = \"medium\" }, \
+     { harness = \"codex\", model = \"custom\", effort = \"high\" }]\n";
+
+#[test]
+fn report_words_show_errors_or_insufficient_evidence() {
+    let world = World::new();
+    world.configure(KIND_CONFIG);
+    // Seven rated runs, then eight.
+    let seven: Vec<(&str, &str)> = vec![("done", "accepted"); 7];
+    history_of_kind(&world, "rust-review", &seven);
+    let below = world.as_a_person(&["report"]).finish();
+    assert_eq!(below.code, 0, "{}", below.text());
+    let text = unwrapped(&below.text());
+    assert!(
+        text.contains("◇  Kind · rust-review · review · codex · custom · medium"),
+        "{text}"
+    );
+    assert!(
+        text.contains("not enough evidence (7 rated or failed runs; need 8)"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('%') && !text.contains("Score") && !text.contains("standard error"),
+        "no estimate below the floor:\n{text}"
+    );
+    // The kind's other candidate has no runs: a line saying so, with no cost,
+    // and no "0 runs:" left dangling.
+    assert!(
+        text.contains(
+            "◇  Kind · rust-review · review · codex · custom · high 0 runs \
+             not enough evidence (0 rated or failed runs; need 8)"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("0 runs:"), "{text}");
+    // The count at the end is of unique runs and ignores the seeded rows.
+    assert!(text.ends_with("└  7 runs in the last 30 days\n"), "{text}");
+    no_json(&below);
+
+    let eight: Vec<(&str, &str)> =
+        [vec![("done", "accepted"); 4], vec![("failed", ""); 4]].concat();
+    history_of_kind(&world, "rust-review", &eight);
+    let above = world.as_a_person(&["report"]).finish();
+    let text = unwrapped(&above.text());
+    assert!(
+        text.contains(
+            "Rates from 8 rated or failed runs: accepted 50.0% (standard error 17.7 \
+             percentage points), reworked 0.0% (standard error 0.0 percentage points), \
+             discarded 0.0% (standard error 0.0 percentage points), failed 50.0% \
+             (standard error 17.7 percentage points) Score 0.50 (standard error 0.19)"
+        ),
+        "{text}"
+    );
+
+    // Configured rows with no runs at all: the final sentence is unchanged.
+    let idle = World::new();
+    idle.configure(KIND_CONFIG);
+    let none = idle.as_a_person(&["report", "--days", "1"]).finish();
+    let text = none.text();
+    assert!(text.contains("◇  Kind · rust-review"), "{text}");
+    assert!(text.ends_with("└  No runs in the last day\n"), "{text}");
 }
 
 #[test]

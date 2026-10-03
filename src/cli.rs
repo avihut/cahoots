@@ -563,7 +563,8 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             })
         }
         Verb::Doctor => {
-            let checks = crate::doctor::checks()?;
+            let crate::doctor::Diagnostics { mut checks, gaps } = crate::doctor::checks()?;
+            checks.extend(endings::evidence_warnings(&gaps));
             let words = match person {
                 true => Some(endings::checked(title, &checks, &Dirs::resolve()?.home)),
                 false => None,

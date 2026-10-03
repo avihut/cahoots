@@ -1,8 +1,9 @@
 //! `cahoots doctor` — a read-only look at everything a run depends on, so that
 //! "why was I refused" has an answer before the run is attempted. It changes
 //! nothing: not the config, not a harness's permission rules. It returns the
-//! checks, and `envelope` makes them the one JSON envelope; a person at a
-//! terminal reads the same checks in words (`cli::endings`).
+//! checks, with the evidence gaps beside them as data; the command layer gives
+//! the gaps their words, `envelope` makes the checks the one JSON envelope, and
+//! a person at a terminal reads the same checks in words (`cli::endings`).
 
 use serde::Serialize;
 use serde_json::json;
@@ -11,12 +12,13 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Res};
 use crate::harness;
+use crate::history::{self, Story};
 use crate::install::files::{Stale, StaleWhy};
 use crate::install::rules;
 use crate::meter::{Answer, Ask, Ccusage, Chosen, UsageMeter, detect, tokens};
-use crate::model::HarnessId;
+use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::pick;
-use crate::registry::Registry;
+use crate::registry::{Origin, Registry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,8 +49,81 @@ fn check(name: impl Into<String>, status: Status, detail: impl Into<String>) -> 
     }
 }
 
-/// Every check, in order.
-pub fn checks() -> Res<Vec<Check>> {
+/// A candidate in a list that is currently configured, with no rated or
+/// failed run on record for it in that list. Data only: `cli::endings` says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceGap {
+    pub role: Role,
+    /// `Some` for a named kind's list, `None` for a role's.
+    pub kind: Option<TaskKindName>,
+    pub candidate: Candidate,
+}
+
+/// What `doctor` found: its checks, and the candidates nothing is known about.
+#[derive(Debug)]
+pub struct Diagnostics {
+    pub checks: Vec<Check>,
+    pub gaps: Vec<EvidenceGap>,
+}
+
+/// The candidates of every current kind list and every list a person wrote
+/// that have no rated or failed run on record in THAT list: a kind's by kind
+/// name, role and candidate; a role's by role and candidate, from runs with
+/// no kind. History is read whole — no window, and `learn reset` does not
+/// forget it — because this looks for an absence, not for a recent expiry.
+/// Roles first, then kinds, each in its list's configured order.
+pub fn evidence_gaps(registry: &Registry, stories: &[Story]) -> Vec<EvidenceGap> {
+    let has_evidence = |matches: &dyn Fn(&Story) -> bool| {
+        let mut evidence = crate::calibrate::Evidence::default();
+        stories
+            .iter()
+            .filter(|story| matches(story))
+            .for_each(|story| evidence.observe(story));
+        evidence.finish();
+        evidence.n > 0
+    };
+    let mut gaps = Vec::new();
+    for (role, entry) in &registry.roles {
+        if entry.origin != Origin::User {
+            continue;
+        }
+        // Learning may have swapped two; the list a person wrote is the order.
+        let mut candidates = entry.candidates.clone();
+        if let Some(at) = entry.learned_swap.filter(|at| at + 1 < candidates.len()) {
+            candidates.swap(at, at + 1);
+        }
+        for candidate in candidates {
+            if !has_evidence(&|story| {
+                story.kind.is_none() && story.role == *role && story.target == candidate
+            }) {
+                gaps.push(EvidenceGap {
+                    role: *role,
+                    kind: None,
+                    candidate,
+                });
+            }
+        }
+    }
+    for (name, entry) in &registry.kinds {
+        for candidate in &entry.candidates {
+            if !has_evidence(&|story| {
+                story.kind.as_ref() == Some(name)
+                    && story.role == entry.role
+                    && story.target == *candidate
+            }) {
+                gaps.push(EvidenceGap {
+                    role: entry.role,
+                    kind: Some(name.clone()),
+                    candidate: candidate.clone(),
+                });
+            }
+        }
+    }
+    gaps
+}
+
+/// Every check, in order, and the evidence gaps beside them.
+pub fn checks() -> Res<Diagnostics> {
     let mut checks = Vec::new();
     checks.push(check(
         "build",
@@ -105,7 +180,10 @@ pub fn checks() -> Res<Vec<Check>> {
         }
         Err(fail) => {
             checks.push(check("config", Status::Fail, fail.message));
-            return Ok(checks);
+            return Ok(Diagnostics {
+                checks,
+                gaps: Vec::new(),
+            });
         }
     };
 
@@ -202,7 +280,8 @@ pub fn checks() -> Res<Vec<Check>> {
             registry.meters.ledger_max_runs_per_hour
         ),
     ));
-    Ok(checks)
+    let gaps = evidence_gaps(&registry, &history::stories(&history::read(&dirs)));
+    Ok(Diagnostics { checks, gaps })
 }
 
 /// The usage meter: is it there and usable, and what does it say about each
@@ -387,6 +466,149 @@ mod tests {
         ]);
         assert_eq!(envelope.code, 34);
         assert_eq!(envelope.message.as_deref(), Some("1 check(s) failed"));
+    }
+
+    use crate::config::UserConfig;
+    use crate::history::Outcome;
+    use crate::model::{Effort, ModelName};
+    use crate::run::record::State;
+
+    fn candidate(model: &str, effort: Effort) -> Candidate {
+        Candidate {
+            harness: HarnessId::Codex,
+            model: ModelName::try_from(model.to_string()).unwrap(),
+            effort,
+        }
+    }
+
+    fn story(
+        kind: Option<&str>,
+        role: Role,
+        target: &Candidate,
+        state: State,
+        outcome: Option<Outcome>,
+    ) -> Story {
+        Story {
+            run: "r".to_string(),
+            t: 1,
+            role,
+            kind: kind.map(|name| TaskKindName::try_from(name.to_string()).unwrap()),
+            caller: None,
+            target: target.clone(),
+            blind: false,
+            dir: "/w".into(),
+            state,
+            exit: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            secs: 1,
+            sampled: false,
+            base_commit: None,
+            patch: None,
+            outcome,
+        }
+    }
+
+    const CONFIG: &str = r#"
+schema = 1
+[roles.review]
+candidates = [
+  { harness = "codex", model = "a", effort = "high" },
+  { harness = "codex", model = "b", effort = "high" },
+]
+[kinds.rust-review]
+description = "Review Rust."
+role = "review"
+candidates = [
+  { harness = "codex", model = "a", effort = "medium" },
+  { harness = "codex", model = "a", effort = "high" },
+]
+"#;
+
+    fn gaps(stories: &[Story]) -> Vec<(Option<String>, Role, String, Effort)> {
+        let registry = Registry::effective(&UserConfig::parse(CONFIG).unwrap());
+        evidence_gaps(&registry, stories)
+            .into_iter()
+            .map(|gap| {
+                (
+                    gap.kind.map(|kind| kind.to_string()),
+                    gap.role,
+                    gap.candidate.model.as_str().to_string(),
+                    gap.candidate.effort,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_current_list_is_warned_about_once_per_candidate_with_no_evidence_in_that_list() {
+        let kind = Some("rust-review".to_string());
+        let all = |kind: &Option<String>, role, model: &str, effort| {
+            (kind.clone(), role, model.to_string(), effort)
+        };
+        // Nothing on record: the person's role list (and not the shipped
+        // ones), then the kind, each in its configured order.
+        assert_eq!(
+            gaps(&[]),
+            [
+                all(&None, Role::Review, "a", Effort::High),
+                all(&None, Role::Review, "b", Effort::High),
+                all(&kind, Role::Review, "a", Effort::Medium),
+                all(&kind, Role::Review, "a", Effort::High),
+            ]
+        );
+        let (a_high, a_medium) = (candidate("a", Effort::High), candidate("a", Effort::Medium));
+        let rated = Some(Outcome::Discarded);
+        // One rated run in the list clears it — and only that list and that
+        // effort: a kind's run never clears a role's, nor the other way, nor
+        // another role's, and unknown, cancelled and budget are not evidence.
+        let cleared = gaps(&[
+            story(None, Role::Review, &a_high, State::Done, rated),
+            story(
+                kind.as_deref(),
+                Role::Review,
+                &a_medium,
+                State::Failed,
+                None,
+            ),
+            story(kind.as_deref(), Role::Advise, &a_high, State::Done, rated),
+            story(kind.as_deref(), Role::Review, &a_high, State::Done, None),
+            story(
+                kind.as_deref(),
+                Role::Review,
+                &a_high,
+                State::Cancelled,
+                None,
+            ),
+            story(kind.as_deref(), Role::Review, &a_high, State::Budget, None),
+        ]);
+        assert_eq!(
+            cleared,
+            [
+                all(&None, Role::Review, "b", Effort::High),
+                all(&kind, Role::Review, "a", Effort::High),
+            ]
+        );
+    }
+
+    #[test]
+    fn shipped_role_lists_are_left_alone() {
+        let registry = Registry::effective(&UserConfig::parse("schema = 1").unwrap());
+        assert!(evidence_gaps(&registry, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_order_a_person_wrote_survives_what_learning_swapped() {
+        let mut registry = Registry::effective(&UserConfig::parse(CONFIG).unwrap());
+        let entry = registry.roles.get_mut(&Role::Review).unwrap();
+        entry.candidates.swap(0, 1);
+        entry.learned_swap = Some(0);
+        let models: Vec<String> = evidence_gaps(&registry, &[])
+            .into_iter()
+            .filter(|gap| gap.kind.is_none())
+            .map(|gap| gap.candidate.model.as_str().to_string())
+            .collect();
+        assert_eq!(models, ["a", "b"]);
     }
 
     #[test]
