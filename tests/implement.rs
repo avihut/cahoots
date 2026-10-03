@@ -461,3 +461,39 @@ fn a_record_from_before_the_pin_still_gets_the_same_repository_check() {
         broken.json
     );
 }
+
+#[test]
+fn a_status_git_cannot_read_is_said_and_the_run_keeps_its_code() {
+    let world = World::new();
+    let answer = implement(&world, "FAKE: write=callee-ran.txt", &["--fork"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    let worktree = PathBuf::from(answer.data()["worktree"].as_str().unwrap());
+    let pinned = PathBuf::from(
+        world.record(&answer.run_id())["gitdir"]
+            .as_str()
+            .expect("a pinned git directory"),
+    );
+    fs::write(pinned.join("index"), "not an index").unwrap();
+    // The control: git itself cannot read this worktree's status now.
+    let control = std::process::Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(&worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(!control.status.success(), "the control status succeeded");
+
+    let later = world.ask(&["result", &answer.run_id()]);
+    assert_eq!(later.code, 0, "the run's own code: {}", later.json);
+    assert!(later.data()["changes"].is_null(), "{}", later.json);
+    assert!(
+        later.data()["changes_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`git status` failed"),
+        "{}",
+        later.json
+    );
+}

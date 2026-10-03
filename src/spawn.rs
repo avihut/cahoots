@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill, killpg};
-use nix::unistd::Pid;
+use nix::unistd::{AccessFlags, Pid, access};
 
 use crate::config::Billing;
 use crate::env;
@@ -262,13 +262,10 @@ pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBu
     // The repository's top as its `.git` shows it, before any git is run: a
     // `git` planted at the top of the repository, above `dir`, is refused
     // here, not after it has answered.
-    let top = here
-        .ancestors()
-        .find(|ancestor| ancestor.join(".git").symlink_metadata().is_ok())
-        .map(Path::to_path_buf);
+    let tops = repository_tops(&here);
     let mut roots = workspace.to_vec();
     roots.push(&here);
-    roots.extend(top.as_deref());
+    roots.extend(tops.iter().map(PathBuf::as_path));
     let git = match system_tool("git", &roots) {
         Ok(git) => git,
         Err(fail) if fail.exit == Exit::Policy => return Err(fail),
@@ -299,6 +296,116 @@ pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBu
         )));
     }
     Ok(ask("--git-common-dir").map(|common| (toplevel, common)))
+}
+
+/// Every directory from `dir` up that holds a `.git`, up to and including the
+/// first whose `.git` git takes for a repository — the top git finds. A
+/// `.git` git does not take (an empty directory, a file that names nothing)
+/// does not end the walk, since git looks past it, and it must not hide the
+/// repository around it. This takes a `.git` only where git surely does
+/// (`is_repository_marker`), so it never stops below the top git finds; where
+/// it is unsure, it walks on, and refuses more.
+fn repository_tops(dir: &Path) -> Vec<PathBuf> {
+    let mut tops = Vec::new();
+    for ancestor in dir.ancestors() {
+        let marker = ancestor.join(".git");
+        if marker.symlink_metadata().is_err() {
+            continue;
+        }
+        tops.push(ancestor.to_path_buf());
+        if is_repository_marker(&marker, ancestor) {
+            break;
+        }
+    }
+    tops
+}
+
+/// Whether git takes `marker`, the `.git` in `top`, for a repository: a git
+/// directory, or a file `gitdir: <path>` that names one. Never more lenient
+/// than git (setup.c: `read_gitfile_gently`, `is_git_directory`).
+fn is_repository_marker(marker: &Path, top: &Path) -> bool {
+    let Ok(meta) = fs::metadata(marker) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return is_git_directory(marker);
+    }
+    if !meta.is_file() {
+        return false;
+    }
+    let Some(text) = head_of(marker) else {
+        return false;
+    };
+    match text.strip_prefix("gitdir: ") {
+        Some(named) => {
+            let named = named.trim_end_matches(['\n', '\r']);
+            !named.is_empty() && is_git_directory(&top.join(named))
+        }
+        None => false,
+    }
+}
+
+/// git's test for a git directory: a `HEAD` that names a ref or a commit, and
+/// `objects` and `refs` it may enter in its common directory.
+fn is_git_directory(dir: &Path) -> bool {
+    if !is_head(&dir.join("HEAD")) {
+        return false;
+    }
+    let named = dir.join("commondir");
+    let common = match named.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => dir.to_path_buf(),
+        _ => match head_of(&named) {
+            Some(text) => dir.join(text.trim_end_matches(['\n', '\r'])),
+            None => return false,
+        },
+    };
+    ["objects", "refs"].iter().all(|part| {
+        let path = common.join(part);
+        path.is_dir() && access(&path, AccessFlags::X_OK).is_ok()
+    })
+}
+
+/// git's `validate_headref`, no more lenient: a link into `refs/`, a
+/// symbolic ref `ref: refs/…`, or a commit id and nothing else.
+fn is_head(head: &Path) -> bool {
+    let Ok(meta) = head.symlink_metadata() else {
+        return false;
+    };
+    if meta.file_type().is_symlink() {
+        return fs::read_link(head)
+            .is_ok_and(|target| target.to_str().is_some_and(|t| t.starts_with("refs/")));
+    }
+    let Some(text) = head_of(head) else {
+        return false;
+    };
+    if let Some(name) = text.strip_prefix("ref:") {
+        return name
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+            .starts_with("refs/");
+    }
+    let id = text.trim_end_matches(['\n', '\r']);
+    matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The start of a small file a repository keeps (`.git`, `HEAD`,
+/// `commondir`): at most 4 KiB of it, as text, and only from a regular file.
+/// This runs before any deadline does, so nothing planted in a file's place
+/// may hold it up: a file of any size is never read whole, and the file is
+/// opened without blocking, which a FIFO would otherwise do.
+fn head_of(path: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = File::options()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(4096).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// When a process started, as `ps` tells it — the identity check that stops
@@ -568,6 +675,87 @@ mod tests {
         let path = std::env::join_paths([&inside]).unwrap();
         assert_eq!(helper_path_from(Some(&path), &[&root]), None);
         assert_eq!(helper_path_from(None, &[&root]), None);
+    }
+
+    #[test]
+    fn a_dot_git_ends_the_walk_only_where_git_takes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        // A repository at the top, by hand: HEAD, objects, refs.
+        let gitdir = root.join(".git");
+        for part in ["objects", "refs"] {
+            fs::create_dir_all(gitdir.join(part)).unwrap();
+        }
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let below = root.join("a/b");
+        fs::create_dir_all(&below).unwrap();
+        assert_eq!(repository_tops(&below), vec![root.clone()]);
+
+        // What git looks past is no end of the walk, however it is dressed.
+        // Nor is what git takes but this walk is unsure of — an id with more
+        // after it: walking on refuses more, which is the safe side.
+        let fake = root.join("a/.git");
+        for (what, head, objects) in [
+            ("an empty directory", None, false),
+            (
+                "a HEAD and no objects",
+                Some("ref: refs/heads/main\n"),
+                false,
+            ),
+            (
+                "a HEAD git cannot read",
+                Some("ref:\u{a0}refs/heads/main\n"),
+                true,
+            ),
+            (
+                "an id with more after it",
+                Some(&*format!("{} x\n", "0".repeat(40))),
+                true,
+            ),
+        ] {
+            let _ = fs::remove_dir_all(&fake);
+            fs::create_dir_all(fake.join("refs")).unwrap();
+            if objects {
+                fs::create_dir_all(fake.join("objects")).unwrap();
+            }
+            if let Some(head) = head {
+                fs::write(fake.join("HEAD"), head).unwrap();
+            }
+            assert_eq!(
+                repository_tops(&below),
+                vec![root.join("a"), root.clone()],
+                "{what}"
+            );
+        }
+        // A FIFO where HEAD should be: neither waited on nor taken.
+        let _ = fs::remove_dir_all(&fake);
+        fs::create_dir_all(fake.join("objects")).unwrap();
+        fs::create_dir_all(fake.join("refs")).unwrap();
+        nix::unistd::mkfifo(&fake.join("HEAD"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert_eq!(
+            repository_tops(&below),
+            vec![root.join("a"), root.clone()],
+            "a FIFO for a HEAD"
+        );
+        let _ = fs::remove_dir_all(&fake);
+        for named in ["gitdir: nowhere\n", "gitdir: \n", "not a gitdir line\n"] {
+            fs::write(&fake, named).unwrap();
+            assert_eq!(
+                repository_tops(&below),
+                vec![root.join("a"), root.clone()],
+                "{named:?}"
+            );
+        }
+
+        // What git takes ends it: a gitfile naming a git directory, and a
+        // directory that is one.
+        fs::write(&fake, format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(repository_tops(&below), vec![root.join("a")]);
+        fs::remove_file(&fake).unwrap();
+        fs::create_dir_all(fake.join("objects")).unwrap();
+        fs::create_dir_all(fake.join("refs")).unwrap();
+        fs::write(fake.join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
+        assert_eq!(repository_tops(&below), vec![root.join("a")]);
     }
 
     #[test]

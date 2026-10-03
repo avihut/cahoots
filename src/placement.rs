@@ -128,7 +128,7 @@ pub fn cut(
     let path = worktrees.join(run_id);
     let git = spawn::system_tool("git", &roots)?;
     let deadline = deadline.min(GIT_DEADLINE);
-    let before = linked_worktrees(&common);
+    let before = linked_worktrees(&common)?;
     let mut args = quiet_git_args(dirs)?;
     args.extend([
         OsString::from("-C"),
@@ -170,7 +170,7 @@ fn cut_with_daft(
     deadline: Duration,
 ) -> Res<(PathBuf, PathBuf)> {
     let deadline = deadline.min(DAFT_DEADLINE);
-    let before = linked_worktrees(common);
+    let before = linked_worktrees(common)?;
     let args = [
         OsStr::new("-C"),
         base.as_os_str(),
@@ -307,11 +307,26 @@ fn pin(
 }
 
 /// The names of the repository's linked worktrees, as git keeps them under
-/// `<common>/worktrees`.
-fn linked_worktrees(common: &Path) -> Vec<OsString> {
-    fs::read_dir(common.join("worktrees"))
-        .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
-        .unwrap_or_default()
+/// `<common>/worktrees` — none before the first. A list that cannot be read
+/// fails the cut: without it a fresh worktree cannot be told from one that
+/// was already there.
+fn linked_worktrees(common: &Path) -> Res<Vec<OsString>> {
+    let listed = common.join("worktrees");
+    let unreadable = |error: std::io::Error| {
+        cut_failed(&format!(
+            "cannot list {} ({error}), so a fresh worktree cannot be told from one that was \
+             already there",
+            listed.display()
+        ))
+    };
+    let entries = match fs::read_dir(&listed) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    entries
+        .map(|entry| entry.map(|entry| entry.file_name()).map_err(unreadable))
+        .collect()
 }
 
 /// The git directory git takes `worktree` to have now, canonical.

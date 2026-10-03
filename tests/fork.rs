@@ -7,7 +7,8 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::{Answer, World, alive, git_in, path_str};
@@ -293,6 +294,68 @@ fn a_daft_path_that_was_a_worktree_already_is_refused() {
     );
 }
 
+/// Puts a directory's mode back when it goes out of scope, so a failed
+/// assertion does not leave a world its temp directory cannot remove.
+struct ModeBack(PathBuf, u32);
+
+impl Drop for ModeBack {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1));
+    }
+}
+
+#[test]
+fn a_fork_is_not_cut_when_the_repositorys_worktrees_cannot_be_listed() {
+    let world = World::new();
+    // A worktree that is someone's, and a daft that hands it back, while the
+    // list a fresh one is told apart by cannot be read.
+    let existing = world.root.join("existing");
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        path_str(&existing),
+        "HEAD",
+    ]);
+    world.daft(json!({"make": "nothing", "print": existing}));
+    let listed = world.work.join(".git/worktrees");
+    let _back = ModeBack(listed.clone(), 0o755);
+    fs::set_permissions(&listed, fs::Permissions::from_mode(0o111)).unwrap();
+
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 40, "{}", answer.json);
+    assert!(answer.message().contains("cannot list"), "{}", answer.json);
+    assert_never_ran(&world, &answer, &existing);
+    assert!(world.daft_calls().is_empty(), "daft ran without the list");
+}
+
+#[test]
+fn a_hooks_directory_that_is_not_empty_stops_the_cut() {
+    // On the git path, then on daft's.
+    for with_daft in [false, true] {
+        let world = World::new();
+        // Were the hooks directory used as it is, git would run what is in
+        // it; the repository's own hook leaves the same mark.
+        world.hook_that_marks(&world.state.join("no-hooks"));
+        world.hook_that_marks(&world.work.join(".git/hooks"));
+        let made = world.root.join("forks/f");
+        if with_daft {
+            world.daft(json!({"make": "worktree", "print": made}));
+        }
+        let answer = fork(&world, &[]);
+        assert_eq!(answer.code, 40, "daft: {with_daft}: {}", answer.json);
+        assert!(
+            answer.message().contains("is not empty"),
+            "daft: {with_daft}: {}",
+            answer.json
+        );
+        assert_never_ran(&world, &answer, &made);
+        assert!(!world.hook_ran(), "daft: {with_daft}: a hook ran");
+        assert!(world.daft_calls().is_empty(), "daft ran");
+    }
+}
+
 #[test]
 fn a_daft_path_inside_the_callers_tree_is_refused() {
     let world = World::new();
@@ -469,6 +532,85 @@ fn a_git_inside_the_workspace_is_not_run() {
     );
     assert!(!marker.exists(), "the planted git ran");
     assert!(!world.state.join("runs").exists(), "a run was created");
+}
+
+/// A `git` planted at the top of the repository, first on PATH, that leaves
+/// a mark when it runs.
+fn plant_git(world: &World) -> PathBuf {
+    let marker = world.root.join("planted-git-ran");
+    world.script_at(
+        &world.work.join("bin/git"),
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    world.prefix_path(&world.work.join("bin"));
+    marker
+}
+
+/// `cahoots run --role advise` from `dir`.
+fn advise_from(world: &World, dir: &Path) -> Answer {
+    let brief = world.brief("hello");
+    let mut command = world.cahoots();
+    command.current_dir(dir).args([
+        "run",
+        "--role",
+        "advise",
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    common::answer(&mut command)
+}
+
+#[test]
+fn a_git_at_the_top_of_the_repository_is_not_run_from_below_it() {
+    let world = World::new();
+    let marker = plant_git(&world);
+    let below = world.work.join("sub");
+    fs::create_dir_all(&below).unwrap();
+    let answer = advise_from(&world, &below);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    assert!(
+        answer.message().contains("inside the workspace"),
+        "{}",
+        answer.json
+    );
+    assert!(!marker.exists(), "the planted git ran");
+    assert!(!world.state.join("runs").exists(), "a run was created");
+}
+
+#[test]
+fn a_dot_git_that_git_looks_past_does_not_hide_the_repository_around_it() {
+    // Each is a `.git` git does not take for a repository: it looks on up,
+    // and finds the one around it, where the planted git is.
+    for mask in [
+        "an empty directory",
+        "a directory with only a HEAD",
+        "a file naming nothing",
+    ] {
+        let world = World::new();
+        let marker = plant_git(&world);
+        let below = world.work.join("sub");
+        let dot_git = below.join(".git");
+        match mask {
+            "an empty directory" => fs::create_dir_all(&dot_git).unwrap(),
+            "a directory with only a HEAD" => {
+                fs::create_dir_all(&dot_git).unwrap();
+                fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+            }
+            _ => {
+                fs::create_dir_all(&below).unwrap();
+                fs::write(&dot_git, "gitdir: nowhere\n").unwrap();
+            }
+        }
+        let answer = advise_from(&world, &below);
+        assert_eq!(answer.code, 33, "{mask}: {}", answer.json);
+        assert!(!marker.exists(), "{mask}: the planted git ran");
+        assert!(
+            !world.state.join("runs").exists(),
+            "{mask}: a run was created"
+        );
+    }
 }
 
 #[test]
