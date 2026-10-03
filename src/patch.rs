@@ -348,12 +348,21 @@ fn untracked(
 }
 
 /// What a path in the worktree is, by `lstat`, never by what a link names:
-/// its device, inode and type. A file is the same file while these are.
+/// its device, inode, type, link count and size, and when its inode and its
+/// content last changed (`ctime`, `mtime`, to the nanosecond). A file is the
+/// same, unchanged file while all of these are. Device and inode alone are
+/// not enough: Linux hands a freed inode number straight to the next file
+/// made, so a replacement can carry the one it replaced. Any replacement or
+/// write sets the new inode's `ctime`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Identity {
     dev: u64,
     ino: u64,
     kind: u32,
+    nlink: u64,
+    size: u64,
+    ctime: (i64, i64),
+    mtime: (i64, i64),
 }
 
 const KIND_LINK: u32 = 0o120000;
@@ -379,6 +388,10 @@ fn identity(path: &Path) -> Result<Option<Identity>, String> {
         dev: meta.dev(),
         ino: meta.ino(),
         kind: meta.mode() & 0o170000,
+        nlink: meta.nlink(),
+        size: meta.size(),
+        ctime: (meta.ctime(), meta.ctime_nsec()),
+        mtime: (meta.mtime(), meta.mtime_nsec()),
     }))
 }
 
@@ -883,24 +896,41 @@ mod tests {
 
     #[test]
     fn a_file_swapped_while_git_reads_it_fails_the_capture() {
-        // A new file, or a link, where the one git was given was.
-        let dir = links();
-        for into_link in [true, false] {
+        // Whatever takes the file's place while git reads it — a link, a
+        // new file of another size or of the same size, or the same file
+        // rewritten — is told apart, whether or not it gets the old inode
+        // number back. The pause first puts the change past the coarsest
+        // clock a file system stamps a file with.
+        type Swap = fn(&Path);
+        let swaps: [(&str, Swap); 4] = [
+            ("a link", |path| {
+                std::fs::remove_file(path).unwrap();
+                std::os::unix::fs::symlink("/somewhere", path).unwrap();
+            }),
+            ("a larger file", |path| {
+                std::fs::remove_file(path).unwrap();
+                std::fs::write(path, "another file\n").unwrap();
+            }),
+            ("a file of the same size", |path| {
+                std::fs::remove_file(path).unwrap();
+                std::fs::write(path, "g\n").unwrap();
+            }),
+            ("the same file, rewritten", |path| {
+                std::fs::write(path, "g\n").unwrap();
+            }),
+        ];
+        for (what, swap) in swaps {
+            let dir = links();
             let path = dir.path().join("f");
             let mut budget = Budget::new(Duration::from_secs(8), PATCH_CAP);
             let swapped = untracked(b"f\0", dir.path(), &mut budget, |_, _| {
-                std::fs::remove_file(&path).unwrap();
-                if into_link {
-                    std::os::unix::fs::symlink("/somewhere", &path).unwrap();
-                } else {
-                    std::fs::write(&path, "another file\n").unwrap();
-                }
+                std::thread::sleep(Duration::from_millis(50));
+                swap(&path);
                 Ok(b"what git read".to_vec())
             })
-            .unwrap_err();
-            assert!(swapped.contains("changed while"), "{swapped}");
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(&path, "f\n").unwrap();
+            .map(|_| ())
+            .expect_err(what);
+            assert!(swapped.contains("changed while"), "{what}: {swapped}");
         }
     }
 
