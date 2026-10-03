@@ -17,7 +17,9 @@ pub struct Dirs {
     pub home: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
-    /// True when a dev-build override placed either directory.
+    /// What a person keeps, which nothing ages out: the eval suite.
+    pub data: PathBuf,
+    /// True when a dev-build override placed any directory.
     pub overridden: bool,
 }
 
@@ -34,13 +36,19 @@ pub fn passwd_home() -> Res<PathBuf> {
 
 impl Dirs {
     pub fn resolve() -> Res<Dirs> {
-        let overrides = [DirKind::Config, DirKind::State, DirKind::Home].map(env::dev_dir_override);
+        let overrides = [
+            DirKind::Config,
+            DirKind::State,
+            DirKind::Data,
+            DirKind::Home,
+        ]
+        .map(env::dev_dir_override);
         let overridden = overrides.iter().any(Option::is_some);
         let all_overridden = overrides.iter().all(Option::is_some);
 
         // Real state is for real builds. A unit test never gets the real
         // directories, and a dev build only gets them when its developer asks
-        // — otherwise ALL of config, state and home must point somewhere
+        // — otherwise ALL of config, state, data and home must point somewhere
         // throwaway. (2026-09-20: a unit test reached `install` through
         // `dispatch` and wrote into a real ~/.claude and ~/.codex.)
         let real_dirs_refused = if cfg!(test) {
@@ -49,7 +57,7 @@ impl Dirs {
         {
             Some(
                 "this is a DEV build, which only works on throwaway directories: set \
-                 CAHOOTS_CONFIG_DIR, CAHOOTS_STATE_DIR and CAHOOTS_HOME_DIR — or \
+                 CAHOOTS_CONFIG_DIR, CAHOOTS_STATE_DIR, CAHOOTS_DATA_DIR and CAHOOTS_HOME_DIR — or \
                  CAHOOTS_DEV_REAL_DIRS=1 to use your real ones on purpose",
             )
         } else {
@@ -59,7 +67,7 @@ impl Dirs {
             return Err(Fail::config(why));
         }
 
-        let [config, state, home_override] = overrides;
+        let [config, state, data, home_override] = overrides;
         let home = match home_override {
             Some(home) => home,
             None => passwd_home()?,
@@ -67,6 +75,7 @@ impl Dirs {
         Ok(Dirs {
             config: config.unwrap_or_else(|| home.join(".config/cahoots")),
             state: state.unwrap_or_else(|| home.join(".local/state/cahoots")),
+            data: data.unwrap_or_else(|| home.join(".local/share/cahoots")),
             home,
             overridden,
         })
@@ -90,6 +99,11 @@ impl Dirs {
         self.state.join("slots")
     }
 
+    /// The eval suite's tasks, one directory each.
+    pub fn evals_tasks(&self) -> PathBuf {
+        self.data.join("evals/tasks")
+    }
+
     /// The empty directory every `git` cahoots starts is given as its hooks
     /// directory, so that none of a repository's hooks runs.
     pub fn no_hooks(&self) -> PathBuf {
@@ -103,7 +117,7 @@ impl Dirs {
         if self.overridden {
             return Ok(());
         }
-        for dir in [&self.config, &self.state] {
+        for dir in [&self.config, &self.state, &self.data] {
             let resolved = fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
             for root in roots {
                 if resolved.starts_with(root) {
@@ -151,9 +165,23 @@ mod tests {
             home: PathBuf::from("/home/u"),
             config: PathBuf::from("/home/u/.config/cahoots"),
             state: PathBuf::from("/home/u/.local/state/cahoots"),
+            data: PathBuf::from("/home/u/.local/share/cahoots"),
             overridden: false,
         };
         assert!(dirs.refuse_inside(&[Path::new("/home/u")]).is_err());
         assert!(dirs.refuse_inside(&[Path::new("/home/u/project")]).is_ok());
+    }
+
+    #[test]
+    fn a_workspace_that_contains_the_data_dir_is_refused() {
+        let dirs = Dirs {
+            home: PathBuf::from("/home/u"),
+            config: PathBuf::from("/elsewhere/config"),
+            state: PathBuf::from("/elsewhere/state"),
+            data: PathBuf::from("/home/u/project/data"),
+            overridden: false,
+        };
+        assert!(dirs.refuse_inside(&[Path::new("/home/u/project")]).is_err());
+        assert!(dirs.refuse_inside(&[Path::new("/home/u/other")]).is_ok());
     }
 }

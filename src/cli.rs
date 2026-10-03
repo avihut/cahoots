@@ -197,6 +197,11 @@ pub enum Verb {
     },
     /// Show the effective registry of harnesses, models and roles
     Registry,
+    /// The private eval suite: tasks made from your own accepted writer runs
+    Evals {
+        #[command(subcommand)]
+        action: EvalsAction,
+    },
     /// Check the installation, the harness versions and the permission rules
     Doctor,
     /// Summarise recorded runs: how they ended, what became of them, what they cost
@@ -257,6 +262,16 @@ pub enum LearnAction {
     Reset,
 }
 
+#[derive(Debug, Clone, Subcommand)]
+pub enum EvalsAction {
+    /// Make a task from a writer's run whose result was accepted
+    Add { run: String },
+    /// The tasks, and whether each can still be replayed
+    List,
+    /// Take a task out of the suite
+    Remove { task: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     /// What a harness calls. The printed allow-rules name exactly these.
@@ -276,7 +291,9 @@ pub fn tier_of(name: &str) -> Option<Tier> {
     Some(match name {
         "pick" | "run" | "resume" | "wait" | "status" | "result" | "cancel" | "outcome"
         | "notes" | "review" => Tier::Agent,
-        "install" | "uninstall" | "settings" | "enable" | "learn" | "registry" => Tier::Human,
+        "install" | "uninstall" | "settings" | "enable" | "learn" | "registry" | "evals" => {
+            Tier::Human
+        }
         "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
         "__supervise" => Tier::Internal,
         _ => return None,
@@ -303,6 +320,7 @@ impl Verb {
             Verb::Enable { .. } => "enable",
             Verb::Learn { .. } => "learn",
             Verb::Registry => "registry",
+            Verb::Evals { .. } => "evals",
             Verb::Doctor => "doctor",
             Verb::Report { .. } => "report",
             Verb::ExitCodes => "exit-codes",
@@ -461,6 +479,12 @@ fn title(verb: &Verb) -> String {
         Verb::Learn {
             action: LearnAction::Reset,
         } => "cahoots learn reset".to_string(),
+        Verb::Evals { action } => match action {
+            EvalsAction::Add { .. } => "cahoots evals add",
+            EvalsAction::List => "cahoots evals list",
+            EvalsAction::Remove { .. } => "cahoots evals remove",
+        }
+        .to_string(),
         verb => format!("cahoots {}", verb.name()),
     }
 }
@@ -501,6 +525,7 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             ok(serde_json::json!({
                 "config": dirs.config,
                 "state": dirs.state,
+                "data": dirs.data,
                 "home": dirs.home,
                 "overridden": dirs.overridden,
                 "dev_overrides_honoured": crate::env::dev_overrides_honoured(),
@@ -609,6 +634,7 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             words: person.then(|| endings::forgot(title)),
         }),
         Verb::Outcome { run, outcome } => Ok(client::outcome(&run, outcome)?.into()),
+        Verb::Evals { action } => evals(action, person, title),
         Verb::Report { days, suggest } => {
             let envelope = crate::report::report(days, suggest)?;
             let words = person.then(|| {
@@ -657,6 +683,44 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
             Ok(Envelope::new(Exit::Ok, None).into())
         }
     }
+}
+
+/// `cahoots evals`: the suite's verbs, and their words for a person.
+fn evals(action: EvalsAction, person: bool, title: String) -> Result<Said, Stopped> {
+    let dirs = Dirs::resolve()?;
+    let encode = |value: Result<serde_json::Value, serde_json::Error>| {
+        value.map_err(|error| Fail::internal(format!("cannot encode a task: {error}")))
+    };
+    // The asking process's workspace, which no git started here may come
+    // from, is looked for only by the actions that start git: `remove`
+    // starts none.
+    let (data, words) = match action {
+        EvalsAction::Add { run } => {
+            let invoker = client::invoker_roots()?;
+            let added = crate::evals::add(&dirs, &run, &client::borrowed(&invoker))?;
+            let words = person.then(|| endings::evals_added(title, &added, &dirs.home));
+            (encode(serde_json::to_value(&added))?, words)
+        }
+        EvalsAction::List => {
+            let invoker = client::invoker_roots();
+            let roots = invoker.as_ref().map(|roots| client::borrowed(roots));
+            let tasks = crate::evals::list(&dirs, roots.as_deref().map_err(|fail| *fail));
+            let words = person.then(|| endings::evals_listed(title, &tasks, &dirs.home));
+            (
+                serde_json::json!({ "tasks": encode(serde_json::to_value(&tasks))? }),
+                words,
+            )
+        }
+        EvalsAction::Remove { task } => {
+            let task = crate::evals::remove(&dirs, &task)?;
+            let words = person.then(|| endings::evals_removed(title, &task));
+            (serde_json::json!({ "task": task, "removed": true }), words)
+        }
+    };
+    Ok(Said {
+        envelope: Envelope::new(Exit::Ok, None).with_data(data),
+        words,
+    })
 }
 
 /// `cahoots install`: the meter decided (and asked, when it comes to that)
@@ -930,6 +994,9 @@ mod tests {
             vec!["cahoots", "settings"],
             vec!["cahoots", "settings", "set", "harness.codex.cap", "60"],
             vec!["cahoots", "settings", "reset", "harness.codex.cap"],
+            vec!["cahoots", "evals", "add", "r1"],
+            vec!["cahoots", "evals", "list"],
+            vec!["cahoots", "evals", "remove", "r1"],
         ] {
             let verb = Cli::try_parse_from(argv).unwrap().verb;
             let fail = refusal(&verb, false).expect("refused without a terminal");
@@ -984,6 +1051,7 @@ mod tests {
             (vec!["cahoots", "--bogus", "install"], "install"),
             (vec!["cahoots", "run", "--role", "deploy"], "run"),
             (vec!["cahoots", "report", "--days", "abc"], "report"),
+            (vec!["cahoots", "evals", "bogus"], "evals"),
         ] {
             assert_eq!(named(&argv).as_deref(), Some(verb), "{argv:?}");
         }
@@ -1036,6 +1104,10 @@ mod tests {
             "`cahoots review` needs a command: `cahoots review --help` lists them"
         );
         assert_eq!(
+            because(&["cahoots", "evals"]),
+            "`cahoots evals` needs a command: `cahoots evals --help` lists them"
+        );
+        assert_eq!(
             because(&["cahoots", "enable"]),
             "the following required arguments were not provided: <HARNESS>",
             "what is missing, not a sentence cut at its colon"
@@ -1082,6 +1154,16 @@ mod tests {
             title_of(&["cahoots", "learn", "reset"]),
             "cahoots learn reset"
         );
+        for (argv, title) in [
+            (vec!["cahoots", "evals", "add", "r1"], "cahoots evals add"),
+            (vec!["cahoots", "evals", "list"], "cahoots evals list"),
+            (
+                vec!["cahoots", "evals", "remove", "r1"],
+                "cahoots evals remove",
+            ),
+        ] {
+            assert_eq!(title_of(&argv), title);
+        }
     }
 
     #[test]

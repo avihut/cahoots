@@ -11,6 +11,7 @@ pub mod config;
 pub mod dirs;
 pub mod doctor;
 pub mod env;
+pub mod evals;
 pub mod exit;
 pub mod explore;
 pub mod gate;

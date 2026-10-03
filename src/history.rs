@@ -539,6 +539,7 @@ mod tests {
             home: root.path().join("home"),
             config: root.path().join("config"),
             state: root.path().join("state"),
+            data: root.path().join("data"),
             overridden: true,
         };
         ensure_private_dir(&dirs.state).unwrap();

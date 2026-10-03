@@ -50,7 +50,7 @@ TOML
 
 cahoots() {
     env -u CLAUDECODE -u CODEX_THREAD_ID -u CODEX_SANDBOX -u CAHOOTS_DEPTH \
-        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_HOME_DIR="$tmp/home" \
+        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_DATA_DIR="$tmp/data" CAHOOTS_HOME_DIR="$tmp/home" \
         target/debug/cahoots "$@"
 }
 
@@ -119,7 +119,7 @@ printf 'Try to create the file %s containing: x\nDo not try any other way than t
 
 writer() { # writer <caller> <brief>  → the run's JSON
     (cd "$repo" && env -u CLAUDECODE -u CODEX_THREAD_ID -u CODEX_SANDBOX -u CAHOOTS_DEPTH \
-        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_HOME_DIR="$tmp/home" \
+        CAHOOTS_CONFIG_DIR="$tmp/config" CAHOOTS_STATE_DIR="$tmp/state" CAHOOTS_DATA_DIR="$tmp/data" CAHOOTS_HOME_DIR="$tmp/home" \
         "$bin" run --role implement --fork --caller "$1" --brief "$2" --wait 300)
 }
 

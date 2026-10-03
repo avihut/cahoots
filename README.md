@@ -376,6 +376,26 @@ order you wrote under `[roles]` stays as you wrote it unless you add
 All of it stays on this machine. From a terminal, `cahoots learn list` shows
 what reviews have taught it, and `cahoots learn reset` forgets that.
 
+## Your own eval suite
+
+A change you accepted from a writer is a test case for the next one. From a
+terminal:
+
+```sh
+cahoots evals add <run>      # make a task from a writer's run you accepted
+cahoots evals list           # your tasks, and whether each can still be replayed
+cahoots evals remove <task>  # take one out (a task's id is its run's)
+```
+
+`evals add` takes a writer's run (`--role implement --fork`) whose result you
+recorded as `cahoots outcome <run> accepted`, within the 7 days a run's brief
+and patch are kept. It keeps the brief, the commit the run started from, and
+the change, split into the test files it touched (the hidden tests) and the
+rest. `evals list` warns when a task's commit, or its repository, is gone.
+
+Tasks live in `~/.local/share/cahoots/evals`, stay on this machine, and never
+expire. Nothing runs them yet.
+
 ## What cahoots will and won't do
 
 - **Readers can't change anything.** For `advise`, `review` and `explore`,
@@ -426,6 +446,7 @@ then bills per token, and plan caps no longer apply to it.
 ```sh
 cahoots uninstall                                  # what install added, and nothing else
 rm -rf ~/.config/cahoots ~/.local/state/cahoots    # settings, run records, what was learned
+rm -rf ~/.local/share/cahoots                      # your eval suite
 cargo uninstall cahoots
 ```
 

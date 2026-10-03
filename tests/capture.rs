@@ -736,6 +736,36 @@ fn a_failed_writer_keeps_its_patch() {
     assert_eq!(paths(&answer), ["x.txt"]);
 }
 
+/// A tracked file's directory turned into a file: the path git lists from
+/// the index is under something that is no longer a directory, and that is
+/// nothing there, not a reason to keep no patch.
+#[test]
+fn a_directory_that_became_a_file_keeps_its_patch() {
+    let world = World::new();
+    commit_files(&world, &[("d/f.txt", b"in a directory\n")]);
+    let answer = fork(
+        &world,
+        "FAKE: remove=d/f.txt\nFAKE: rmdir=d\nFAKE: write=d",
+        &[],
+    );
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert_eq!(paths(&answer), ["d/f.txt", "d"]);
+    let id = answer.run_id();
+    let patch = fs::read(world.run_file(&id, "patch.diff")).unwrap();
+    let base = answer.data()["base_commit"].as_str().unwrap();
+    let replay = world.root.join("replay");
+    world.git(&["worktree", "add", "-q", "--detach", path_str(&replay), base]);
+    fs::write(world.root.join("patch.diff"), patch).unwrap();
+    git_in(
+        &replay,
+        &["apply", path_str(&world.root.join("patch.diff"))],
+    );
+    assert_eq!(
+        fs::read(replay.join("d")).unwrap(),
+        fs::read(worktree(&answer).join("d")).unwrap()
+    );
+}
+
 #[test]
 fn a_timed_out_writer_keeps_its_patch() {
     let world = World::new();

@@ -37,6 +37,7 @@ fn bare_home() -> Home {
             home: root.join("home"),
             config: root.join("config"),
             state: root.join("state"),
+            data: root.join("data"),
             overridden: true,
         },
         _tmp: tmp,

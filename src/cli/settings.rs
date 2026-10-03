@@ -800,6 +800,7 @@ mod tests {
             home: tmp.path().join("home"),
             config: tmp.path().join("config"),
             state: tmp.path().join("state"),
+            data: tmp.path().join("data"),
             overridden: true,
         };
         std::fs::create_dir_all(&dirs.config).unwrap();
