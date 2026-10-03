@@ -294,3 +294,45 @@ fn the_git_daft_finds_is_held_to_the_floor_too() {
     assert!(world.record(&answer.run_id())["callee_pid"].is_null());
     assert!(!f1.exists(), "a worktree was cut");
 }
+
+/// The eval suite's checks of a task's base commit (`evals list`, and
+/// `evals add` before it writes a task) read that commit, and never fetch it.
+#[test]
+fn an_eval_tasks_base_commit_is_never_fetched() {
+    let (world, head) = promisor_world();
+    let brief = "FAKE: append=a.txt::more\\n\n";
+    let added = world.accepted_writer(brief, &[]).run_id();
+    let other = world.accepted_writer(brief, &[]).run_id();
+    let at = |args: &[&str]| {
+        world
+            .at_terminal_with(args, &[("PATH", &world.path_with_git())])
+            .finish()
+    };
+    let first = at(&["evals", "add", &added]);
+    assert_eq!(first.code, 0, "{}", first.json);
+    world.lose(&head);
+
+    let listed = at(&["evals", "list"]);
+    assert_eq!(listed.code, 0, "{}", listed.json);
+    assert_eq!(
+        listed.json["data"]["tasks"][0]["rot"], "commit_gone",
+        "{}",
+        listed.json
+    );
+    assert!(!world.fetch_tried(), "evals list tried to fetch");
+    let refused = at(&["evals", "add", &other]);
+    assert_eq!(refused.code, 2, "{}", refused.json);
+    assert!(!world.fetch_tried(), "evals add tried to fetch");
+
+    let probe = format!("{head}^{{commit}}");
+    assert!(world.fetches_without_the_variable(
+        &world.work,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &probe
+        ]
+    ));
+}
