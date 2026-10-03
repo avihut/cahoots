@@ -179,6 +179,8 @@ fn cut_with_daft(
     at: Option<&Commit>,
 ) -> Res<(PathBuf, PathBuf)> {
     let deadline = deadline.min(DAFT_DEADLINE);
+    // The git daft will find on its PATH, checked before daft starts.
+    let path = spawn::path_for_git_users(roots)?;
     let before = linked_worktrees(common)?;
     let mut args = vec![
         OsStr::new("-C"),
@@ -192,15 +194,9 @@ fn cut_with_daft(
     ];
     args.extend(at.map(|commit| OsStr::new(commit.as_str())));
     let started = Instant::now();
-    let output = spawn::run_helper_with_env(
-        daft,
-        &args,
-        None,
-        deadline,
-        spawn::helper_path(roots),
-        &quiet_git_env(dirs)?,
-    )
-    .map_err(|fail| did_not_finish("`daft start --fork`", started, deadline, fail))?;
+    let output =
+        spawn::run_helper_with_env(daft, &args, None, deadline, path, &quiet_git_env(dirs)?)
+            .map_err(|fail| did_not_finish("`daft start --fork`", started, deadline, fail))?;
     match output.status {
         Some(0) => {}
         Some(code) => {

@@ -245,3 +245,52 @@ fn a_git_below_the_floor_is_never_run() {
     );
     assert!(!ran.exists(), "the old git ran for more than its version");
 }
+
+/// The `git` first on this test's own PATH, as found.
+fn installed_git() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("git on PATH")
+}
+
+#[test]
+fn the_git_daft_finds_is_held_to_the_floor_too() {
+    let world = World::new();
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"print": f1}));
+    // An old git daft would find, and never cahoots: before it on PATH, a
+    // directory inside the workspace whose `git` links to the installed one.
+    // The policy judges that link by where it points, so cahoots takes it;
+    // daft's PATH drops workspace directories, so daft would not.
+    let ran = world.root.join("old-git-ran");
+    let old = world.root.join("old-git/git");
+    world.script_at(
+        &old,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version 2.45.0'; exit 0; fi\n\
+             echo \"$@\" >> '{}'\nexit 1\n",
+            ran.display()
+        ),
+    );
+    world.prefix_path(old.parent().unwrap());
+    let tools = world.work.join("tools");
+    fs::create_dir_all(&tools).unwrap();
+    std::os::unix::fs::symlink(
+        fs::canonicalize(installed_git()).unwrap(),
+        tools.join("git"),
+    )
+    .unwrap();
+    world.prefix_path(&tools);
+    let answer = fork(&world, "FAKE: write=x.txt");
+    assert_eq!(answer.code, 34, "{}", answer.json);
+    assert!(
+        answer.message().contains("found `git version 2.45.0`"),
+        "{}",
+        answer.json
+    );
+    assert!(!ran.exists(), "the old git ran for more than its version");
+    assert!(world.daft_calls().is_empty(), "daft started");
+    assert!(world.record(&answer.run_id())["callee_pid"].is_null());
+    assert!(!f1.exists(), "a worktree was cut");
+}

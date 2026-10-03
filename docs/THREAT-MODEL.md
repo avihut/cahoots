@@ -213,7 +213,9 @@ clears it and sets `GIT_NO_LAZY_FETCH=1` after everything a caller passes —
 an empty list included — so nothing can drop or relax it, and
 `scripts/guard.sh` holds that shape. Every `git` cahoots runs gets it; so
 does `daft`, which hands it to the `git` it starts (it removes only git's
-discovery variables), and so does the callee, whose harness runs `git` of
+discovery variables) — and that `git`, the first on the PATH daft is given,
+which need not be the one cahoots finds on its own, is held to the binary
+policy and the floor below before daft starts — and so does the callee, whose harness runs `git` of
 its own outside its tool sandbox. A step that needs an object the
 repository lacks fails as it would for one it cannot read: no base commit is
 recorded, the cut fails and the writer never starts, no patch is kept,

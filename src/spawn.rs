@@ -410,6 +410,24 @@ pub fn helper_path(workspace: &[&Path]) -> Option<OsString> {
     helper_path_from(env::path_var().as_deref(), workspace)
 }
 
+/// [`helper_path`], for a tool that runs `git` of its own (`daft`): the
+/// first `git` on it — the one the tool will find, which need not be the one
+/// this process finds, since a workspace entry this PATH drops may have come
+/// first — is held to the binary policy and to the floor
+/// (`require_git_floor`) before the tool starts. A `git` it refuses, or none
+/// at all, is the refusal it would be for cahoots' own.
+pub fn path_for_git_users(workspace: &[&Path]) -> Res<Option<OsString>> {
+    let path = helper_path(workspace);
+    let found = find_on_path("git", path.as_deref())
+        .ok_or_else(|| Fail::new(Exit::TargetUnavailable, "`git` is not on PATH".to_string()));
+    let git = as_system_tool(
+        "git",
+        found.and_then(|git| resolve_binary("git", Some(&git), workspace)),
+    )?;
+    require_git_floor(&git, workspace)?;
+    Ok(path)
+}
+
 fn helper_path_from(path: Option<&OsStr>, workspace: &[&Path]) -> Option<OsString> {
     let roots: Vec<PathBuf> = workspace
         .iter()
