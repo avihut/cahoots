@@ -13,6 +13,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -233,9 +234,24 @@ pub fn capture(
     let diff: Vec<&OsStr> = DIFF.iter().map(OsStr::new).collect();
 
     let run = |budget: &mut Budget| -> Result<Vec<u8>, String> {
+        // What the tracked diff will read, looked at before it does: none of
+        // it a hard link, and all of it the same files once it has.
+        let mut names = diff.clone();
+        names
+            .extend(["--name-only", "-z", "--end-of-options", base.as_str(), "--"].map(OsStr::new));
+        let changed = step(budget, "git diff --name-only", &names, 0)?;
+        let watched = changed
+            .split(|&byte| byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                let path = worktree.join(OsStr::from_bytes(name));
+                identity(&path).map(|before| (path, before))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut tracked = diff.clone();
         tracked.extend(["--end-of-options", base.as_str(), "--"].map(OsStr::new));
         let mut patch = step(budget, "git diff", &tracked, 0)?;
+        unchanged(&watched)?;
         let listing = step(
             budget,
             "git ls-files",
@@ -257,6 +273,7 @@ pub fn capture(
             // `--no-index` implies `--exit-code`: 1 is "they differ".
             step(budget, "git diff --no-index", &untracked, 1)
         })?);
+        unchanged(&watched)?;
         budget.time_left()?;
         Ok(patch)
     };
@@ -298,10 +315,11 @@ impl Budget {
 }
 
 /// The creation of every untracked file in `listing` (`ls-files -z`), in
-/// its order. A file is git's (`diff_file`); a link is written here, as a
-/// link, from `read_link`: `git diff --no-index` takes a link to a directory
-/// for the directory, and diffs what is in it. One ending in `/` is a
-/// repository of its own, nested in the tree, and is left out.
+/// its order. A file is git's (`diff_file`), read only if it is not a hard
+/// link and is the same file after git has read it; a link is written here,
+/// as a link, from `read_link`: `git diff --no-index` takes a link to a
+/// directory for the directory, and diffs what is in it. One ending in `/`
+/// is a repository of its own, nested in the tree, and is left out.
 fn untracked(
     listing: &[u8],
     worktree: &Path,
@@ -315,21 +333,69 @@ fn untracked(
     {
         budget.time_left()?;
         let name = Path::new(OsStr::from_bytes(entry));
-        let meta = worktree
-            .join(name)
-            .symlink_metadata()
-            .map_err(|error| format!("cannot look at an untracked file: {error}"))?;
-        if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(worktree.join(name))
+        let path = worktree.join(name);
+        let before = identity(&path)?;
+        if before.is_some_and(|before| before.kind == KIND_LINK) {
+            let target = std::fs::read_link(&path)
                 .map_err(|error| format!("cannot read an untracked link: {error}"))?;
             let link = new_link(entry, target.as_os_str().as_bytes());
             budget.spend(link.len())?;
             patch.extend(link);
         } else {
-            patch.extend(diff_file(budget, name)?);
+            let bytes = diff_file(budget, name)?;
+            unchanged(&[(path, before)])?;
+            patch.extend(bytes);
         }
     }
     Ok(patch)
+}
+
+/// What a path in the worktree is, by `lstat`, never by what a link names:
+/// its device, inode and type. A file is the same file while these are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+    kind: u32,
+}
+
+const KIND_LINK: u32 = 0o120000;
+
+/// `path`'s identity, `None` when there is nothing there — or why it may not
+/// be read. A regular file with more than one hard link may be another
+/// file's, from outside the worktree, linked in: git would read its content
+/// into the patch, outside the writer's sandbox. `git worktree add` never
+/// makes one.
+fn identity(path: &Path) -> Result<Option<Identity>, String> {
+    let meta = match path.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot look at {}: {error}", path.display())),
+    };
+    if meta.file_type().is_file() && meta.nlink() > 1 {
+        return Err(format!(
+            "{} has more than one hard link, so it is not read",
+            path.display()
+        ));
+    }
+    Ok(Some(Identity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        kind: meta.mode() & 0o170000,
+    }))
+}
+
+/// Every one of `watched` is still what it was before git read it.
+fn unchanged(watched: &[(std::path::PathBuf, Option<Identity>)]) -> Result<(), String> {
+    for (path, before) in watched {
+        if identity(path)? != *before {
+            return Err(format!(
+                "{} changed while its patch was read",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The creation of a link `name` → `target`, in git's form for one — less
@@ -769,6 +835,44 @@ mod tests {
         assert!(late.contains("took longer"), "{late}");
         let mut none_left = Budget::new(Duration::ZERO, PATCH_CAP);
         assert!(untracked(b"a\0", dir.path(), &mut none_left, slow_file).is_err());
+    }
+
+    #[test]
+    fn a_hard_link_is_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(dir.path().join("secret"), "TOP-SECRET\n").unwrap();
+        std::fs::hard_link(dir.path().join("secret"), tree.join("leak")).unwrap();
+        let mut budget = Budget::new(Duration::from_secs(8), PATCH_CAP);
+        let refused = untracked(b"leak\0", &tree, &mut budget, |_, _| {
+            panic!("a hard link went to git")
+        })
+        .unwrap_err();
+        assert!(refused.contains("more than one hard link"), "{refused}");
+    }
+
+    #[test]
+    fn a_file_swapped_while_git_reads_it_fails_the_capture() {
+        // A new file, or a link, where the one git was given was.
+        let dir = links();
+        for into_link in [true, false] {
+            let path = dir.path().join("f");
+            let mut budget = Budget::new(Duration::from_secs(8), PATCH_CAP);
+            let swapped = untracked(b"f\0", dir.path(), &mut budget, |_, _| {
+                std::fs::remove_file(&path).unwrap();
+                if into_link {
+                    std::os::unix::fs::symlink("/somewhere", &path).unwrap();
+                } else {
+                    std::fs::write(&path, "another file\n").unwrap();
+                }
+                Ok(b"what git read".to_vec())
+            })
+            .unwrap_err();
+            assert!(swapped.contains("changed while"), "{swapped}");
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, "f\n").unwrap();
+        }
     }
 
     #[test]

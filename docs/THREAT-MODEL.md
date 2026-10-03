@@ -247,8 +247,11 @@ is kept at all, and the run ends as the writer left it. What git
 still honours is what it converts on the way in: a clean filter that the
 repository's or the person's configuration defines for a path, the same
 exposure `changes` has, and `core.autocrlf`, which checkout applied already.
-A link is written as a link, from `read_link`, never followed; a submodule's
-changes are not in the patch. `changes` too always runs with
+A link is written as a link, from `read_link`, never followed. A file the
+patch would read that has more than one hard link — perhaps another file's,
+from outside the worktree, linked in — is never read, and a file whose
+device, inode or type changes while git reads it fails the capture: no patch
+is kept either way. A submodule's changes are not in the patch. `changes` too always runs with
 `--ignore-submodules=all`, so it never descends into a submodule, whose own
 git directory and config — where a writer could name a filter or an
 fsmonitor command — it does not see. A status that fails says so

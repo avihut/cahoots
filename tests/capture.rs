@@ -780,14 +780,15 @@ fn real_git() -> PathBuf {
 
 /// A `git` of the test's own, first on PATH and outside the workspace, that
 /// passes everything to the real one except what it is told to do instead
-/// when its argv holds `diff` or `ls-files`.
+/// when its argv holds `diff` or `ls-files` — a `diff --name-only` aside.
 fn capture_git(world: &World, diff: &str, ls_files: &str) {
     world.script_at(
         &world.bin.join("git"),
         &format!(
-            "#!/bin/sh\nfor arg do\n  case \"$arg\" in\n    diff) {diff} ;;\n    ls-files) \
-             {ls_files} ;;\n  esac\ndone\nexec '{}' \"$@\"\n",
-            real_git().display()
+            "#!/bin/sh\nfor arg do\n  [ \"$arg\" = --name-only ] && exec '{git}' \"$@\"\ndone\n\
+             for arg do\n  case \"$arg\" in\n    diff) {diff} ;;\n    ls-files) {ls_files} ;;\n  \
+             esac\ndone\nexec '{git}' \"$@\"\n",
+            git = real_git().display()
         ),
     );
     world.prefix_path(&world.bin);
@@ -883,4 +884,39 @@ fn a_git_that_exits_but_leaves_its_stdout_open_is_not_waited_on() {
         "the capture waited on the pipe"
     );
     assert_no_patch(&world, &answer, "its stdout stayed open");
+}
+
+#[test]
+fn an_untracked_hard_link_is_never_read() {
+    let world = World::new();
+    let secret = world.home.join("secret");
+    fs::write(&secret, "TOP-SECRET-MARKER\n").unwrap();
+    let answer = fork(
+        &world,
+        &format!(
+            "FAKE: write=x.txt\nFAKE: hardlink=leak={}",
+            secret.display()
+        ),
+        &[],
+    );
+    assert_no_patch(&world, &answer, "has more than one hard link");
+    let history = fs::read_to_string(world.state.join("history.jsonl")).unwrap();
+    assert!(!history.contains("TOP-SECRET-MARKER"));
+}
+
+#[test]
+fn a_tracked_file_made_a_hard_link_is_never_read() {
+    let world = World::new();
+    commit_files(&world, &[("notes.txt", b"notes\n")]);
+    let secret = world.home.join("secret");
+    fs::write(&secret, "TOP-SECRET-MARKER\n").unwrap();
+    let answer = fork(
+        &world,
+        &format!(
+            "FAKE: remove=notes.txt\nFAKE: write=x.txt\nFAKE: hardlink=notes.txt={}",
+            secret.display()
+        ),
+        &[],
+    );
+    assert_no_patch(&world, &answer, "has more than one hard link");
 }

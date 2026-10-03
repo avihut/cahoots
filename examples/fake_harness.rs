@@ -22,10 +22,11 @@
 //! FAKE: commit         commit everything there (after `write` and `append`)
 //! FAKE: bytes=<name>   write bytes that are not UTF-8, with a CRLF
 //! FAKE: link=<name>=<target>  make <name> a link to <target>
+//! FAKE: hardlink=<name>=<target>  make <name> a hard link to <target>
 //! ```
 //!
 //! In this order: `child`, `leak`, `remove`, `write`, every `append`, then
-//! `commit`, `bytes`, `link`, and last `sleep`.
+//! `commit`, `bytes`, `link`, `hardlink`, and last `sleep`.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -394,6 +395,10 @@ fn main() {
     if let Some(spec) = directive("link") {
         let (name, target) = spec.split_once('=').expect("link=<name>=<target>");
         std::os::unix::fs::symlink(target, name).expect("a link in cwd");
+    }
+    if let Some(spec) = directive("hardlink") {
+        let (name, target) = spec.split_once('=').expect("hardlink=<name>=<target>");
+        std::fs::hard_link(target, name).expect("a hard link in cwd");
     }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));

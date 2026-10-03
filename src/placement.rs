@@ -113,7 +113,7 @@ pub fn cut(
     if top.join("daft.yml").is_file() {
         match spawn::system_tool("daft", &roots) {
             Ok(daft) => {
-                return cut_with_daft(dirs, &daft, base, &top, &common, &roots, deadline, at);
+                return cut_with_daft(dirs, &daft, base, (&top, &common), &roots, deadline, at);
             }
             Err(fail) if fail.exit == Exit::Policy => {
                 return Err(Fail::policy(format!(
@@ -168,13 +168,12 @@ pub fn cut(
 /// cahoots' own git gets. `--no-carry`, so that a person's carry setting
 /// never brings their uncommitted work into the writer's tree (and from
 /// there into its patch), and the commit to fork from, when there is one.
-#[allow(clippy::too_many_arguments)]
+/// `repository` is the base's: its toplevel and its common directory.
 fn cut_with_daft(
     dirs: &Dirs,
     daft: &Path,
     base: &Path,
-    top: &Path,
-    common: &Path,
+    (top, common): (&Path, &Path),
     roots: &[&Path],
     deadline: Duration,
     at: Option<&Commit>,
