@@ -7,14 +7,14 @@
 //! renamed over the name, so a link swapped in after the check is replaced.
 
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
 use nix::sys::stat::{FileStat, Mode, SFlag, fchmod, fstat, fstatat, stat};
-use nix::unistd::{UnlinkatFlags, unlinkat};
+use nix::unistd::{UnlinkatFlags, linkat, unlinkat};
 
 use crate::exit::{Fail, Res};
 
@@ -31,9 +31,12 @@ pub enum Entry {
     Absent,
     /// A link, a directory, a FIFO — anything that is not a plain file.
     NotRegular,
-    /// A plain file's text: "" when it is not UTF-8 or cannot be read, which
-    /// no stamp is found in, so it reads as a person's.
+    /// A plain file's text: "" when it is not UTF-8, which no stamp is found
+    /// in, so it reads as a person's.
     Regular(String),
+    /// A plain file that could not be read (EACCES, EPERM, …): "cannot read
+    /// <path>: <error>". What it holds is unknown — not "no stamp".
+    Unreadable(String),
 }
 
 fn is_regular(meta: &FileStat) -> bool {
@@ -102,17 +105,24 @@ impl Dir {
             Ok(fd) => fd,
             Err(Errno::ENOENT) => return Ok(Entry::Absent),
             Err(Errno::ELOOP) => return Ok(Entry::NotRegular),
-            Err(_) => return Ok(Entry::Regular(String::new())),
+            Err(error) => return Ok(self.unreadable(name, error)),
         };
         match fstat(&fd) {
             Ok(meta) if is_regular(&meta) => {}
             _ => return Ok(Entry::NotRegular),
         }
         let mut bytes = Vec::new();
-        if File::from(fd).read_to_end(&mut bytes).is_err() {
-            return Ok(Entry::Regular(String::new()));
+        if let Err(error) = File::from(fd).read_to_end(&mut bytes) {
+            return Ok(self.unreadable(name, error));
         }
         Ok(Entry::Regular(String::from_utf8(bytes).unwrap_or_default()))
+    }
+
+    fn unreadable(&self, name: &str, error: impl std::fmt::Display) -> Entry {
+        Entry::Unreadable(format!(
+            "cannot read {}: {error}",
+            self.path.join(name).display()
+        ))
     }
 
     /// Writes `text` to a new temp file here and renames it over `name`. A
@@ -120,39 +130,72 @@ impl Dir {
     /// setuid/setgid/sticky): a mode a person chose is not loosened. A new
     /// file gets the umask's default.
     pub fn replace(&self, name: &str, text: &str) -> Res<()> {
-        // Never `.md` or `.toml`: a harness loads every one in `agents/`.
-        let temp = format!(".{name}.{}.tmp", std::process::id());
         let kept = match fstatat(self.fd.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
             Ok(meta) if is_regular(&meta) => Some(Mode::from_bits_truncate(meta.st_mode & 0o777)),
             _ => None,
         };
+        let temp = self
+            .write_temp(name, text, kept)
+            .map_err(|error| self.cannot_write(name, error))?;
+        renameat(self.fd.as_fd(), temp.as_str(), self.fd.as_fd(), name).map_err(|error| {
+            let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
+            self.cannot_write(name, error)
+        })
+    }
+
+    /// Writes `text` at `name` only where nothing is: `Ok(false)`, and
+    /// nothing changed, when something is there — even something that
+    /// appeared after the caller looked. The temp file is hard-linked to
+    /// the name, which fails rather than replace what is there.
+    pub fn publish(&self, name: &str, text: &str) -> Res<bool> {
+        let temp = self
+            .write_temp(name, text, None)
+            .map_err(|error| self.cannot_write(name, error))?;
+        let linked = linkat(
+            self.fd.as_fd(),
+            temp.as_str(),
+            self.fd.as_fd(),
+            name,
+            AtFlags::empty(),
+        );
         let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
-        let written = openat(
+        match linked {
+            Ok(()) => Ok(true),
+            Err(Errno::EEXIST) => Ok(false),
+            Err(error) => Err(self.cannot_write(name, error)),
+        }
+    }
+
+    /// `text` in a new file here, with `mode` when given (the umask's
+    /// default otherwise): its name. Removed again if it cannot be written.
+    fn write_temp(&self, name: &str, text: &str, mode: Option<Mode>) -> std::io::Result<String> {
+        // Never `.md` or `.toml`: a harness loads every one in `agents/`.
+        let temp = format!(".{name}.{}.tmp", std::process::id());
+        let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
+        // A file still there was not removable, and is not ours to remove.
+        let fd = openat(
             self.fd.as_fd(),
             temp.as_str(),
             OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::from_bits_truncate(0o666),
-        )
-        .map_err(std::io::Error::from)
-        .and_then(|fd| {
-            if let Some(mode) = kept {
-                fchmod(&fd, mode)?;
-            }
-            File::from(fd).write_all(text.as_bytes())
-        })
-        .and_then(|()| {
-            renameat(self.fd.as_fd(), temp.as_str(), self.fd.as_fd(), name)
-                .map_err(std::io::Error::from)
-        });
-        written.map_err(|error| {
-            if error.kind() != ErrorKind::AlreadyExists {
-                let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
-            }
-            Fail::internal(format!(
-                "cannot write {}: {error}",
-                self.path.join(name).display()
-            ))
-        })
+        )?;
+        let written = match mode {
+            Some(mode) => fchmod(&fd, mode).map_err(std::io::Error::from),
+            None => Ok(()),
+        }
+        .and_then(|()| File::from(fd).write_all(text.as_bytes()));
+        if let Err(error) = written {
+            let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
+            return Err(error);
+        }
+        Ok(temp)
+    }
+
+    fn cannot_write(&self, name: &str, error: impl std::fmt::Display) -> Fail {
+        Fail::internal(format!(
+            "cannot write {}: {error}",
+            self.path.join(name).display()
+        ))
     }
 }
 
@@ -163,7 +206,10 @@ pub fn entry_by_path(path: &Path) -> Entry {
     match fs::symlink_metadata(path) {
         Err(_) => Entry::Absent,
         Ok(meta) if !meta.is_file() => Entry::NotRegular,
-        Ok(_) => Entry::Regular(fs::read_to_string(path).unwrap_or_default()),
+        Ok(_) => match fs::read(path) {
+            Ok(bytes) => Entry::Regular(String::from_utf8(bytes).unwrap_or_default()),
+            Err(error) => Entry::Unreadable(format!("cannot read {}: {error}", path.display())),
+        },
     }
 }
 
@@ -314,6 +360,77 @@ mod tests {
         symlink(&target, place.home.join("agents/linked.md")).unwrap();
         dir.replace("linked.md", "new").unwrap();
         assert_eq!(mode("linked.md"), default);
+    }
+
+    /// The race the absence check cannot close: a file that appears after
+    /// the check and before the write is left exactly as it is.
+    #[test]
+    fn publish_never_replaces_a_file_that_appeared_after_the_check() {
+        let place = place();
+        let dir = agents(&place);
+        assert_eq!(dir.entry("cahoots-kind-x.md").unwrap(), Entry::Absent);
+        let theirs = place.home.join("agents/cahoots-kind-x.md");
+        fs::write(&theirs, "mine, no stamp\n").unwrap();
+
+        assert!(!dir.publish("cahoots-kind-x.md", "cahoots' text").unwrap());
+
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "mine, no stamp\n");
+        // Nor through a link that appeared there.
+        let target = place.outside.join("target.md");
+        fs::write(&target, "theirs").unwrap();
+        symlink(&target, place.home.join("agents/linked.md")).unwrap();
+        assert!(!dir.publish("linked.md", "cahoots' text").unwrap());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "theirs");
+        assert!(
+            fs::symlink_metadata(place.home.join("agents/linked.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // Where nothing is, it is written.
+        assert!(dir.publish("new.md", "cahoots' text").unwrap());
+        assert_eq!(
+            fs::read_to_string(place.home.join("agents/new.md")).unwrap(),
+            "cahoots' text"
+        );
+        let mut left: Vec<String> = fs::read_dir(place.home.join("agents"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["cahoots-kind-x.md", "linked.md", "new.md"]);
+    }
+
+    /// A file that cannot be read is not a file without a stamp; one that is
+    /// not UTF-8 is.
+    #[test]
+    fn an_unreadable_file_is_unreadable_and_not_utf8_is_empty() {
+        let place = place();
+        let dir = agents(&place);
+        fs::write(place.home.join("agents/latin1.md"), b"caf\xe9").unwrap();
+        assert_eq!(
+            dir.entry("latin1.md").unwrap(),
+            Entry::Regular(String::new())
+        );
+        if nix::unistd::geteuid().is_root() {
+            return; // root reads through any mode
+        }
+        let locked = place.home.join("agents/locked.md");
+        fs::write(&locked, "cahoots_version: \"1\"\n").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let entry = dir.entry("locked.md").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        let Entry::Unreadable(why) = entry else {
+            panic!("{entry:?}")
+        };
+        assert!(
+            why.starts_with(&format!("cannot read {}: ", locked.display())),
+            "{why}"
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let by_path = entry_by_path(&locked);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(by_path, Entry::Unreadable(_)), "{by_path:?}");
     }
 
     #[test]

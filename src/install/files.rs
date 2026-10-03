@@ -352,6 +352,13 @@ fn place(dirs: &Dirs, want: &Want, dry_run: bool) -> Res<Outcome> {
                 why: NOT_REGULAR.to_string(),
             });
         }
+        // Install's rule since it began: a file it cannot read is not one it
+        // can tell is its own, so it is left alone as a person's.
+        Entry::Unreadable(_) => {
+            return Ok(Outcome::Skipped {
+                why: NOT_STAMPED.to_string(),
+            });
+        }
         Entry::Regular(existing) => match judge(&existing, wanted) {
             Ok(outcome) => outcome,
             Err(done) => return Ok(done),
@@ -372,10 +379,20 @@ fn place(dirs: &Dirs, want: &Want, dry_run: bool) -> Res<Outcome> {
                     .map_err(|why| Fail::policy(format!("{why} — refusing to write there")))?
             }
         };
-        dir.replace(name, wanted)?;
+        if outcome != Outcome::Installed {
+            dir.replace(name, wanted)?;
+        } else if !dir.publish(name, wanted)? {
+            return Ok(Outcome::Skipped {
+                why: APPEARED.to_string(),
+            });
+        }
     }
     Ok(outcome)
 }
+
+/// A file that was not there when cahoots looked, and was by the time it
+/// wrote: someone else's, and never overwritten.
+const APPEARED: &str = "appeared while cahoots was writing it — left alone";
 
 const NOT_REGULAR: &str = "exists and is not a regular file — left alone";
 const NOT_STAMPED: &str = "exists and is not cahoots' (no cahoots_version stamp) — left alone";
@@ -463,7 +480,7 @@ fn remove_ours(home: &Path, path: &Path, dry_run: bool) -> Res<Outcome> {
             why: GONE.to_string(),
         },
         Err(error) => Outcome::Skipped {
-            why: format!("cannot be read ({error}) — left alone"),
+            why: format!("{CANNOT_BE_READ} ({error}) — left alone"),
         },
         Ok(text) if stamp_of(&text).is_none() => Outcome::Skipped {
             why: "no longer carries the cahoots_version stamp — someone made it theirs; left alone"
@@ -487,6 +504,7 @@ fn remove_ours(home: &Path, path: &Path, dry_run: bool) -> Res<Outcome> {
 }
 
 const GONE: &str = "already gone";
+const CANNOT_BE_READ: &str = "cannot be read";
 
 /// Whether the manifest still lists a file after `remove_ours` said this.
 fn still_listed(outcome: &Outcome, dry_run: bool) -> bool {
@@ -612,10 +630,14 @@ pub fn refresh(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Res<Re
         if listed && want.text.is_err() {
             continue; // `prune`'s, below
         }
-        let outcome = refresh_one(dirs, &manifest, want, listed).unwrap_or_else(|fail| {
+        let outcome = refresh_one(dirs, &manifest, want, listed).unwrap_or_else(|failed| {
             done.failed += 1;
+            let (doing, fail) = match failed {
+                Failed::Read(fail) => ("read", fail),
+                Failed::Write(fail) => ("write", fail),
+            };
             Outcome::Skipped {
-                why: format!("cannot write: {}", fail.message),
+                why: format!("cannot {doing}: {}", fail.message),
             }
         });
         if !listed && outcome == Outcome::Installed {
@@ -633,12 +655,23 @@ pub fn refresh(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Res<Re
             continue;
         }
         let outcome = match kind_of(dirs, &path) {
-            Some(_) => remove_ours(&dirs.home, &path, false).unwrap_or_else(|fail| {
-                done.failed += 1;
-                Outcome::Skipped {
-                    why: format!("cannot remove: {}", fail.message),
+            Some(_) => match remove_ours(&dirs.home, &path, false) {
+                Ok(outcome) => {
+                    // Uninstall's words for a file it cannot read; a
+                    // failure all the same.
+                    if matches!(&outcome, Outcome::Skipped { why } if why.starts_with(CANNOT_BE_READ))
+                    {
+                        done.failed += 1;
+                    }
+                    outcome
                 }
-            }),
+                Err(fail) => {
+                    done.failed += 1;
+                    Outcome::Skipped {
+                        why: format!("cannot remove: {}", fail.message),
+                    }
+                }
+            },
             None => Outcome::Skipped {
                 why: NOT_WRITTEN_HERE.to_string(),
             },
@@ -657,8 +690,25 @@ pub fn refresh(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Res<Re
     Ok(done)
 }
 
+/// What `refresh` could not do to one file: read it, or write it.
+enum Failed {
+    Read(Fail),
+    Write(Fail),
+}
+
+impl From<Fail> for Failed {
+    fn from(fail: Fail) -> Self {
+        Failed::Write(fail)
+    }
+}
+
 /// One wanted file, for `refresh` (see its rules there).
-fn refresh_one(dirs: &Dirs, manifest: &Manifest, want: &Want, listed: bool) -> Res<Outcome> {
+fn refresh_one(
+    dirs: &Dirs,
+    manifest: &Manifest,
+    want: &Want,
+    listed: bool,
+) -> Result<Outcome, Failed> {
     let skipped = |why: &str| {
         Ok(Outcome::Skipped {
             why: why.to_string(),
@@ -682,7 +732,8 @@ fn refresh_one(dirs: &Dirs, manifest: &Manifest, want: &Want, listed: bool) -> R
             Ok(dir) => dir,
             Err(why) => return skipped(&format!("{why} — left alone")),
         };
-        return Ok(match dir.entry(name)? {
+        return Ok(match dir.entry(name).map_err(Failed::Read)? {
+            Entry::Unreadable(why) => return Err(Failed::Read(Fail::internal(why))),
             Entry::Absent => Outcome::Skipped {
                 why: GONE_NOT_WRITTEN_BACK.to_string(),
             },
@@ -724,10 +775,11 @@ fn refresh_one(dirs: &Dirs, manifest: &Manifest, want: &Want, listed: bool) -> R
         Ok(dir) => dir,
         Err(why) => return skipped(&format!("{why} — left alone")),
     };
-    if dir.entry(name)? != Entry::Absent {
+    // Something there — or something that appears before the file is
+    // published, which `publish` will not replace — is not cahoots' to add.
+    if dir.entry(name).map_err(Failed::Read)? != Entry::Absent || !dir.publish(name, wanted)? {
         return skipped(NOT_OURS_TO_ADD);
     }
-    dir.replace(name, wanted)?;
     Ok(Outcome::Installed)
 }
 

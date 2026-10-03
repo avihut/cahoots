@@ -680,3 +680,52 @@ fn a_file_that_cannot_be_written_is_reported_and_the_rest_done() {
     assert!(listed.contains(&world.home.join(codex_kind("new-kind"))));
     assert!(!listed.contains(&world.home.join(claude_kind("new-kind"))));
 }
+
+#[test]
+fn an_unreadable_listed_file_is_a_failure_and_the_rest_done() {
+    if nix::unistd::geteuid().is_root() {
+        return; // root reads through any mode
+    }
+    let world = world(&["old-kind"]);
+    installed(&world, None);
+    let delegate = world.home.join(CLAUDE_DELEGATE);
+    let before = fs::read(&delegate).unwrap();
+    edit(&world.home.join(CODEX_DELEGATE));
+    // A gone kind's subagent that cannot be read either: not removed, and
+    // counted.
+    define(&world, &[]);
+    let gone = world.home.join(codex_kind("old-kind"));
+    for locked in [&delegate, &gone] {
+        fs::set_permissions(locked, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let _restore = [Mode(&delegate, 0o644), Mode(&gone, 0o644)];
+
+    let refreshed = refresh(&world);
+
+    assert_eq!(refreshed.code, 1, "{}", refreshed.json);
+    assert_eq!(refreshed.json["class"], "internal_error");
+    assert_eq!(
+        refreshed.message(),
+        "2 of the files could not be changed: see data.files"
+    );
+    let why_delegate = why(&refreshed, &world, CLAUDE_DELEGATE);
+    assert!(
+        why_delegate.starts_with(&format!(
+            "cannot read: cannot read {}: ",
+            delegate.display()
+        )),
+        "{why_delegate}"
+    );
+    let why_gone = why(&refreshed, &world, &codex_kind("old-kind"));
+    assert!(why_gone.starts_with("cannot be read ("), "{why_gone}");
+    assert_eq!(outcome(&refreshed, &world, CODEX_DELEGATE), "refreshed");
+    assert_eq!(
+        outcome(&refreshed, &world, &claude_kind("old-kind")),
+        "removed"
+    );
+    let listed = listed(&world);
+    assert!(listed.contains(&delegate) && listed.contains(&gone));
+    drop(_restore);
+    assert_eq!(fs::read(&delegate).unwrap(), before);
+    assert!(gone.exists());
+}
