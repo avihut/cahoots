@@ -496,6 +496,7 @@ mod tests {
             caller: None,
             target: target.clone(),
             blind: false,
+            exploration: false,
             dir: "/w".into(),
             state,
             exit: 0,

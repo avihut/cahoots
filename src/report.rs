@@ -379,6 +379,7 @@ mod tests {
             caller: None,
             target: target.clone(),
             blind: false,
+            exploration: false,
             dir: PathBuf::from("/w"),
             state,
             exit: 0,
@@ -397,6 +398,7 @@ mod tests {
             description: "d".to_string(),
             role,
             candidates,
+            explore: crate::registry::KindExplore { share: None },
         }
     }
 
