@@ -783,14 +783,25 @@ fn real_git() -> PathBuf {
 /// what it is told to do instead when its argv holds `diff` or `ls-files`,
 /// the index's own listing (`ls-files --cached`) aside.
 fn capture_git(world: &World, diff: &str, ls_files: &str) {
+    capture_git_with(world, diff, ls_files, None);
+}
+
+/// [`capture_git`], with the index's own listing (`ls-files --cached`) done
+/// as `cached` says instead of by the real git.
+fn capture_git_with(world: &World, diff: &str, ls_files: &str, cached: Option<&str>) {
+    let git = real_git();
+    let cached = cached.map_or_else(
+        || format!("exec '{}' \"$@\"", git.display()),
+        str::to_string,
+    );
     world.script_at(
         &world.bin.join("git"),
         &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n\
-             for arg do\n  [ \"$arg\" = --cached ] && exec '{git}' \"$@\"\ndone\n\
+             for arg do\n  if [ \"$arg\" = --cached ]; then\n    {cached}\n  fi\ndone\n\
              for arg do\n  case \"$arg\" in\n    diff) {diff} ;;\n    ls-files) {ls_files} ;;\n  \
              esac\ndone\nexec '{git}' \"$@\"\n",
-            git = real_git().display(),
+            git = git.display(),
             calls = world.bin.join("git.calls").display(),
         ),
     );
@@ -956,4 +967,23 @@ fn a_hard_link_is_refused_before_git_reads_any_file() {
             .any(|line| words(line).contains(&"diff".to_string())),
         "a git diff ran before the refusal: {calls}"
     );
+}
+
+#[test]
+fn looking_at_a_large_tree_stops_at_the_deadline() {
+    // The index lists five million paths, after most of the time is gone:
+    // looking at them all would run seconds past the deadline, and the look
+    // stops there instead. The listing is written beforehand, so that git
+    // answers in time however busy the machine is.
+    let world = World::new();
+    let listing = world.root.join("index-listing");
+    fs::write(&listing, b"p\0".repeat(5_000_000)).unwrap();
+    capture_git_with(
+        &world,
+        ":",
+        ":",
+        Some(&format!("sleep 6.5; cat '{}'; exit 0", listing.display())),
+    );
+    let answer = fork(&world, "FAKE: write=x.txt", &[]);
+    assert_no_patch(&world, &answer, "looking at the tree's files");
 }

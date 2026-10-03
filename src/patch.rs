@@ -244,18 +244,11 @@ pub fn capture(
             &["ls-files", "-z", "--cached"].map(OsStr::new),
             0,
         )?;
-        let watched = indexed
-            .split(|&byte| byte == 0)
-            .filter(|name| !name.is_empty())
-            .map(|name| {
-                let path = worktree.join(OsStr::from_bytes(name));
-                identity(&path).map(|before| (path, before))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let watched = watch(&indexed, worktree, budget)?;
         let mut tracked = diff.clone();
         tracked.extend(["--end-of-options", base.as_str(), "--"].map(OsStr::new));
         let mut patch = step(budget, "git diff", &tracked, 0)?;
-        unchanged(&watched)?;
+        unchanged(&watched, worktree, budget)?;
         let listing = step(
             budget,
             "git ls-files",
@@ -277,7 +270,7 @@ pub fn capture(
             // `--no-index` implies `--exit-code`: 1 is "they differ".
             step(budget, "git diff --no-index", &untracked, 1)
         })?);
-        unchanged(&watched)?;
+        unchanged(&watched, worktree, budget)?;
         budget.time_left()?;
         Ok(patch)
     };
@@ -347,7 +340,7 @@ fn untracked(
             patch.extend(link);
         } else {
             let bytes = diff_file(budget, name)?;
-            unchanged(&[(path, before)])?;
+            unchanged(&[(entry, before)], worktree, budget)?;
             patch.extend(bytes);
         }
     }
@@ -389,10 +382,34 @@ fn identity(path: &Path) -> Result<Option<Identity>, String> {
     }))
 }
 
-/// Every one of `watched` is still what it was before git read it.
-fn unchanged(watched: &[(std::path::PathBuf, Option<Identity>)]) -> Result<(), String> {
-    for (path, before) in watched {
-        if identity(path)? != *before {
+/// A file in the worktree by its name there, and what it was.
+type Watched<'a> = (&'a [u8], Option<Identity>);
+
+/// The identity of every path in `listing` (NUL-separated, as git lists
+/// them), within the capture's time: a large tree is looked at against the
+/// same deadline as everything else.
+fn watch<'a>(
+    listing: &'a [u8],
+    worktree: &Path,
+    budget: &Budget,
+) -> Result<Vec<Watched<'a>>, String> {
+    listing
+        .split(|&byte| byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            scanning(budget)?;
+            identity(&worktree.join(OsStr::from_bytes(name))).map(|before| (name, before))
+        })
+        .collect()
+}
+
+/// Every one of `watched` is still what it was before git read it — looked
+/// at within the capture's time.
+fn unchanged(watched: &[Watched], worktree: &Path, budget: &Budget) -> Result<(), String> {
+    for (name, before) in watched {
+        scanning(budget)?;
+        let path = worktree.join(OsStr::from_bytes(name));
+        if identity(&path)? != *before {
             return Err(format!(
                 "{} changed while its patch was read",
                 path.display()
@@ -400,6 +417,14 @@ fn unchanged(watched: &[(std::path::PathBuf, Option<Identity>)]) -> Result<(), S
         }
     }
     Ok(())
+}
+
+/// The time check of a scan of the tree, which says where it ran out.
+fn scanning(budget: &Budget) -> Result<(), String> {
+    budget
+        .time_left()
+        .map(|_| ())
+        .map_err(|why| format!("{why}, looking at the tree's files"))
 }
 
 /// The creation of a link `name` → `target`, in git's form for one — less
@@ -877,6 +902,22 @@ mod tests {
             std::fs::remove_file(&path).unwrap();
             std::fs::write(&path, "f\n").unwrap();
         }
+    }
+
+    #[test]
+    fn looking_at_the_tree_stops_when_the_time_is_up() {
+        let dir = links();
+        let none_left = Budget::new(Duration::ZERO, PATCH_CAP);
+        let late = watch(b"f\0a\0", dir.path(), &none_left).unwrap_err();
+        assert!(late.contains("looking at the tree's files"), "{late}");
+        let budget = Budget::new(Duration::from_secs(8), PATCH_CAP);
+        let watched = watch(b"f\0a\0missing\0", dir.path(), &budget).unwrap();
+        assert_eq!(watched.len(), 3);
+        assert!(unchanged(&watched, dir.path(), &budget).is_ok());
+        let late = unchanged(&watched, dir.path(), &none_left).unwrap_err();
+        assert!(late.contains("looking at the tree's files"), "{late}");
+        // Nothing to look at takes no time.
+        assert!(watch(b"", dir.path(), &none_left).unwrap().is_empty());
     }
 
     #[test]
