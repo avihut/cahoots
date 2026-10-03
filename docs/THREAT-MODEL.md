@@ -186,10 +186,11 @@ and `core.fsmonitor=false`, as configuration above every config file.
 runs neither.) The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
-repository, not the tree it was cut from or inside it, and not inside
-cahoots' own directories (its `worktrees` aside); otherwise the run fails
-before the writer starts. A fork that was never cut cannot be resumed — it
-would start in the caller's own tree.
+repository, not the tree it was cut from or inside it, not inside cahoots'
+own directories (its `worktrees` aside), and a worktree the cut made — never
+one that was there before, the caller's own among them; otherwise the run
+fails before the writer starts. A fork that was never cut cannot be resumed —
+it would start in the caller's own tree.
 
 **How far.** Each harness's own fence, proven on the command line and checked
 by `validate` against the ROLE — a reader can never be handed a writer's

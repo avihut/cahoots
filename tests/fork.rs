@@ -233,6 +233,67 @@ fn a_daft_path_outside_the_repository_is_refused() {
 }
 
 #[test]
+fn a_daft_path_that_was_a_worktree_already_is_refused() {
+    let world = World::new();
+    // A worktree of this repository that was there before the run: someone's
+    // work, which a writer must never be let into.
+    let existing = world.root.join("existing");
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        path_str(&existing),
+        "HEAD",
+    ]);
+    refused(
+        &world,
+        json!({"make": "nothing", "print": existing}),
+        &existing,
+        33,
+        "was a worktree already",
+    );
+
+    // The caller's own checkout, when it forks another worktree (`--dir`).
+    // In a daft repository every checkout is a linked worktree like this.
+    world.git(&["add", "daft.yml"]);
+    world.git(&["commit", "-q", "-m", "chore: opt into daft"]);
+    let (own, other) = (world.root.join("own"), world.root.join("other"));
+    for tree in [&own, &other] {
+        world.git(&["worktree", "add", "-q", "--detach", path_str(tree), "HEAD"]);
+    }
+    world.daft(json!({"make": "nothing", "print": own}));
+    let brief = own.join("brief.md");
+    fs::write(&brief, BRIEF).unwrap();
+    let mut command = world.cahoots();
+    command.current_dir(&own).args([
+        "run",
+        "--role",
+        "implement",
+        "--caller",
+        "claude",
+        "--fork",
+        "--dir",
+        path_str(&other),
+        "--brief",
+        path_str(&brief),
+    ]);
+    let answer = common::answer(&mut command);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    assert!(
+        answer.message().contains("was a worktree already"),
+        "{}",
+        answer.json
+    );
+    assert_never_ran(&world, &answer, &own);
+    assert_eq!(
+        world.daft_calls().len(),
+        2,
+        "the fake daft was not the one run"
+    );
+}
+
+#[test]
 fn a_daft_path_inside_the_callers_tree_is_refused() {
     let world = World::new();
     let nested = world.work.join("nested");

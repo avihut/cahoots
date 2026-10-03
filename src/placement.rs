@@ -128,6 +128,7 @@ pub fn cut(
     let path = worktrees.join(run_id);
     let git = spawn::system_tool("git", &roots)?;
     let deadline = deadline.min(GIT_DEADLINE);
+    let before = linked_worktrees(&common);
     let mut args = quiet_git_args(dirs)?;
     args.extend([
         OsString::from("-C"),
@@ -147,10 +148,9 @@ pub fn cut(
             "`git worktree add` refused (a repository with no commit has no HEAD to cut from)",
         ));
     }
-    let gitdir = pin(dirs, &path, &common, &roots).ok_or_else(|| {
+    let gitdir = pin(dirs, &path, &common, &roots, &before).map_err(|why| {
         Fail::policy(format!(
-            "cannot cut a worktree: {}, whose git directory is not the repository's — refusing \
-             to run a writer there",
+            "cannot cut a worktree: {}, {why} — refusing to run a writer there",
             path.display()
         ))
     })?;
@@ -170,6 +170,7 @@ fn cut_with_daft(
     deadline: Duration,
 ) -> Res<(PathBuf, PathBuf)> {
     let deadline = deadline.min(DAFT_DEADLINE);
+    let before = linked_worktrees(common);
     let args = [
         OsStr::new("-C"),
         base.as_os_str(),
@@ -217,10 +218,10 @@ fn cut_with_daft(
         return Err(refuse(why));
     }
     let worktree = fs::canonicalize(printed).map_err(|_| refuse("is not a directory"))?;
-    let gitdir = pin(dirs, &worktree, common, roots).ok_or_else(|| {
+    let gitdir = pin(dirs, &worktree, common, roots, &before).map_err(|why| {
         Fail::policy(format!(
-            "cannot cut a worktree: `daft start --fork` printed {printed}, whose git directory \
-             is not the repository's — refusing to run a writer there"
+            "cannot cut a worktree: `daft start --fork` printed {printed}, {why} — refusing to \
+             run a writer there"
         ))
     })?;
     Ok((worktree, gitdir))
@@ -282,9 +283,39 @@ fn unfit(
 }
 
 /// A new worktree's git directory, read before the writer has run, and held
-/// to git's layout for a linked worktree: `<common>/worktrees/<name>`. What
-/// the worktree's `.git` names later is the writer's to change; this is not.
-fn pin(dirs: &Dirs, worktree: &Path, common: &Path, roots: &[&Path]) -> Option<PathBuf> {
+/// to git's layout for a linked worktree: `<common>/worktrees/<name>`, and a
+/// name that was not there before the cut (`before`) — so never a worktree
+/// that was already someone's, the caller's own among them. What the
+/// worktree's `.git` names later is the writer's to change; this is not.
+fn pin(
+    dirs: &Dirs,
+    worktree: &Path,
+    common: &Path,
+    roots: &[&Path],
+    before: &[OsString],
+) -> Result<PathBuf, &'static str> {
+    let gitdir = git_dir_of(dirs, worktree, roots)
+        .filter(|gitdir| is_linked_gitdir(gitdir, common))
+        .ok_or("whose git directory is not the repository's")?;
+    if gitdir
+        .file_name()
+        .is_some_and(|name| before.iter().any(|known| known == name))
+    {
+        return Err("which was a worktree already, not one cut for this run");
+    }
+    Ok(gitdir)
+}
+
+/// The names of the repository's linked worktrees, as git keeps them under
+/// `<common>/worktrees`.
+fn linked_worktrees(common: &Path) -> Vec<OsString> {
+    fs::read_dir(common.join("worktrees"))
+        .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
+        .unwrap_or_default()
+}
+
+/// The git directory git takes `worktree` to have now, canonical.
+fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Option<PathBuf> {
     let mut roots = roots.to_vec();
     roots.push(worktree);
     let git = spawn::system_tool("git", &roots).ok()?;
@@ -307,8 +338,7 @@ fn pin(dirs: &Dirs, worktree: &Path, common: &Path, roots: &[&Path]) -> Option<P
     if output.status != Some(0) {
         return None;
     }
-    let gitdir = fs::canonicalize(output.stdout.trim()).ok()?;
-    is_linked_gitdir(&gitdir, common).then_some(gitdir)
+    fs::canonicalize(output.stdout.trim()).ok()
 }
 
 /// Whether `gitdir` is where git keeps a linked worktree of the repository
@@ -321,10 +351,8 @@ fn is_linked_gitdir(gitdir: &Path, common: &Path) -> bool {
 /// caller to review. Capped; this is a summary, not the diff. `Ok` with no
 /// lines means clean, and only that: a status that cannot be read says why.
 ///
-/// A fork's is read against its git directory as it was pinned at the cut
-/// (`gitdir`), never the one the worktree's `.git` names now, which the
-/// writer could have rewritten. A fork recorded before the pin is read only
-/// while the worktree still belongs to the repository it was cut from.
+/// A fork's is read against its git directory (`fork_git_dir`), never by
+/// following the worktree's `.git`, which the writer could have rewritten.
 pub fn changes(
     dirs: &Dirs,
     worktree: &Path,
@@ -338,45 +366,15 @@ pub fn changes(
     let mut roots = roots.to_vec();
     roots.push(worktree);
     let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
-    match (base, gitdir) {
-        (Some(base), Some(gitdir)) => {
-            let common = spawn::git_roots(base, &roots)
-                .map_err(|fail| fail.message)?
-                .map(|(_, common)| common);
-            let pinned = fs::canonicalize(gitdir).ok();
-            match (common, pinned) {
-                (Some(common), Some(pinned)) if is_linked_gitdir(&pinned, &common) => {
-                    let (mut git_dir, mut work_tree) =
-                        (OsString::from("--git-dir="), OsString::from("--work-tree="));
-                    git_dir.push(pinned);
-                    work_tree.push(worktree);
-                    args.extend([git_dir, work_tree]);
-                }
-                _ => return Err("the worktree's git directory has moved".to_string()),
-            }
-        }
-        (Some(base), None) => {
-            let common = spawn::git_roots(base, &roots)
-                .map_err(|fail| fail.message)?
-                .map(|(_, common)| common);
-            let theirs = spawn::git_roots(worktree, &roots).map_err(|fail| fail.message)?;
-            let same = match (common, theirs) {
-                (Some(ours), Some((toplevel, theirs))) => {
-                    theirs == ours && toplevel == canonical_of(worktree)
-                }
-                _ => false,
-            };
-            if !same {
-                return Err(format!(
-                    "{} is no longer a worktree of the repository it was cut from — read it \
-                     yourself before trusting it",
-                    worktree.display()
-                ));
-            }
-        }
-        // In place: the caller's own tree, which a person let the writer
-        // into. There is no cut to hold it to.
-        (None, _) => {}
+    // In place there is no base: the caller's own tree, which a person let
+    // the writer into, and no cut to hold it to.
+    if let Some(base) = base {
+        let gitdir = fork_git_dir(dirs, worktree, base, gitdir, &roots)?;
+        let (mut git_dir, mut work_tree) =
+            (OsString::from("--git-dir="), OsString::from("--work-tree="));
+        git_dir.push(gitdir);
+        work_tree.push(worktree);
+        args.extend([git_dir, work_tree]);
     }
     args.extend(["status", "--short", "--untracked-files=all"].map(OsString::from));
     let git = spawn::system_tool("git", &roots).map_err(|fail| fail.message)?;
@@ -405,6 +403,51 @@ pub fn changes(
             worktree.display()
         )),
     }
+}
+
+/// The git directory a fork's changes are read against: the one pinned when
+/// it was cut, if it is still where git keeps one of the repository's
+/// worktrees. A record from before the pin has none, so the worktree must
+/// still belong to the repository it was cut from, and the git directory its
+/// `.git` names now must be one git keeps for that repository — never one
+/// the writer made, whose config would be the writer's.
+fn fork_git_dir(
+    dirs: &Dirs,
+    worktree: &Path,
+    base: &Path,
+    pinned: Option<&Path>,
+    roots: &[&Path],
+) -> Result<PathBuf, String> {
+    let common = spawn::git_roots(base, roots)
+        .map_err(|fail| fail.message)?
+        .map(|(_, common)| common);
+    if let Some(pinned) = pinned {
+        return fs::canonicalize(pinned)
+            .ok()
+            .filter(|gitdir| {
+                common
+                    .as_deref()
+                    .is_some_and(|common| is_linked_gitdir(gitdir, common))
+            })
+            .ok_or_else(|| "the worktree's git directory has moved".to_string());
+    }
+    let gone = || {
+        format!(
+            "{} is no longer a worktree of the repository it was cut from — read it yourself \
+             before trusting it",
+            worktree.display()
+        )
+    };
+    let Some(common) = common else {
+        return Err(gone());
+    };
+    match spawn::git_roots(worktree, roots).map_err(|fail| fail.message)? {
+        Some((toplevel, theirs)) if theirs == common && toplevel == canonical_of(worktree) => {}
+        _ => return Err(gone()),
+    }
+    git_dir_of(dirs, worktree, roots)
+        .filter(|gitdir| is_linked_gitdir(gitdir, &common))
+        .ok_or_else(gone)
 }
 
 /// Removes a worktree cahoots cut itself (never one of daft's, never the

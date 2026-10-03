@@ -333,6 +333,29 @@ fn a_rewritten_dot_git_does_not_steer_changes() {
         "{changes:?}"
     );
     assert!(!marker.exists(), "cahoots ran the writer's filter");
+
+    // A record from before the pin has no git directory of its own: the one
+    // its `.git` names now must be one git keeps for this repository, and the
+    // writer's is not — the same-repository check alone would let it through.
+    edit_record(&world, &answer.run_id(), |record| {
+        let fields = record.as_object_mut().unwrap();
+        fields.remove("gitdir");
+        fields.remove("roots");
+    });
+    let old = world.ask(&["result", &answer.run_id()]);
+    assert!(old.data()["changes"].is_null(), "{}", old.json);
+    assert!(
+        old.data()["changes_error"]
+            .as_str()
+            .unwrap()
+            .contains("no longer a worktree of the repository"),
+        "{}",
+        old.json
+    );
+    assert!(
+        !marker.exists(),
+        "cahoots ran the writer's filter for an old record"
+    );
 }
 
 /// Rewrites run.json the way `edit` says.
