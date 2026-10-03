@@ -137,6 +137,26 @@ if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])tui::' -- src "${command_layer
     fail "the logic reaches for the TUI (hard rule 11: only the command layer asks a person)" "$(where "$hits")"
 fi
 
+# 11. Repository data cannot make git fetch (docs/THREAT-MODEL.md, "No lazy
+#     fetch"). Every process src/spawn starts gets its environment from one
+#     function, which clears it and sets GIT_NO_LAZY_FETCH=1 after everything
+#     a caller passes; nothing else in the crate names the variable.
+clears=$("${grep_tree[@]}" -n 'env_clear' -- src || true)
+if [ -z "$clears" ] || [ "$(wc -l <<<"$clears")" -ne 1 ] || ! grep -q '^src/spawn.rs:' <<<"$clears"; then
+    fail "the environment is cleared somewhere other than src/spawn's one builder (no lazy fetch: every process gets GIT_NO_LAZY_FETCH=1 there)" "$(where "$clears")"
+fi
+spawn=$(text_of src/spawn.rs)
+if ! grep -qF '("GIT_NO_LAZY_FETCH", "1")' <<<"$spawn"; then
+    fail "src/spawn.rs no longer defines GIT_NO_LAZY_FETCH=1 (no lazy fetch)"
+fi
+last_env=$(awk '/env_clear/ { on = 1 } on && /\.envs?\(/ { last = $0 } on && /^}/ { print last; exit }' <<<"$spawn")
+if ! grep -q 'NO_LAZY_FETCH' <<<"$last_env"; then
+    fail "src/spawn's builder does not set NO_LAZY_FETCH last, after the caller's variables (no lazy fetch: nothing may relax it)" "${last_env:-no environment is set after env_clear}"
+fi
+if hits=$("${grep_tree[@]}" -n 'GIT_NO_LAZY_FETCH' -- src ':!src/spawn.rs'); then
+    fail "GIT_NO_LAZY_FETCH is named outside src/spawn (no lazy fetch: only the builder sets it)" "$(where "$hits")"
+fi
+
 if [ "$failures" -gt 0 ]; then
     printf '\nguard: %d rule(s) tripped\n' "$failures" >&2
     exit 1

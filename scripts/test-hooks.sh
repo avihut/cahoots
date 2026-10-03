@@ -99,7 +99,19 @@ printf '# generated\nversion = 4\n\n[[package]]\nname = "fixture"\nversion = "0.
 printf '[tasks.tool]\nrun = "scripts/tool.sh"\n' >mise.toml
 printf '#!/bin/sh\n' >scripts/tool.sh
 printf 'fn main() {}\n' >src/main.rs
-printf 'use std::process::Command;\npub fn spawn() { let _ = Command::new("claude"); }\n' >src/spawn.rs
+# The one environment builder: cleared, the caller's variables, then the
+# prohibition on lazy fetching, last.
+spawn_with() { # spawn_with <the builder's body lines…>
+    {
+        printf 'use std::process::Command;\n'
+        printf 'const NO_LAZY_FETCH: (&str, &str) = ("GIT_NO_LAZY_FETCH", "1");\n'
+        printf 'fn scrubbed(command: &mut Command, vars: Vec<(String, String)>) {\n'
+        printf '    %s\n' "$@"
+        printf '}\n'
+        printf 'pub fn spawn() { let mut command = Command::new("claude"); scrubbed(&mut command, Vec::new()); }\n'
+    } >src/spawn.rs
+}
+spawn_with 'command.env_clear();' 'command.envs(vars);' 'command.env(NO_LAZY_FETCH.0, NO_LAZY_FETCH.1);'
 printf 'pub const SKILLS: &str = ".agents/skills";\n' >src/install/paths.rs
 printf 'pub fn home_override() -> Option<String> { std::env::var("CAHOOTS_STATE_DIR").ok() }\n' >src/env.rs
 # The layers as rule 11 draws them: the command layer prints and asks through
@@ -143,11 +155,27 @@ trips .github/rulesets/main-pr-gate.json '{ "context": "build", "integration_id"
 trips src/gate.rs 'fn shout() { eprintln!("over the cap"); }'
 trips src/gate.rs 'fn answer() -> std::io::Stdin { std::io::stdin() }'
 trips src/gate.rs 'use std::io::IsTerminal;'
+trips src/spawn.rs 'pub fn grouped(command: &mut Command) { command.env_clear(); }'
+trips src/main.rs 'const LAZY: (&str, &str) = ("GIT_NO_LAZY_FETCH", "0");'
 trips src/tui/mod.rs 'use crate::meter::MeterId;'
 trips src/gate.rs 'use crate::tui::Rail;'
 printf '#!/bin/sh\n' >scripts/orphan.sh
 git add -A
 fails "$scripts/guard.sh" --staged
+git reset -q --hard "$base"
+# The prohibition dropped, or set before the caller's variables, which could
+# then relax it; and the definition gone.
+for body in "command.env_clear();|command.envs(vars);" \
+    "command.env_clear();|command.env(NO_LAZY_FETCH.0, NO_LAZY_FETCH.1);|command.envs(vars);"; do
+    IFS='|' read -r -a lines <<<"$body"
+    spawn_with "${lines[@]}"
+    git add -A
+    fails "$scripts/guard.sh"
+    fails "$scripts/guard.sh" --staged
+    git reset -q --hard "$base"
+done
+sed -i.bak 's/("GIT_NO_LAZY_FETCH", "1")/("GIT_NO_LAZY_FETCH", "true")/' src/spawn.rs && rm src/spawn.rs.bak
+fails "$scripts/guard.sh"
 git reset -q --hard "$base"
 # A renamed job is a required check nobody reports.
 sed -i.bak 's/^    name: gate$/    name: Gate/' .github/workflows/ci.yml && rm .github/workflows/ci.yml.bak
