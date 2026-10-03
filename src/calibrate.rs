@@ -64,6 +64,30 @@ pub struct Evidence {
     pub score: Option<f64>,
 }
 
+impl Evidence {
+    /// Counts one story, by the one definition of evidence that report,
+    /// doctor and calibration share. Call [`Evidence::finish`] after the last.
+    pub fn observe(&mut self, story: &Story) {
+        match (story.outcome, story.state) {
+            (Some(Outcome::Accepted), _) => self.accepted += 1,
+            (Some(Outcome::Reworked), _) => self.reworked += 1,
+            (Some(Outcome::Discarded), _) => self.discarded += 1,
+            // A run that broke by itself counts against the candidate. One
+            // that was cancelled or stopped for budget was not its fault.
+            (None, State::Failed | State::Crashed | State::TimedOut) => self.failed += 1,
+            (None, _) => {}
+        }
+    }
+
+    /// Sums up what was observed: the denominator and the score.
+    pub fn finish(&mut self) {
+        self.n = self.accepted + self.reworked + self.discarded + self.failed;
+        self.score = (self.n > 0).then(|| {
+            (f64::from(self.accepted) + 0.5 * f64::from(self.reworked)) / f64::from(self.n)
+        });
+    }
+}
+
 pub fn evidence(stories: &[Story], role: Role, candidate: &Candidate, since: u64) -> Evidence {
     let mut e = Evidence::default();
     for story in stories {
@@ -75,20 +99,9 @@ pub fn evidence(stories: &[Story], role: Role, candidate: &Candidate, since: u64
         {
             continue;
         }
-        match (story.outcome, story.state) {
-            (Some(Outcome::Accepted), _) => e.accepted += 1,
-            (Some(Outcome::Reworked), _) => e.reworked += 1,
-            (Some(Outcome::Discarded), _) => e.discarded += 1,
-            // A run that broke by itself counts against the candidate. One
-            // that was cancelled or stopped for budget was not its fault.
-            (None, State::Failed | State::Crashed | State::TimedOut) => e.failed += 1,
-            (None, _) => {}
-        }
+        e.observe(story);
     }
-    e.n = e.accepted + e.reworked + e.discarded + e.failed;
-    if e.n > 0 {
-        e.score = Some((f64::from(e.accepted) + 0.5 * f64::from(e.reworked)) / f64::from(e.n));
-    }
+    e.finish();
     e
 }
 

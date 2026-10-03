@@ -253,6 +253,14 @@ candidate even after a definition is removed, renamed or redefined. Kind
 lists are not calibrated yet, and their runs do not feed role calibration;
 ordinary role report totals still include them.
 
+`cahoots report` includes role totals and groups by recorded kind, role, and
+full candidate. Each current kind candidate appears even without runs. Rates
+use rated-or-failed evidence (a result you recorded with `outcome`, or a run
+that failed by itself), with standard errors; below eight observations the
+terminal says "not enough evidence". JSON keeps defined estimates and their
+sample size. `cahoots doctor` warns about current kind-list and
+person-supplied role-list candidates with no such evidence on record.
+
 ### Usage meters
 
 cahoots reads your usage from one of these:

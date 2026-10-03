@@ -105,6 +105,17 @@ multi-select with `◻` and `◼`, and an error on the rail as `■`.
 
 ## How a command ends in words
 
+A report row's estimates are put in words only from eight rated or failed
+runs: below that the row says `not enough evidence (N rated or failed runs;
+need 8)` and shows no percentage or score (the JSON still has them). From
+eight, each share is a percentage with its standard error labelled in
+percentage points, then the score with its error — one standard error, never
+called a confidence bound. A configured kind candidate nobody has run shows
+`0 runs` and the same sentence, with no tokens or median time; the closing
+count stays the count of unique runs. `doctor` appends one warning per
+candidate in a current kind or person-written role list that has no rated or
+failed run on record, and no command to fill the gap.
+
 A person who runs a human verb (`install`, `uninstall`, `settings`,
 `enable`, `learn`, `registry`), `doctor` or `report` at a terminal reads
 how it ended in words, on the rail, printed where a program gets the JSON

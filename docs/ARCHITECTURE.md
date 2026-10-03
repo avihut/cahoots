@@ -73,7 +73,8 @@ supervisor, and there is no second, foreground path to keep honest.
   `<state>/runs/<id>/{run.json, brief, events.jsonl, final.md, supervisor.log, patch.diff, lock, cancel}`.
   `run.json` has one writer — the supervisor — and is replaced atomically. Ids
   are time-sortable and match `^[0-9A-Za-z_-]{1,64}$`. There is no separate
-  ledger file; `report` scans run directories. Content is kept 7 days.
+  ledger file; `report` reads the folded history, which outlives a run's
+  retained content. Content is kept 7 days.
 - **Liveness** is an exclusive lock on `runs/<id>/lock`, held for the
   supervisor's lifetime; the kernel releases it on death. `cancel` writes a
   marker the supervisor polls. Only the supervisor signals the callee — its
@@ -355,8 +356,28 @@ the same job with no native dependency.)
   against the sample rate of that moment — and only if review is on. Changing
   the rate later never re-selects history, and nobody picks which runs get
   reviewed.
-- `cahoots report [--days N]`: per role and target — runs, how they ended,
-  what became of them, tokens, median duration.
+- `cahoots report [--days N]`: per role and target, and per kind, recorded
+  role and full candidate (`by_kind_and_target`; two efforts are two
+  candidates, and a kind redefined with another role keeps its old rows) —
+  runs, how they ended, what became of them, tokens, median duration. Runs
+  are the folded stories whose finish time is in the window; a late outcome
+  does not move an old run in. Every candidate of every currently configured
+  kind has a row, with zero runs if there are none; a removed one keeps the
+  row its runs earned. Runs with no kind are in the role totals only.
+  Each row carries its **evidence**: the one classification calibration uses
+  (`Evidence::observe` — a recorded outcome, whatever the run's state, or
+  else an unrated failure, crash or timeout; unknown, cancelled and budget
+  stops count for nothing), its share of each kind of result with the
+  standard error `sqrt(p(1-p)/n)`, and the score (accepted 1, reworked ½,
+  the rest 0) with the standard error of its sample variance,
+  `sqrt(max(0, Q - n·score²) / (n(n-1)))` for `Q = accepted + ¼·reworked`
+  (two observations are needed). One standard error, not a confidence bound;
+  runs are correlated and routing chose them, so these describe and never
+  decide. `enough_evidence` is `n >= 8`, the report's own floor (`sample_floor`
+  in the data), not calibration's and not a setting. `doctor` uses the same
+  classification over the whole history, with no window and not cleared by
+  `learn reset`, to warn about each candidate in a current kind list or a
+  person-written role list that has none.
 
 **The review loop (opt-in: `[review] enabled = true`).**
 
@@ -406,5 +427,5 @@ and a `learn revert` finer than `learn reset`.
 Role calibration uses evidence only from runs without a task kind. Kind lists
 stay in the person's order even when learned routing is enabled. Ordinary
 report totals still include kind runs, and outcomes, sampling and role-scoped
-notes retain their behavior. No per-kind calibration or report grouping exists
-yet.
+notes retain their behavior. Report groups kind runs (above); no per-kind
+calibration exists yet.

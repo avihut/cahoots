@@ -10,7 +10,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::settings::tilde;
-use crate::doctor::{Check, Status};
+use crate::doctor::{Check, EvidenceGap, Status};
 use crate::install::files::{Outcome, Report};
 use crate::install::rules::rules_file;
 use crate::meter::tokens;
@@ -197,59 +197,47 @@ pub fn checked(title: String, checks: &[Check], home: &Path) -> Ending {
     }
 }
 
+/// One warning for each candidate in a current list that nothing is known
+/// about. The gaps are found by `doctor`; this only gives them their words —
+/// and none of them advertises a command to run, which is not a thing yet.
+pub fn evidence_warnings(gaps: &[EvidenceGap]) -> Vec<Check> {
+    gaps.iter()
+        .map(|gap| {
+            let list = match &gap.kind {
+                Some(kind) => format!("kind {kind}"),
+                None => format!("role {}", gap.role),
+            };
+            Check {
+                check: format!(
+                    "{list}: {} {} {} evidence",
+                    gap.candidate.harness,
+                    gap.candidate.model.as_str(),
+                    gap.candidate.effort
+                ),
+                status: Status::Warn,
+                detail: "no rated or failed runs on record for this candidate in this list — \
+                         not enough evidence"
+                    .to_string(),
+                rules: None,
+            }
+        })
+        .collect()
+}
+
 /// `report`, from its envelope's data: for each role and target, how its
 /// runs ended, what became of their results and what they cost; then, with
 /// `--suggest`, what those outcomes say about each role's order.
 pub fn reported(title: String, data: &Value) -> Ending {
+    let floor = data["sample_floor"].as_u64().unwrap_or(0);
     let mut blocks = Vec::new();
     for (key, row) in data["by_role_and_target"].as_object().into_iter().flatten() {
-        let n = |field: &str| row[field].as_u64().unwrap_or(0);
-        let said = |fields: &[(&str, &str)]| -> Vec<String> {
-            fields
-                .iter()
-                .filter(|(field, _)| n(field) > 0)
-                .map(|(field, words)| format!("{} {words}", n(field)))
-                .collect()
-        };
-        let ends = [
-            ("done", "done"),
-            ("failed", "failed"),
-            ("timed_out", "timed out"),
-            ("cancelled", "cancelled"),
-            ("stopped_by_budget", "stopped by budget"),
-        ];
-        let mut ended = said(&ends);
-        let not_ended = n("runs").saturating_sub(ends.iter().map(|(field, _)| n(field)).sum());
-        if not_ended > 0 {
-            ended.push(format!("{not_ended} not ended"));
-        }
-        let mut lines = vec![format!(
-            "{}: {}",
-            count(n("runs"), "run", "runs"),
-            ended.join(", ")
-        )];
-        let outcomes = said(&[
-            ("accepted", "accepted"),
-            ("reworked", "reworked"),
-            ("discarded", "discarded"),
-            ("outcome_unknown", "unknown"),
-        ]);
-        if !outcomes.is_empty() {
-            lines.push(format!("Outcomes: {}", outcomes.join(", ")));
-        }
-        let mut cost = format!("Median time {}", duration(n("median_secs")));
-        if n("tokens_in") + n("tokens_out") > 0 {
-            cost.push_str(&format!(
-                " · {} tokens in, {} out",
-                tokens(n("tokens_in")),
-                tokens(n("tokens_out"))
-            ));
-        }
-        lines.push(cost);
-        blocks.push(Block::done(key.clone(), lines));
+        blocks.push(Block::done(key.clone(), row_lines(row, floor)));
+    }
+    for (key, row) in data["by_kind_and_target"].as_object().into_iter().flatten() {
+        blocks.push(Block::done(format!("Kind · {key}"), row_lines(row, floor)));
     }
     if let Some(routing) = data.get("routing") {
-        blocks.extend(routed(routing));
+        blocks.extend(routed(routing, floor));
     }
     let within = match data["days"].as_u64().unwrap_or(0) {
         1 => "the last day".to_string(),
@@ -270,7 +258,7 @@ pub fn reported(title: String, data: &Value) -> Ending {
 /// `report --suggest`: whether the suggestions are in effect and the rule
 /// they follow, then each role's order with its evidence, and the one swap
 /// it supports, or why none.
-fn routed(routing: &Value) -> Vec<Block> {
+fn routed(routing: &Value, floor: u64) -> Vec<Block> {
     let mode = match routing["mode"].as_str().unwrap_or_default() {
         "applying" => "in effect",
         mode => mode,
@@ -283,20 +271,18 @@ fn routed(routing: &Value) -> Vec<Block> {
         )],
     )];
     for (role, said) in routing["roles"].as_object().into_iter().flatten() {
-        let mut lines: Vec<String> = said["order"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(n, entry)| {
-                format!(
-                    "{}. {}: {}",
-                    n + 1,
-                    candidate(&entry["candidate"]),
-                    evidence(&entry["evidence"])
-                )
-            })
-            .collect();
+        let mut lines: Vec<String> = Vec::new();
+        for (n, entry) in said["order"].as_array().into_iter().flatten().enumerate() {
+            lines.push(format!(
+                "{}. {}: {}",
+                n + 1,
+                candidate(&entry["candidate"]),
+                evidence(&entry["evidence"], floor)
+            ));
+            if entry["evidence"]["enough_evidence"] == true {
+                lines.push(rates_line(&entry["evidence"]));
+            }
+        }
         let swap = &said["suggested_swap"];
         if swap.is_object() {
             lines.push(format!(
@@ -324,11 +310,13 @@ fn candidate(candidate: &Value) -> String {
         .join(" ")
 }
 
-/// What a candidate's rated and failed runs say.
-fn evidence(evidence: &Value) -> String {
-    let Some(score) = evidence["score"].as_f64() else {
-        return "nothing to judge by yet".to_string();
-    };
+/// What a candidate's rated and failed runs say — or that they are too few
+/// to say anything. The data decides which: nothing is computed here.
+fn evidence(evidence: &Value, floor: u64) -> String {
+    let runs = count(evidence["n"].as_u64().unwrap_or(0), "run", "runs");
+    if evidence["enough_evidence"] != true {
+        return insufficient(evidence, floor);
+    }
     let counted: Vec<String> = ["accepted", "reworked", "discarded", "failed"]
         .into_iter()
         .filter_map(|field| match evidence[field].as_u64().unwrap_or(0) {
@@ -337,9 +325,116 @@ fn evidence(evidence: &Value) -> String {
         })
         .collect();
     format!(
-        "score {score:.2} from {} ({})",
-        count(evidence["n"].as_u64().unwrap_or(0), "run", "runs"),
+        "score {:.2} (standard error {:.2}) from {runs} ({})",
+        evidence["score"].as_f64().unwrap_or(0.0),
+        evidence["score_standard_error"].as_f64().unwrap_or(0.0),
         counted.join(", ")
+    )
+}
+
+/// `report`'s lines for one row: how its runs ended, what became of their
+/// results, what they cost, and what its evidence supports. A row with no
+/// runs — a configured candidate nobody has used — says so and nothing more
+/// than its evidence: it has no median to show.
+fn row_lines(row: &Value, floor: u64) -> Vec<String> {
+    let n = |field: &str| row[field].as_u64().unwrap_or(0);
+    let said = |fields: &[(&str, &str)]| -> Vec<String> {
+        fields
+            .iter()
+            .filter(|(field, _)| n(field) > 0)
+            .map(|(field, words)| format!("{} {words}", n(field)))
+            .collect()
+    };
+    let mut lines = Vec::new();
+    if n("runs") == 0 {
+        lines.push("0 runs".to_string());
+    } else {
+        let ends = [
+            ("done", "done"),
+            ("failed", "failed"),
+            ("timed_out", "timed out"),
+            ("cancelled", "cancelled"),
+            ("stopped_by_budget", "stopped by budget"),
+        ];
+        let mut ended = said(&ends);
+        let not_ended = n("runs").saturating_sub(ends.iter().map(|(field, _)| n(field)).sum());
+        if not_ended > 0 {
+            ended.push(format!("{not_ended} not ended"));
+        }
+        lines.push(format!(
+            "{}: {}",
+            count(n("runs"), "run", "runs"),
+            ended.join(", ")
+        ));
+        let outcomes = said(&[
+            ("accepted", "accepted"),
+            ("reworked", "reworked"),
+            ("discarded", "discarded"),
+            ("outcome_unknown", "unknown"),
+        ]);
+        if !outcomes.is_empty() {
+            lines.push(format!("Outcomes: {}", outcomes.join(", ")));
+        }
+        let mut cost = format!("Median time {}", duration(n("median_secs")));
+        if n("tokens_in") + n("tokens_out") > 0 {
+            cost.push_str(&format!(
+                " · {} tokens in, {} out",
+                tokens(n("tokens_in")),
+                tokens(n("tokens_out"))
+            ));
+        }
+        lines.push(cost);
+    }
+    let evidence = &row["evidence"];
+    if evidence.is_object() {
+        if evidence["enough_evidence"] == true {
+            lines.push(rates_line(evidence));
+            lines.push(score(evidence));
+        } else {
+            lines.push(insufficient(evidence, floor));
+        }
+    }
+    lines
+}
+
+/// The sentence for evidence that is too thin to put numbers on.
+fn insufficient(evidence: &Value, floor: u64) -> String {
+    format!(
+        "not enough evidence ({} rated or failed runs; need {floor})",
+        evidence["n"].as_u64().unwrap_or(0)
+    )
+}
+
+/// The line of shares, for a row and for a suggested candidate alike.
+fn rates_line(evidence: &Value) -> String {
+    format!(
+        "Rates from {} rated or failed runs: {}",
+        evidence["n"].as_u64().unwrap_or(0),
+        rates(evidence)
+    )
+}
+
+/// The four shares, each with one standard error in percentage points.
+fn rates(evidence: &Value) -> String {
+    ["accepted", "reworked", "discarded", "failed"]
+        .into_iter()
+        .map(|field| {
+            let rate = &evidence["rates"][field];
+            format!(
+                "{field} {:.1}% (standard error {:.1} percentage points)",
+                rate["value"].as_f64().unwrap_or(0.0) * 100.0,
+                rate["standard_error"].as_f64().unwrap_or(0.0) * 100.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn score(evidence: &Value) -> String {
+    format!(
+        "Score {:.2} (standard error {:.2})",
+        evidence["score"].as_f64().unwrap_or(0.0),
+        evidence["score_standard_error"].as_f64().unwrap_or(0.0)
     )
 }
 
@@ -621,6 +716,46 @@ mod tests {
     }
 
     #[test]
+    fn an_evidence_gap_is_a_warning_in_the_labels_the_plan_set_and_no_command() {
+        use crate::model::{Candidate, Effort, ModelName, Role, TaskKindName};
+        let candidate = Candidate {
+            harness: HarnessId::Codex,
+            model: ModelName::try_from("custom".to_string()).unwrap(),
+            effort: Effort::Medium,
+        };
+        let warnings = evidence_warnings(&[
+            EvidenceGap {
+                role: Role::Review,
+                kind: None,
+                candidate: candidate.clone(),
+            },
+            EvidenceGap {
+                role: Role::Review,
+                kind: Some(TaskKindName::try_from("rust-review".to_string()).unwrap()),
+                candidate,
+            },
+        ]);
+        let said: Vec<(&str, Status)> = warnings
+            .iter()
+            .map(|check| (check.check.as_str(), check.status))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("role review: codex custom medium evidence", Status::Warn),
+                (
+                    "kind rust-review: codex custom medium evidence",
+                    Status::Warn
+                ),
+            ]
+        );
+        assert_eq!(
+            warnings[1].detail,
+            "no rated or failed runs on record for this candidate in this list — not enough evidence"
+        );
+    }
+
+    #[test]
     fn doctor_s_last_word_counts_the_checks_and_is_red_when_one_failed() {
         let last = |statuses: &[Status]| {
             let checks: Vec<Check> = statuses
@@ -686,11 +821,13 @@ mod tests {
             serde_json::json!({ "harness": "codex", "model": "gpt-6-astra", "effort": "high" });
         let claude = serde_json::json!({ "harness": "claude", "model": "opus", "effort": "high" });
         let none = serde_json::json!({
-            "n": 0, "accepted": 0, "reworked": 0, "discarded": 0, "failed": 0, "score": null
+            "n": 0, "accepted": 0, "reworked": 0, "discarded": 0, "failed": 0, "score": null,
+            "enough_evidence": false
         });
         let data = serde_json::json!({
             "days": 30,
             "runs": 0,
+            "sample_floor": 8,
             "by_role_and_target": {},
             "routing": {
                 "mode": "applying",
@@ -700,7 +837,7 @@ mod tests {
                         "order": [
                             { "candidate": codex, "evidence": {
                                 "n": 4, "accepted": 1, "reworked": 0, "discarded": 0, "failed": 3,
-                                "score": 0.25
+                                "score": 0.25, "enough_evidence": false
                             } },
                             { "candidate": claude, "evidence": none }
                         ],
@@ -723,15 +860,98 @@ mod tests {
              │  The rule: a candidate moves up ONE place past its neighbour\n\
              │\n\
              ◇  advise\n\
-             │  1. codex gpt-6-astra high: score 0.25 from 4 runs (1 accepted, 3 failed)\n\
-             │  2. claude opus high: nothing to judge by yet\n\
+             │  1. codex gpt-6-astra high: not enough evidence (4 rated or failed runs; need\n\
+             │  8)\n\
+             │  2. claude opus high: not enough evidence (0 rated or failed runs; need 8)\n\
              │  claude opus high moves up past codex gpt-6-astra high: in effect\n\
              │\n\
              ◇  review\n\
-             │  1. codex gpt-6-astra high: nothing to judge by yet\n\
+             │  1. codex gpt-6-astra high: not enough evidence (0 rated or failed runs; need\n\
+             │  8)\n\
              │  No change: the evidence does not support a change\n\
              │\n\
              └  No runs in the last 30 days\n"
+        );
+    }
+
+    fn enough() -> Value {
+        serde_json::json!({
+            "n": 8, "accepted": 4, "reworked": 2, "discarded": 1, "failed": 1,
+            "score": 0.625, "score_standard_error": 0.1, "enough_evidence": true,
+            "rates": {
+                "accepted": { "value": 0.5, "standard_error": 0.17677 },
+                "reworked": { "value": 0.25, "standard_error": 0.15309 },
+                "discarded": { "value": 0.125, "standard_error": 0.11692 },
+                "failed": { "value": 0.125, "standard_error": 0.11692 }
+            }
+        })
+    }
+
+    #[test]
+    fn a_row_with_enough_evidence_says_its_rates_and_score_with_their_errors() {
+        let mut row = serde_json::json!({
+            "runs": 8, "done": 8, "failed": 0, "timed_out": 0, "cancelled": 0,
+            "stopped_by_budget": 0, "accepted": 4, "reworked": 2, "discarded": 1,
+            "outcome_unknown": 1, "tokens_in": 0, "tokens_out": 0, "median_secs": 5
+        });
+        row["evidence"] = enough();
+        assert_eq!(
+            row_lines(&row, 8),
+            [
+                "8 runs: 8 done",
+                "Outcomes: 4 accepted, 2 reworked, 1 discarded, 1 unknown",
+                "Median time 5s",
+                "Rates from 8 rated or failed runs: accepted 50.0% (standard error 17.7 \
+                 percentage points), reworked 25.0% (standard error 15.3 percentage points), \
+                 discarded 12.5% (standard error 11.7 percentage points), failed 12.5% \
+                 (standard error 11.7 percentage points)",
+                "Score 0.62 (standard error 0.10)",
+            ]
+        );
+        // Below the floor: the sentence, and no number from the estimates.
+        row["evidence"] = serde_json::json!({ "n": 7, "enough_evidence": false, "score": 0.5,
+            "rates": { "accepted": { "value": 0.5, "standard_error": 0.2 } } });
+        let lines = row_lines(&row, 8);
+        assert_eq!(
+            lines.last().unwrap(),
+            "not enough evidence (7 rated or failed runs; need 8)"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains('%') || line.contains("Score"))
+        );
+    }
+
+    #[test]
+    fn a_row_nobody_has_run_says_so_and_shows_no_cost() {
+        let row = serde_json::json!({
+            "runs": 0, "median_secs": 0, "tokens_in": 0, "tokens_out": 0,
+            "evidence": { "n": 0, "enough_evidence": false }
+        });
+        assert_eq!(
+            row_lines(&row, 8),
+            [
+                "0 runs",
+                "not enough evidence (0 rated or failed runs; need 8)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_suggestion_with_enough_evidence_keeps_its_counts_and_adds_the_errors() {
+        assert_eq!(
+            evidence(&enough(), 8),
+            "score 0.62 (standard error 0.10) from 8 runs (4 accepted, 2 reworked, \
+             1 discarded, 1 failed)"
+        );
+        assert!(rates_line(&enough()).starts_with(
+            "Rates from 8 rated or failed runs: accepted 50.0% (standard error 17.7 \
+             percentage points), reworked 25.0%"
+        ));
+        assert_eq!(
+            evidence(&serde_json::json!({ "n": 7, "enough_evidence": false }), 8),
+            "not enough evidence (7 rated or failed runs; need 8)"
         );
     }
 
