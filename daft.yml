@@ -122,7 +122,7 @@ hooks:
         description: The landed tree is the tree the rings tested
         run: mise run landed-check
       - name: release-reminder
-        description: Unreleased feat/fix on main means a release is owed
+        description: The unreleased feat/fix on main, which the release PR holds
         run: mise run release-reminder
 
 relations:

@@ -44,4 +44,6 @@ shell, and the behaviour of the harness CLIs themselves.
 
 ## Supported versions
 
-Only the newest tagged version.
+Only the newest tagged version. To check that a release archive was built by
+this repository's release workflow from the tagged commit:
+`gh attestation verify <archive> -R avihut/cahoots`.

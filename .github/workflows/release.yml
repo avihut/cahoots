@@ -15,16 +15,21 @@
 
 name: Release
 permissions:
+  "attestations": "write"
   "contents": "write"
+  "id-token": "write"
 
 # HAND-MAINTAINED after generation (dist-workspace.toml: allow-dirty = ["ci"]).
 # After any `dist generate`, re-apply both of these:
 #   1. `mise run pin-actions` — every `uses:` is pinned to a full commit SHA.
 #      The repository refuses to run anything else, and scripts/guard.sh
 #      (rule 7) fails the gate first.
-#   2. The tag filter below is `vX.Y.Z` exactly — the shape scripts/release.sh
-#      cuts and the `release tags are immutable` ruleset protects — not dist's
-#      default, which matches any ref with a version-looking substring.
+#   2. The tag filter below is `vX.Y.Z` exactly — the shape the release flow
+#      tags (release-flow.yml) and the `release tags are immutable` ruleset
+#      protects — not dist's default, which matches any ref with a
+#      version-looking substring.
+# `github-attestations = true` (dist-workspace.toml) is what adds the Attest
+# step and the `attestations` / `id-token` permissions; keep them.
 #
 # Release binaries need no special environment: a dev build is opt-IN
 # (CAHOOTS_DEV_BUILD=1, build.rs), and nothing here sets it.
@@ -156,6 +161,10 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      - name: Attest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up

@@ -1,0 +1,15 @@
+{
+  "name": "release-pr is the release workflow's",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_id": 2607344, "actor_type": "Integration", "bypass_mode": "always" }
+  ],
+  "conditions": { "ref_name": { "include": ["refs/heads/release-pr"], "exclude": [] } },
+  "rules": [
+    { "type": "creation" },
+    { "type": "update" },
+    { "type": "deletion" },
+    { "type": "non_fast_forward" }
+  ]
+}

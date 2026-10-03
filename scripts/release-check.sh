@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# pre-push hook body: every release being pushed is a whole one
-# (docs/WORKFLOW.md → Releases). A commit that moves Cargo.toml's version is a
-# `release: vX.Y.Z` commit with an ANNOTATED tag of that name on it — the
-# annotation is the release's notes, and the tag is what starts the release
-# workflow, so a lightweight or misplaced tag ships a wrong release that the
-# tag ruleset then makes permanent.
+# pre-push hook body: nothing release-shaped is pushed by hand. A `v*` tag, the
+# `release-pr` branch, a `release:` commit and a commit that moves
+# Cargo.toml's version are all the release workflow's (RELEASING.md); the
+# rulesets refuse them on GitHub, and this says so before the push does.
 #
 # Reads git's pre-push lines on stdin:
 #   <local ref> <local sha> <remote ref> <remote sha>
@@ -14,78 +12,69 @@ set -euo pipefail
 zero=0000000000000000000000000000000000000000
 manifest=Cargo.toml
 failures=0
-pushed_tags=()
-release_commits=()
 
 fail() {
     failures=$((failures + 1))
     printf '✗ %s\n' "$1" >&2
-    shift
-    [ $# -eq 0 ] || printf '%s\n' "$@" >&2
 }
 
+scratch_dir=$(mktemp -d)
+trap 'rm -rf "$scratch_dir"' EXIT
+
+# Every file is read whole before awk sees it (#68: no reader leaves its
+# writer mid-write).
 version_at() {
-    git show "$1:$manifest" 2>/dev/null |
-        awk '/^\[package\]/ { on = 1; next } /^\[/ { on = 0 } on && /^version *= *"/ { gsub(/"/, "", $3); print $3; exit }'
+    git show "$1:$manifest" >"$scratch_dir/manifest" 2>/dev/null || return 0
+    awk '/^\[package\]/ { on = 1; next } /^\[/ { on = 0 }
+         on && /^version *= *"/ && !found { gsub(/"/, "", $3); print $3; found = 1 }' \
+        "$scratch_dir/manifest"
 }
 
-while read -r local_ref local_sha _remote_ref remote_sha; do
+while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$zero" ] && continue # a delete pushes nothing to check
 
-    case "$local_ref" in
+    case "$remote_ref" in
     refs/tags/v*)
-        tag=${local_ref#refs/tags/}
-        pushed_tags+=("$tag")
-        if [ "$(git cat-file -t "$local_ref")" != "tag" ]; then
-            fail "$tag is a lightweight tag — the annotation IS the release notes" \
-                "  git tag -d $tag && git tag -a $tag <commit>"
+        fail "${remote_ref#refs/tags/}: release tags are made by the release workflow"
+        continue
+        ;;
+    refs/heads/release-pr)
+        fail "release-pr is the release workflow's branch"
+        continue
+        ;;
+    esac
+    case "$local_ref" in
+    refs/heads/*) ;;
+    *) continue ;;
+    esac
+
+    # The commits this push brings: not on the remote branch, and not on any
+    # remote-tracking ref — so a branch rebased onto a main that holds a
+    # release commit is not refused for it.
+    if [ "$remote_sha" = "$zero" ]; then
+        git rev-list "$local_sha" --not --remotes >"$scratch_dir/commits"
+    else
+        git rev-list "$local_sha" "^$remote_sha" --not --remotes >"$scratch_dir/commits"
+    fi
+    while IFS= read -r commit; do
+        [ -n "$commit" ] || continue
+        short=$(git rev-parse --short "$commit")
+        subject=$(git log -1 --format=%s "$commit")
+        if [[ "$subject" =~ ^release(\(|!|:) ]]; then
+            fail "$short '$subject' is a release commit — only the release workflow makes one"
             continue
         fi
-        commit=$(git rev-parse "$local_ref^{commit}")
-        if [ "v$(version_at "$commit")" != "$tag" ]; then
-            fail "$tag sits on $(git rev-parse --short "$commit"), where Cargo.toml's version is $(version_at "$commit")"
+        git rev-parse -q --verify "$commit^1" >/dev/null || continue # a root commit moves nothing
+        mine=$(version_at "$commit")
+        parent=$(version_at "$commit^1")
+        if [ "$mine" != "$parent" ]; then
+            fail "$short moves Cargo.toml's version ${parent:-none} → ${mine:-none}"
         fi
-        ;;
-    refs/heads/*)
-        if [ "$remote_sha" = "$zero" ]; then
-            range=("$local_sha" --not --remotes)
-        else
-            range=("$remote_sha..$local_sha")
-        fi
-        while IFS= read -r commit; do
-            [ -n "$commit" ] && release_commits+=("$commit")
-        done < <(git rev-list --grep='^release: v' "${range[@]}")
-        ;;
-    esac
-done
-
-for commit in ${release_commits[@]+"${release_commits[@]}"}; do
-    short=$(git rev-parse --short "$commit")
-    subject=$(git log -1 --format=%s "$commit")
-    tag=${subject#release: }
-    if [ "v$(version_at "$commit")" != "$tag" ]; then
-        fail "$short '$subject' but Cargo.toml's version there is $(version_at "$commit")"
-        continue
-    fi
-    if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-        fail "$short '$subject' has no tag — git tag -a $tag $short"
-        continue
-    fi
-    if [ "$(git cat-file -t "refs/tags/$tag")" != "tag" ]; then
-        fail "$tag is a lightweight tag — the annotation IS the release notes"
-    fi
-    if [ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$commit" ]; then
-        fail "$tag points at $(git rev-parse --short "refs/tags/$tag^{commit}"), not at the release commit $short"
-    fi
-    # Whether the remote already has the tag is unknowable without asking
-    # it, so an absent tag in THIS push is a nudge, never a refusal.
-    case " ${pushed_tags[*]-} " in
-    *" $tag "*) ;;
-    *) echo "note: $tag is not part of this push — if the remote lacks it: git push origin $tag" >&2 ;;
-    esac
+    done <"$scratch_dir/commits"
 done
 
 if [ "$failures" -gt 0 ]; then
+    echo "  the release workflow makes releases (RELEASING.md)" >&2
     exit 1
 fi
-echo "release-check: ${#release_commits[@]} release commit(s), ${#pushed_tags[@]} tag(s) — consistent"
+echo "release-check: no release made by hand in this push"
