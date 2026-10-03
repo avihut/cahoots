@@ -38,11 +38,15 @@ fn capped(text: String) -> Value {
 /// How many runs wait for `caller`'s review — for the envelopes of `run`,
 /// `wait` and `result`, so a harness learns there is something to look at
 /// without having to ask. Zero when review is off.
-pub fn pending_count(dirs: &Dirs, registry: &Registry, caller: Option<HarnessId>) -> usize {
+pub fn pending_count(
+    events: &[Event],
+    stories: &[history::Story],
+    registry: &Registry,
+    caller: Option<HarnessId>,
+) -> usize {
     match caller {
         Some(caller) if registry.review.enabled => {
-            let events = history::read(dirs);
-            review::pending(&history::stories(&events), &events, caller, now()).len()
+            review::pending(stories, events, caller, now()).len()
         }
         _ => 0,
     }
@@ -85,6 +89,8 @@ pub fn review_next(caller: Option<HarnessId>) -> Res<Envelope> {
     else {
         return nothing(pending.len(), "the runs waiting for review have aged out");
     };
+    let identity =
+        crate::run::visibility::project(story.blind, story.outcome.is_some(), &story.target);
     let read = |path| capped(fs::read_to_string(path).unwrap_or_default());
     let rubric: Vec<Value> = Kind::ALL
         .into_iter()
@@ -96,7 +102,8 @@ pub fn review_next(caller: Option<HarnessId>) -> Res<Envelope> {
         "next": {
             "run": story.run,
             "role": story.role,
-            "target": story.target,
+            "blind": identity.blind,
+            "target": identity.target,
             "how_it_ended": story.state,
             "what_you_did_with_it": story.outcome,
             "brief": read(dir.brief_path()),

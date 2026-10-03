@@ -86,6 +86,7 @@ pub struct Meters {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Review {
+    pub blind: bool,
     pub enabled: bool,
     pub sample_rate: f64,
     /// False is shadow mode: the adjustment is computed and shown, not used.
@@ -348,6 +349,7 @@ impl Registry {
                 watchdog_secs: config.limits.watchdog_secs.unwrap_or(120),
             },
             review: Review {
+                blind: config.review.blind.unwrap_or(false),
                 enabled: config.review.enabled.unwrap_or(false),
                 sample_rate: config.review.sample_rate.unwrap_or(0.2),
                 apply_routing: config.review.apply_routing.unwrap_or(false),

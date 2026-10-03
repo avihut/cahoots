@@ -2,6 +2,7 @@
 //! All of them are thin: they read and write the run directory, and the
 //! detached supervisor does the work.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
@@ -212,6 +213,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         kind: launch.kind,
         caller: launch.caller,
         target: launch.target,
+        blind: registry.review.blind,
         base: launch.base,
         cwd: launch.cwd,
         placement: launch.placement,
@@ -240,7 +242,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
 
     let wait = launch.wait_secs.unwrap_or(registry.limits.wait_secs);
     let record = wait_for(&dir, Duration::from_secs(wait))?;
-    Ok(report(&dir, &record, true))
+    Ok(report(dirs, &dir, &record, true))
 }
 
 pub struct ResumeArgs {
@@ -382,7 +384,7 @@ pub fn wait(id: &str, timeout_secs: Option<u64>) -> Res<Envelope> {
     let dir = RunDir::open(&dirs, id)?;
     let patience = timeout_secs.unwrap_or(Registry::load(&dirs)?.limits.wait_secs);
     let record = wait_for(&dir, Duration::from_secs(patience))?;
-    Ok(report(&dir, &record, true))
+    Ok(report(&dirs, &dir, &record, true))
 }
 
 pub fn result(id: &str) -> Res<Envelope> {
@@ -390,18 +392,20 @@ pub fn result(id: &str) -> Res<Envelope> {
     reconcile(&dirs);
     let dir = RunDir::open(&dirs, id)?;
     let record = dir.load()?;
-    Ok(report(&dir, &record, true))
+    Ok(report(&dirs, &dir, &record, true))
 }
 
 pub fn status(id: Option<&str>) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
     reconcile(&dirs);
+    let outcomes = outcome_ids(&dirs);
     if let Some(id) = id {
         let dir = RunDir::open(&dirs, id)?;
         let record = dir.load()?;
         // `status` answers "how is it going", so it succeeds whatever the
         // run's own fate; `result` and `wait` carry the run's exit code.
-        return Ok(Envelope::new(Exit::Ok, None).with_data(summary(&record)));
+        return Ok(Envelope::new(Exit::Ok, None)
+            .with_data(summary(&record, outcomes.contains(&record.id))));
     }
     let here = std::env::current_dir()
         .ok()
@@ -411,7 +415,7 @@ pub fn status(id: Option<&str>) -> Res<Envelope> {
         .rev()
         .filter(|(_, r)| here.as_ref().is_none_or(|here| r.cwd.starts_with(here)))
         .take(20)
-        .map(|(_, r)| summary(r))
+        .map(|(_, r)| summary(r, outcomes.contains(&r.id)))
         .collect();
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({ "runs": runs })))
 }
@@ -426,9 +430,9 @@ pub fn cancel(id: &str) -> Res<Envelope> {
         record::write_private(&dir.cancel_path(), b"")?;
         let patience = Duration::from_secs(record.int_grace_secs + record.term_grace_secs + 10);
         let record = wait_for(&dir, patience)?;
-        return Ok(report(&dir, &record, false));
+        return Ok(report(&dirs, &dir, &record, false));
     }
-    Ok(report(&dir, &record, false))
+    Ok(report(&dirs, &dir, &record, false))
 }
 
 /// `outcome`: what became of a run's result. The caller says so right after
@@ -464,14 +468,23 @@ pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({ "run": id, "outcome": outcome })))
 }
 
-fn summary(record: &RunRecord) -> Value {
-    json!({
+fn outcome_ids(dirs: &Dirs) -> BTreeSet<String> {
+    crate::history::stories(&crate::history::read(dirs))
+        .into_iter()
+        .filter(|story| story.outcome.is_some())
+        .map(|story| story.run)
+        .collect()
+}
+
+fn summary(record: &RunRecord, has_outcome: bool) -> Value {
+    let identity = crate::run::visibility::project(record.blind, has_outcome, &record.target);
+    let mut data = json!({
         "run": record.id,
         "state": record.state,
         "role": record.role,
         "kind": record.kind,
-        "target": record.target,
-        "model_reported": record.progress.model_reported,
+        "blind": identity.blind,
+        "target": identity.target,
         "cwd": record.cwd,
         "placement": record.placement,
         "created_at": record.created_at,
@@ -485,13 +498,22 @@ fn summary(record: &RunRecord) -> Value {
         "resumed_from": record.resumed_from,
         "notes": record.progress.notes,
         "gate_notes": record.admission.notes,
-    })
+    });
+    if !identity.blind {
+        data["model_reported"] = json!(record.progress.model_reported);
+    }
+    data
 }
 
 /// A run as `run`, `wait`, `result` and `cancel` report it: the run's own exit
 /// code, its summary, and — when finished — the answer, marked for what it is.
-fn report(dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
-    let mut data = summary(record);
+fn report(dirs: &Dirs, dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
+    let events = crate::history::read(dirs);
+    let stories = crate::history::stories(&events);
+    let has_outcome = stories
+        .iter()
+        .any(|story| story.run == record.id && story.outcome.is_some());
+    let mut data = summary(record, has_outcome);
     if with_result && record.state.is_terminal() {
         let text = fs::read_to_string(dir.final_path()).unwrap_or_default();
         let inline: String = if text.len() > RESULT_INLINE_BYTES {
@@ -513,10 +535,9 @@ fn report(dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
         });
     }
     if record.state.is_terminal()
-        && let Ok(dirs) = Dirs::resolve()
-        && let Ok(registry) = Registry::load(&dirs)
+        && let Ok(registry) = Registry::load(dirs)
     {
-        let waiting = crate::learn::pending_count(&dirs, &registry, record.caller);
+        let waiting = crate::learn::pending_count(&events, &stories, &registry, record.caller);
         if waiting > 0 {
             // A nudge, not a demand: see the `cahoots-review` skill.
             data["pending_reviews"] = json!(waiting);

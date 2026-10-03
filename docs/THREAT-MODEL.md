@@ -139,6 +139,21 @@ config.toml.
 content `untrusted`; the skill tells the caller to treat it as a colleague's
 claim, not as instructions.
 
+**Blind runs change presentation, not authority.** When a person sets
+`[review] blind = true`, each new run records that choice. Until an outcome
+is recorded for that run, its run envelopes and `review next` omit the
+target's model and effort; run envelopes also omit the model reported by
+the harness. They mark the run `blind: true`. Recording an outcome makes
+subsequent views show the identity and `blind: false`. The full identity
+remains in local records for supervision, accounting and learning; routing,
+gates, command lines and sandbox fences are unchanged. The harness remains
+visible: with two harnesses, an agent caller already knows its target is
+the other one. This supports judging an answer before its attribution;
+it is not anonymity or an access-control boundary. `pick`, aggregate
+reports, configuration, and the answer's text can still reveal or suggest
+identity, as can briefs, diagnostic text and related runs. Nothing in the
+returned content is rewritten to conceal its author.
+
 **Recursion and loops.** `CAHOOTS_DEPTH` is exported to every callee, but it
 can be scrubbed, so the real bounds are per-target slots (lock files), a global
 active-run ceiling, and the ledger meter's runs-per-hour cap.

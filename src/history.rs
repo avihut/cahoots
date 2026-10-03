@@ -54,6 +54,8 @@ pub enum Event {
         task_kind: Option<TaskKindName>,
         caller: Option<HarnessId>,
         target: Candidate,
+        #[serde(default)]
+        blind: bool,
         dir: PathBuf,
         state: State,
         exit: u8,
@@ -130,6 +132,7 @@ pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
         task_kind: record.kind.clone(),
         caller: record.caller,
         target: record.target.clone(),
+        blind: record.blind,
         dir: record.base.clone().unwrap_or_else(|| record.cwd.clone()),
         state: record.state,
         exit: record.exit_code.unwrap_or(1),
@@ -149,6 +152,7 @@ pub struct Story {
     pub kind: Option<TaskKindName>,
     pub caller: Option<HarnessId>,
     pub target: Candidate,
+    pub blind: bool,
     pub dir: PathBuf,
     pub state: State,
     pub exit: u8,
@@ -171,6 +175,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                 task_kind,
                 caller,
                 target,
+                blind,
                 dir,
                 state,
                 exit,
@@ -188,6 +193,7 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                         kind: task_kind.clone(),
                         caller: *caller,
                         target: target.clone(),
+                        blind: *blind,
                         dir: dir.clone(),
                         state: *state,
                         exit: *exit,
@@ -303,5 +309,54 @@ mod tests {
         assert!(stories(std::slice::from_ref(&event))[0].kind.is_none());
         let json = serde_json::to_value(&event).unwrap();
         assert!(json.get("task_kind").unwrap().is_null());
+    }
+    #[test]
+    fn legacy_finished_events_default_to_open() {
+        let event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        assert!(!stories(&[event])[0].blind);
+    }
+
+    #[test]
+    fn finished_stories_preserve_blind_policy() {
+        let mut event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        if let Event::Finished { blind, .. } = &mut event {
+            *blind = true;
+        }
+        let folded = stories(&[
+            event,
+            Event::Outcome {
+                t: 12,
+                run: "a".into(),
+                outcome: Outcome::Accepted,
+            },
+        ]);
+        assert!(folded[0].blind);
+        assert_eq!(folded[0].outcome, Some(Outcome::Accepted));
+        assert_eq!(folded[0].target.model.as_str(), "m");
+    }
+
+    #[test]
+    fn outcome_append_io_failure_is_internal() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            home: root.path().join("home"),
+            config: root.path().join("config"),
+            state: root.path().join("state"),
+            overridden: true,
+        };
+        ensure_private_dir(&dirs.state).unwrap();
+        std::fs::create_dir(path(&dirs)).unwrap();
+        let error = append(
+            &dirs,
+            &Event::Outcome {
+                t: 12,
+                run: "a".into(),
+                outcome: Outcome::Accepted,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.exit, crate::exit::Exit::Internal);
+        assert!(read(&dirs).is_empty());
+        assert_eq!(std::fs::read_dir(path(&dirs)).unwrap().count(), 0);
     }
 }
