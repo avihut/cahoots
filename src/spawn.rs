@@ -5,7 +5,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -321,32 +322,41 @@ fn repository_tops(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether git takes `marker`, the `.git` in `top`, for a repository: a git
-/// directory, or a file `gitdir: <path>` that names one. Never more lenient
-/// than git (setup.c: `read_gitfile_gently`, `is_git_directory`).
+/// directory, or a file `gitdir: <path>` that names one, all of it the
+/// user's. Mirrors git (setup.c: `read_gitfile_gently`, `is_git_directory`,
+/// `validate_headref`, `ensure_valid_ownership`) within git's own limits,
+/// and is never more lenient: whatever this takes, git takes too. Whatever
+/// it cannot be sure of, it does not take, and the walk goes on up.
 fn is_repository_marker(marker: &Path, top: &Path) -> bool {
     let Ok(meta) = fs::metadata(marker) else {
         return false;
     };
-    if meta.is_dir() {
-        return is_git_directory(marker);
-    }
-    if !meta.is_file() {
-        return false;
-    }
-    let Some(text) = head_of(marker) else {
+    let gitdir = if meta.is_dir() {
+        marker.to_path_buf()
+    } else if meta.is_file() {
+        let Some(text) = whole_small_file(marker) else {
+            return false;
+        };
+        let Some(named) = text.strip_prefix(b"gitdir: ") else {
+            return false;
+        };
+        let named = trim_line_ends(named);
+        if named.is_empty() {
+            return false;
+        }
+        top.join(OsStr::from_bytes(named))
+    } else {
         return false;
     };
-    match text.strip_prefix("gitdir: ") {
-        Some(named) => {
-            let named = named.trim_end_matches(['\n', '\r']);
-            !named.is_empty() && is_git_directory(&top.join(named))
-        }
-        None => false,
-    }
+    // git uses a repository only if the user owns it (`safe.directory`,
+    // which this does not read, aside).
+    is_git_directory(&gitdir)
+        && [top, marker, &gitdir].into_iter().all(owned)
+        && fs::canonicalize(&gitdir).is_ok_and(|real| owned(&real))
 }
 
-/// git's test for a git directory: a `HEAD` that names a ref or a commit, and
-/// `objects` and `refs` it may enter in its common directory.
+/// git's test for a git directory: a `HEAD` it takes, and `objects` and
+/// `refs` it may enter in the common directory.
 fn is_git_directory(dir: &Path) -> bool {
     if !is_head(&dir.join("HEAD")) {
         return false;
@@ -354,9 +364,11 @@ fn is_git_directory(dir: &Path) -> bool {
     let named = dir.join("commondir");
     let common = match named.symlink_metadata() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => dir.to_path_buf(),
-        _ => match head_of(&named) {
-            Some(text) => dir.join(text.trim_end_matches(['\n', '\r'])),
-            None => return false,
+        _ => match whole_small_file(&named) {
+            Some(text) if !trim_line_ends(&text).is_empty() => {
+                dir.join(OsStr::from_bytes(trim_line_ends(&text)))
+            }
+            _ => return false,
         },
     };
     ["objects", "refs"].iter().all(|part| {
@@ -365,34 +377,59 @@ fn is_git_directory(dir: &Path) -> bool {
     })
 }
 
-/// git's `validate_headref`, no more lenient: a link into `refs/`, a
-/// symbolic ref `ref: refs/…`, or a commit id and nothing else.
+/// The most of a HEAD git reads: `validate_headref` reads 255 bytes, and
+/// what lies past them is nothing to git.
+const HEAD_READ: u64 = 255;
+
+/// git's `validate_headref`, no more lenient: a link into `refs/`; or, in
+/// the 255 bytes git reads, `ref:`, git's own spaces, then `refs/`; or a
+/// commit id and nothing else.
 fn is_head(head: &Path) -> bool {
     let Ok(meta) = head.symlink_metadata() else {
         return false;
     };
     if meta.file_type().is_symlink() {
         return fs::read_link(head)
-            .is_ok_and(|target| target.to_str().is_some_and(|t| t.starts_with("refs/")));
+            .is_ok_and(|target| target.as_os_str().as_bytes().starts_with(b"refs/"));
     }
-    let Some(text) = head_of(head) else {
+    let Some(mut text) = file_start(head, HEAD_READ) else {
         return false;
     };
-    if let Some(name) = text.strip_prefix("ref:") {
-        return name
-            .trim_start_matches(|c: char| c.is_ascii_whitespace())
-            .starts_with("refs/");
+    // git reads it as a C string: it ends at the first NUL.
+    if let Some(end) = text.iter().position(|&byte| byte == 0) {
+        text.truncate(end);
     }
-    let id = text.trim_end_matches(['\n', '\r']);
-    matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if let Some(name) = text.strip_prefix(b"ref:") {
+        // git's `isspace`: space, tab, newline and carriage return — not a
+        // form feed or a vertical tab, as C's has it.
+        let start = name
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+            .unwrap_or(name.len());
+        return name[start..].starts_with(b"refs/");
+    }
+    let id = trim_line_ends(&text);
+    matches!(id.len(), 40 | 64) && id.iter().all(u8::is_ascii_hexdigit)
 }
 
-/// The start of a small file a repository keeps (`.git`, `HEAD`,
-/// `commondir`): at most 4 KiB of it, as text, and only from a regular file.
-/// This runs before any deadline does, so nothing planted in a file's place
-/// may hold it up: a file of any size is never read whole, and the file is
-/// opened without blocking, which a FIFO would otherwise do.
-fn head_of(path: &Path) -> Option<String> {
+/// The most this reads of a file git reads whole (a `.git` file, a
+/// `commondir`). Each is a line; one any longer is not taken.
+const SMALL_FILE: u64 = 4096;
+
+/// A small file git reads whole, all of it: `None` if it is longer than
+/// `SMALL_FILE`, so that nothing past what this read could make git see it
+/// otherwise, or if it holds a NUL, where git's reading of it and this one's
+/// part.
+fn whole_small_file(path: &Path) -> Option<Vec<u8>> {
+    let bytes = file_start(path, SMALL_FILE + 1)?;
+    (bytes.len() as u64 <= SMALL_FILE && !bytes.contains(&0)).then_some(bytes)
+}
+
+/// At most `limit` bytes from the start of a regular file. This runs before
+/// any deadline does, so nothing planted in a file's place may hold it up:
+/// it is opened without blocking, which a FIFO would otherwise do, and it
+/// must be a regular file.
+fn file_start(path: &Path, limit: u64) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let file = File::options()
@@ -403,9 +440,24 @@ fn head_of(path: &Path) -> Option<String> {
     if !file.metadata().ok()?.is_file() {
         return None;
     }
-    let mut text = String::new();
-    file.take(4096).read_to_string(&mut text).ok()?;
-    Some(text)
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn trim_line_ends(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r'))
+        .map_or(0, |at| at + 1);
+    &bytes[..end]
+}
+
+/// Whether `path` itself, not what it links to, is this user's, as git asks
+/// before it uses a repository.
+fn owned(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|meta| meta.uid() == nix::unistd::geteuid().as_raw())
 }
 
 /// When a process started, as `ps` tells it — the identity check that stops
@@ -712,6 +764,19 @@ mod tests {
                 Some(&*format!("{} x\n", "0".repeat(40))),
                 true,
             ),
+            // git reads 255 bytes of a HEAD: a ref that begins past them is
+            // no ref to git, however much more this could read.
+            (
+                "a ref that begins past the 255 bytes git reads",
+                Some(&*format!("ref:{}refs/heads/main\n", " ".repeat(251))),
+                true,
+            ),
+            // git's own spaces are space, tab, newline and carriage return.
+            (
+                "a ref after a form feed",
+                Some("ref:\u{c}refs/heads/main\n"),
+                true,
+            ),
         ] {
             let _ = fs::remove_dir_all(&fake);
             fs::create_dir_all(fake.join("refs")).unwrap();
@@ -738,7 +803,15 @@ mod tests {
             "a FIFO for a HEAD"
         );
         let _ = fs::remove_dir_all(&fake);
-        for named in ["gitdir: nowhere\n", "gitdir: \n", "not a gitdir line\n"] {
+        // git reads a `.git` file whole: one whose end lies past what this
+        // reads may end in something git does not take.
+        let past = format!("gitdir: {}\n{}junk\n", gitdir.display(), "\n".repeat(5000));
+        for named in [
+            "gitdir: nowhere\n",
+            "gitdir: \n",
+            "not a gitdir line\n",
+            &past,
+        ] {
             fs::write(&fake, named).unwrap();
             assert_eq!(
                 repository_tops(&below),

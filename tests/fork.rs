@@ -583,25 +583,55 @@ fn a_git_at_the_top_of_the_repository_is_not_run_from_below_it() {
 fn a_dot_git_that_git_looks_past_does_not_hide_the_repository_around_it() {
     // Each is a `.git` git does not take for a repository: it looks on up,
     // and finds the one around it, where the planted git is.
+    // The last two have all a git directory needs but a HEAD git takes: one
+    // whose ref begins past the 255 bytes git reads of it, and one whose ref
+    // follows a form feed, which is no space to git.
+    let far = format!("ref:{}refs/heads/main\n", " ".repeat(251));
     for mask in [
         "an empty directory",
         "a directory with only a HEAD",
         "a file naming nothing",
+        "a ref past git's read",
+        "a ref after a form feed",
     ] {
         let world = World::new();
         let marker = plant_git(&world);
         let below = world.work.join("sub");
         let dot_git = below.join(".git");
+        let full = |head: &str| {
+            for part in ["objects", "refs"] {
+                fs::create_dir_all(dot_git.join(part)).unwrap();
+            }
+            fs::write(dot_git.join("HEAD"), head).unwrap();
+        };
         match mask {
             "an empty directory" => fs::create_dir_all(&dot_git).unwrap(),
             "a directory with only a HEAD" => {
                 fs::create_dir_all(&dot_git).unwrap();
                 fs::write(dot_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
             }
-            _ => {
+            "a file naming nothing" => {
                 fs::create_dir_all(&below).unwrap();
                 fs::write(&dot_git, "gitdir: nowhere\n").unwrap();
             }
+            "a ref past git's read" => full(&far),
+            _ => full("ref:\u{c}refs/heads/main\n"),
+        }
+        // The control: git itself looks past it, to the repository around.
+        let top = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(&below)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        if mask != "a file naming nothing" {
+            assert_eq!(
+                String::from_utf8_lossy(&top.stdout).trim(),
+                path_str(&world.work),
+                "{mask}: git did not look past it"
+            );
         }
         let answer = advise_from(&world, &below);
         assert_eq!(answer.code, 33, "{mask}: {}", answer.json);
