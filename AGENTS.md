@@ -49,7 +49,9 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
    unless `CAHOOTS_DEV_REAL_DIRS=1`; policy is tested through pure functions
    (`cli::refusal`), never by running a verb; and `scripts/real-state.sh`
    fingerprints the real paths around the whole suite and fails on any
-   change. `mise run smoke` is the one exception to "no real harness", is
+   change — but for what a run writes (run directories, slots, the history
+   it appends to), which a real cahoots seen running meanwhile excuses.
+   `mise run smoke` is the one exception to "no real harness", is
    local only, and says what it costs.
 9. **The dependency list is closed** (`Cargo.toml`, held to the list in
    `scripts/guard.sh`). A new crate is a change to that list first, and its
