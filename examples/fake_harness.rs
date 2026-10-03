@@ -51,7 +51,9 @@ fn emit(value: serde_json::Value) {
 /// binary) says, and logs each call to `usage-cli.calls`. `status` is
 /// answered by the plan's `"status"` — `{"code": 0, "provider": "claude",
 /// "generated": -600, "next_poll": 1800}`, its stamps in seconds from now —
-/// and with no `"status"` it has no digest (13).
+/// and with no `"status"` it has no digest (13). Any answer may also carry
+/// `"pad": n` — n spaces after it, which JSON reads past — and `"hold":
+/// true`, which leaves a process behind holding its stdout open.
 fn fake_meter(exe: &std::path::Path, argv: &[String]) {
     let calls = exe.with_file_name("usage-cli.calls");
     let is_watch = |line: &str| line.contains("--max-data-age") && !line.contains("--forecast");
@@ -88,7 +90,7 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
                 })
             );
         }
-        std::process::exit(status["code"].as_i64().unwrap_or(13) as i32);
+        finish(status);
     }
     // Three kinds of call: admission (guarded by data age, asks the forecast),
     // admission's stale re-ask (unguarded), and the mid-run watchdog (guarded,
@@ -113,6 +115,21 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
         );
     } else if let Some(age) = answer["data_age"].as_i64() {
         println!("{}", json!({"verdict": "stale", "dataAge": age}));
+    }
+    finish(answer);
+}
+
+/// Ends a fake meter's answer: its padding, a process left holding stdout
+/// when it says so, and its exit code.
+fn finish(answer: &serde_json::Value) -> ! {
+    if let Some(pad) = answer["pad"].as_u64() {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(&vec![b' '; pad as usize]);
+        let _ = out.flush();
+    }
+    if answer["hold"] == true {
+        // Inherits stdout, and outlives this process.
+        let _ = std::process::Command::new("/bin/sleep").arg("20").spawn();
     }
     std::process::exit(answer["code"].as_i64().unwrap_or(13) as i32);
 }

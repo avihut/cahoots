@@ -158,8 +158,10 @@ admitting the run that crosses the line.
   next, and applies the tracker's own rule for an engine that stopped
   (`EngineHostBroker.heartbeatStale`): silent longer than twice the gap to
   its next poll, and longer than 3 minutes. Still polling, the reading is
-  re-asked against `cap − 15` as Codex's is — a Claude run writes a
-  transcript, and the tracker polls on that. Stopped, or any answer that
+  re-asked against `cap − 15` as Codex's is. A Claude run writes a
+  transcript, which can prompt the tracker to poll sooner — but only as its
+  pace and any backoff allow, so what admits the run is the heartbeat and
+  the fixed lower cap, not the run refreshing the numbers. Stopped, or any answer that
   can't say (another harness's, an unknown shape, a stamp ahead of the
   clock), refuses, and the refusal says how old the data is, what the
   tracker's stamps say, and that `usage-cli status` shows both — never that

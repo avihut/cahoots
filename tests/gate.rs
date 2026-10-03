@@ -53,6 +53,14 @@ fn what_the_gate_does_not_understand_is_a_refusal() {
         let world = world(json!({"guarded": {"code": code}}));
         assert_eq!(world.run("hello", &[]).code, 13);
     }
+    // An answer past the output cap, or one whose stdout outlives it.
+    for plan in [
+        json!({"guarded": {"code": 0, "percent": 35, "pad": 1 << 20}}),
+        json!({"guarded": {"code": 0, "percent": 35, "hold": true}}),
+    ] {
+        let answer = world(plan.clone()).run("hello", &[]);
+        assert_eq!(answer.code, 13, "{plan} {}", answer.json);
+    }
     // A meter that is configured but not there.
     let world = World::new();
     world.configure(
@@ -143,6 +151,39 @@ fn a_tracker_that_stopped_polling_refuses_stale_claude_data() {
         message.contains("last published 2h 0m ago, its next poll due 1h 30m ago"),
         "{message}"
     );
+}
+
+/// What the gate reads of a meter: no more than a mebibyte, and nothing at
+/// all once its stdout outlives it or runs past that.
+const OUTPUT_CAP: u64 = 1 << 20;
+
+#[test]
+fn a_heartbeat_within_the_output_cap_is_read() {
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "pad": OUTPUT_CAP - 200,
+    }));
+    let answer = world.run("hello", &["--caller", "codex", "--to", "claude"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+}
+
+#[test]
+fn a_heartbeat_past_the_output_cap_or_held_open_is_no_answer() {
+    // Padding JSON reads past: only the cap itself refuses it.
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "pad": OUTPUT_CAP,
+    }));
+    let message = refused_as_stale(&world);
+    assert!(message.contains("printed more than 1024 KiB"), "{message}");
+    // The status process exits at once; what it left behind keeps stdout
+    // open, and the meter's deadline still holds.
+    let world = stale_claude(json!({
+        "code": 0, "provider": "claude", "generated": -600, "next_poll": 1800,
+        "hold": true,
+    }));
+    let message = refused_as_stale(&world);
+    assert!(message.contains("its stdout stayed open"), "{message}");
 }
 
 #[test]
