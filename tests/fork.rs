@@ -399,6 +399,41 @@ fn a_daft_path_in_cahoots_own_directories_is_refused() {
     }
 }
 
+/// The data directory holds the eval suite, and a writer is never cut into
+/// it: not as a real worktree of the repository, and not through a link
+/// that resolves there.
+#[test]
+fn a_daft_worktree_in_the_data_directory_is_refused() {
+    let world = World::new();
+    let place = world.data.join("fork");
+    refused(
+        &world,
+        json!({"make": "worktree", "print": place}),
+        &place,
+        33,
+        "cahoots' own directories",
+    );
+
+    let by_hand = world.data.join("cut-by-hand");
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        path_str(&by_hand),
+        "HEAD",
+    ]);
+    let link = world.root.join("to-data");
+    std::os::unix::fs::symlink(&by_hand, &link).unwrap();
+    refused(
+        &world,
+        json!({"make": "nothing", "print": link}),
+        &by_hand,
+        33,
+        "cahoots' own directories",
+    );
+}
+
 #[test]
 fn a_daft_that_fails_is_refused() {
     let world = World::new();

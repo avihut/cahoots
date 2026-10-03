@@ -278,6 +278,7 @@ fn unfit(
     // build's overridden directories through.
     let state = canonical_of(&dirs.state);
     if canonical.starts_with(canonical_of(&dirs.config))
+        || canonical.starts_with(canonical_of(&dirs.data))
         || (canonical.starts_with(&state)
             && !canonical.starts_with(canonical_of(&dirs.state.join("worktrees"))))
     {
@@ -655,6 +656,7 @@ mod tests {
         for dir in [
             root.join("state/elsewhere"),
             root.join("config/x"),
+            root.join("data/evals/tasks/x"),
             root.join("state/worktrees/f"),
             top.clone(),
         ] {
@@ -664,7 +666,15 @@ mod tests {
 
         // A plain directory, so a git check would say "not a worktree": the
         // order makes it cahoots' directories that are named.
-        for inside in [root.join("state/elsewhere"), root.join("config/x")] {
+        // A link from outside that resolves into one is inside it too.
+        std::os::unix::fs::symlink(root.join("data/evals"), root.join("to-data")).unwrap();
+        for inside in [
+            root.join("state/elsewhere"),
+            root.join("config/x"),
+            root.join("data/evals/tasks/x"),
+            root.join("data"),
+            root.join("to-data/tasks/x"),
+        ] {
             assert_eq!(
                 unfit_here(&inside),
                 Some("is inside cahoots' own directories"),
