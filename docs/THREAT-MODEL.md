@@ -326,7 +326,7 @@ for a person to remove.
 **How much of a writer's diff survived.** `outcome`, an agent verb that runs
 outside the sandbox, and `report` read the caller's repository once more to
 say how much of a writer's patch is still part of it. They read **commits
-only**: the repository is found from the run's directory and held to the
+only**: the repository is the one pinned when the run started (below) and held to the
 binary policy like every `git`; HEAD and the recorded base commit are
 resolved to full hashes (a hash read from a record is validated hex before it
 is ever an argument); then `git diff <base> <head>` compares two trees, with
