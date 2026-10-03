@@ -464,48 +464,149 @@ fn unquoted(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// A path as git wrote it in a header, as the bytes it names: one pair of
+/// surrounding quotes taken off, and git's C escapes inside undone (`\t`,
+/// `\"`, `\\`, `\303`, …). An escape git never writes is kept as it is.
+fn decoded(path: &str) -> Vec<u8> {
+    let Some(inner) = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+        return path.as_bytes().to_vec();
+    };
+    let bytes = inner.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'\\' || at + 1 == bytes.len() {
+            out.push(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let next = bytes[at + 1];
+        let simple = match next {
+            b'a' => Some(0x07),
+            b'b' => Some(0x08),
+            b't' => Some(b'\t'),
+            b'n' => Some(b'\n'),
+            b'v' => Some(0x0b),
+            b'f' => Some(0x0c),
+            b'r' => Some(b'\r'),
+            b'"' => Some(b'"'),
+            b'\\' => Some(b'\\'),
+            _ => None,
+        };
+        if let Some(byte) = simple {
+            out.push(byte);
+            at += 2;
+            continue;
+        }
+        let octal = bytes.get(at + 1..at + 4).filter(|digits| {
+            digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) && digits[0] <= b'3'
+        });
+        match octal {
+            Some(digits) => {
+                out.push(
+                    digits
+                        .iter()
+                        .fold(0u8, |byte, digit| byte * 8 + (digit - b'0')),
+                );
+                at += 4;
+            }
+            None => {
+                out.push(b'\\');
+                at += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether two names, one component of a path each, may be one file on a
+/// filesystem that does not tell case apart. ASCII names are compared
+/// exactly, without case. Where either is not ASCII, std alone cannot rule
+/// it out — Unicode case folding (a Kelvin sign is a `k`), and composed or
+/// decomposed forms of one letter, which std cannot normalise — so they may.
+fn may_be_one(a: &[u8], b: &[u8]) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    true
+}
+
 /// A hidden test and a file of the rest that collide: one under the other (a
 /// file that became a directory, or the reverse, or a link in the way), or
 /// the same path but for case (a rename that changed only case, where the
 /// path rule's case-sensitive `FooTest` suffix tells the two names apart).
 /// Applied apart, at the base, one of the two diffs would then fail, so such
 /// a run makes no task. A change like that wholly on one side applies, in
-/// git's order, within its one diff. Compared without the quotes, and
-/// without regard to case, since a filesystem may not tell `Tests` from
-/// `tests`.
+/// git's order, within its one diff. Paths are compared as the bytes they
+/// name, component by component (`may_be_one`): where a name is not ASCII,
+/// a collision that cannot be ruled out counts as one, and the run is
+/// refused rather than kept as a task that might not apply.
 fn straddling<'a>(sections: &'a [patch::Section<'_>]) -> Option<(&'a str, &'a str)> {
-    let key = |path: &str| unquoted(path).to_ascii_lowercase();
-    // Every directory each path is in, as a key: `a/b/c` is in `a` and `a/b`.
+    struct Named<'a> {
+        path: &'a str,
+        parts: Vec<Vec<u8>>,
+        /// Lowercase and `/`-joined, when every byte is ASCII.
+        key: Option<String>,
+    }
+    let named = |path: &'a str| {
+        let bytes = decoded(path);
+        let key = bytes
+            .is_ascii()
+            .then(|| String::from_utf8_lossy(&bytes).to_ascii_lowercase());
+        let parts = bytes
+            .split(|&byte| byte == b'/')
+            .map(<[u8]>::to_vec)
+            .collect();
+        Named { path, parts, key }
+    };
+    // The shorter path, name by name, is where the longer one starts.
+    let collide =
+        |a: &Named, b: &Named| a.parts.iter().zip(&b.parts).all(|(a, b)| may_be_one(a, b));
+    // Every directory an ASCII path is in, as a key: `a/b/c` is in `a` and `a/b`.
     let ancestors = |key: &str| -> Vec<String> {
         key.match_indices('/')
             .map(|(at, _)| key[..at].to_string())
             .collect()
     };
-    let (tests, rest): (Vec<_>, Vec<_>) = sections
+    let (tests, rest): (Vec<Named>, Vec<Named>) = sections
         .iter()
-        .map(|section| (section.path.as_str(), key(&section.path)))
-        .partition(|(path, _)| is_test_path(path));
-    let index = |side: &[(&'a str, String)]| {
-        let mut files = std::collections::HashMap::new();
-        let mut dirs = std::collections::HashMap::new();
-        for (path, key) in side {
-            files.insert(key.clone(), *path);
+        .map(|section| named(&section.path))
+        .partition(|named| is_test_path(named.path));
+    let mut rest_files = std::collections::HashMap::new();
+    let mut rest_dirs = std::collections::HashMap::new();
+    for other in &rest {
+        if let Some(key) = &other.key {
+            rest_files.insert(key.clone(), other.path);
             for dir in ancestors(key) {
-                dirs.entry(dir).or_insert(*path);
+                rest_dirs.entry(dir).or_insert(other.path);
             }
         }
-        (files, dirs)
-    };
-    let (rest_files, rest_dirs) = index(&rest);
-    for (test, key) in &tests {
-        // A file of the rest at the test's own path, where the test's
-        // directory is, or under the test.
-        let other = rest_files
-            .get(key)
-            .or_else(|| ancestors(key).iter().find_map(|dir| rest_files.get(dir)))
-            .or_else(|| rest_dirs.get(key));
-        if let Some(other) = other {
-            return Some((test, other));
+    }
+    // Paths that are not all ASCII are held against every path on the other
+    // side, name by name; there are few of them in a patch.
+    let rest_not_ascii: Vec<&Named> = rest.iter().filter(|other| other.key.is_none()).collect();
+    for test in &tests {
+        let found = match &test.key {
+            // A file of the rest at the test's own path, where the test's
+            // directory is, or under the test.
+            Some(key) => rest_files
+                .get(key)
+                .or_else(|| ancestors(key).iter().find_map(|dir| rest_files.get(dir)))
+                .or_else(|| rest_dirs.get(key))
+                .copied()
+                .or_else(|| {
+                    rest_not_ascii
+                        .iter()
+                        .find(|other| collide(test, other))
+                        .map(|other| other.path)
+                }),
+            None => rest
+                .iter()
+                .find(|other| collide(test, other))
+                .map(|other| other.path),
+        };
+        if let Some(other) = found {
+            return Some((test.path, other));
         }
     }
     None
@@ -640,6 +741,83 @@ mod tests {
         );
         // Alike but for case on one side alone is nothing to it.
         assert_eq!(found(&["tests/A.rs", "tests/a.rs"]), None);
+    }
+
+    #[test]
+    fn a_quoted_path_is_read_as_the_bytes_it_names() {
+        assert_eq!(decoded("src/a b.rs"), b"src/a b.rs");
+        assert_eq!(decoded(r#""caf\303\251.txt""#), "café.txt".as_bytes());
+        assert_eq!(decoded(r#""q\"u\\o\tte""#), b"q\"u\\o\tte");
+        assert_eq!(decoded(r#""\377x""#), b"\xffx");
+        // What git never writes is kept as written.
+        assert_eq!(decoded(r#""a\qb\9""#), b"a\\qb\\9");
+        assert_eq!(decoded(r#""end\""#), b"end\\");
+    }
+
+    /// One section a path, as git writes a header for it, quoted when the
+    /// path is given quoted.
+    fn collision(paths: &[&str]) -> Option<(String, String)> {
+        let patch: String = paths
+            .iter()
+            .map(|path| match path.strip_prefix('"') {
+                Some(_) => {
+                    let inner = &path[1..path.len() - 1];
+                    format!("diff --git \"a/{inner}\" \"b/{inner}\"\n@@ -0,0 +1 @@\n+x\n")
+                }
+                None => format!("diff --git a/{path} b/{path}\n@@ -0,0 +1 @@\n+x\n"),
+            })
+            .collect();
+        straddling(&patch::sections(patch.as_bytes()))
+            .map(|(test, other)| (test.to_string(), other.to_string()))
+    }
+
+    #[test]
+    fn names_that_are_not_ascii_collide_unless_they_can_be_told_apart() {
+        let pair = |test: &str, other: &str| Some((test.to_string(), other.to_string()));
+        // ÄTest.java (a test by its suffix) and ätest.java: one file where
+        // case is not told apart, though git escapes them differently.
+        let upper = r#""\303\204Test.java""#;
+        let lower = r#""\303\244test.java""#;
+        assert!(is_test_path(upper) && !is_test_path(lower));
+        assert_eq!(collision(&[upper, lower]), pair(upper, lower));
+        // The same letter composed (é) and decomposed (e + U+0301): std
+        // cannot normalise, so it cannot rule the collision out.
+        let decomposed = r#""e\314\201Test.java""#;
+        let composed = r#""\303\251test.java""#;
+        assert_eq!(
+            collision(&[decomposed, composed]),
+            pair(decomposed, composed)
+        );
+        // A Kelvin sign folds to an ASCII k.
+        let kelvin = r#""\342\204\252Test.java""#;
+        assert_eq!(
+            collision(&[kelvin, "ktest.java"]),
+            pair(kelvin, "ktest.java")
+        );
+        // Bytes that are not UTF-8 cannot be compared at all.
+        let invalid = r#""\377Test.java""#;
+        assert_eq!(
+            collision(&[invalid, r#""\376test.java""#]),
+            pair(invalid, r#""\376test.java""#)
+        );
+        // Under a directory of the rest whose name is not ASCII.
+        assert_eq!(
+            collision(&[
+                r#""d\303\251j\303\240""#,
+                r#""D\303\251j\303\240/tests/a.rs""#
+            ]),
+            pair(
+                r#""D\303\251j\303\240/tests/a.rs""#,
+                r#""d\303\251j\303\240""#
+            )
+        );
+        // Told apart by an ASCII name on the way: nothing.
+        assert_eq!(
+            collision(&[r#""tests/\303\204Test.java""#, r#""src/\303\244.rs""#]),
+            None
+        );
+        assert_eq!(collision(&["tests/a.rs", r#""src/\303\244.rs""#]), None);
+        assert_eq!(collision(&[r#""\303\204/x_test.go""#, "b/x.go"]), None);
     }
 
     #[test]

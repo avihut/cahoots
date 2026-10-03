@@ -764,6 +764,80 @@ fn a_rename_that_changed_only_case_across_the_split_is_refused() {
     assert!(tree(&world.data).is_empty(), "{:?}", tree(&world.data));
 }
 
+/// Whether one section of `run`'s patch, the one at `at`, applies on its
+/// own at the run's base, as a task made from it would have to.
+fn applies_alone(world: &World, run: &common::Answer, at: usize) -> bool {
+    let id = run.run_id();
+    let patch = fs::read(world.run_file(&id, "patch.diff")).unwrap();
+    let sections = cahoots::patch::sections(&patch);
+    let base = run.data()["base_commit"].as_str().unwrap();
+    let replay = world.root.join(format!("replay-{id}"));
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        replay.to_str().unwrap(),
+        base,
+    ]);
+    let rest = world.root.join(format!("rest-{id}.diff"));
+    fs::write(&rest, sections[at].bytes).unwrap();
+    std::process::Command::new("git")
+        .args(["apply", rest.to_str().unwrap()])
+        .current_dir(&replay)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// Whether this world's filesystem tells `a` from `A`.
+fn case_sensitive(world: &World) -> bool {
+    let probe = world.root.join("case-probe");
+    fs::create_dir_all(&probe).unwrap();
+    fs::write(probe.join("a"), "").unwrap();
+    !probe.join("A").exists()
+}
+
+/// `ÄTest.java` to `ätest.java`: a case-only rename across the split, of a
+/// name git writes C-quoted, each with escapes of its own.
+#[test]
+fn a_rename_that_changed_only_the_case_of_a_quoted_name_is_refused() {
+    let world = World::new();
+    commit_files(&world, &[("ÄTest.java", "class ÄTest {}\n")]);
+    let run = world.accepted_writer("FAKE: rename=ÄTest.java=ätest.java\n", &[]);
+    let id = run.run_id();
+    if !case_sensitive(&world) {
+        assert!(!applies_alone(&world, &run, 1), "the rest applied alone");
+    }
+    let refused = at(&world, &["evals", "add", &id]);
+    assert_eq!(refused.code, 2, "{}", refused.json);
+    assert!(
+        message(&refused).contains(r#"collide ("\303\204Test.java" and "\303\244test.java": "#),
+        "{}",
+        refused.json
+    );
+    assert!(tree(&world.data).is_empty(), "{:?}", tree(&world.data));
+}
+
+/// Two names that are not ASCII, in one directory, across the split: std
+/// cannot show they are two files wherever the task is replayed, so the run
+/// is refused rather than kept as a task that might not apply.
+#[test]
+fn names_that_cannot_be_told_apart_without_normalising_are_refused() {
+    let world = World::new();
+    commit_files(&world, &[("docs/ÜberTest.java", "class ÜberTest {}\n")]);
+    refused_across_the_split(
+        &world,
+        "FAKE: write=docs/über.md\nFAKE: append=docs/ÜberTest.java::// more\\n\n",
+        r#""docs/\303\234berTest.java""#,
+        r#""docs/\303\274ber.md""#,
+    );
+}
+
 #[test]
 fn a_file_that_became_a_directory_on_the_tests_side_alone_makes_a_task() {
     let world = World::new();
