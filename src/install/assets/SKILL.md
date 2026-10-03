@@ -39,10 +39,14 @@ cahoots run --role implement --caller <you> --fork --brief /tmp/brief.md
 `--fork` cuts a fresh worktree from your `HEAD` and the other agent works
 THERE. Your own tree is never touched. When it is done the JSON carries
 `data.worktree` (where the change is) and `data.changes` (`git status
---short` there). Then it is yours to judge:
+--short` there). If `data.changes` is `null`, the status could not be read
+and `data.changes_error` says why: read the worktree yourself before you
+trust anything in it. Then it is yours to judge:
 
 - read it: `git -C <worktree> diff`, and run the tests there yourself — the
-  other agent may not have been able to;
+  other agent may not have been able to. The worktree comes up without the
+  repository's setup (no hook runs when it is cut), so run the setup there
+  first;
 - bring over what you accept (commit it there and cherry-pick, or apply the
   diff), and say what you did not take.
 

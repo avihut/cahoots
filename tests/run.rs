@@ -486,3 +486,59 @@ fn unknown_and_malformed_run_ids() {
     assert_eq!(world.ask(&["status", "../../etc"]).code, 2);
     assert_eq!(world.ask(&["cancel", "nope"]).code, 50);
 }
+
+/// Once the callee is spawned, an error inside the supervisor still cleans up
+/// the run's process group before the run is published terminal — so a child
+/// the callee left behind cannot go on writing the tree after a failed run.
+#[test]
+fn a_post_spawn_supervisor_error_still_kills_the_runs_group() {
+    let world = World::new();
+    // A completed run gives a well-formed record to start a fresh one from.
+    let template = world.run("pong", &[]);
+    assert_eq!(template.code, 0, "{}", template.json);
+    let mut record: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(world.run_file(&template.run_id(), "run.json")).unwrap(),
+    )
+    .unwrap();
+
+    // A new run, waiting to start, in a directory of its own. Its event log
+    // is a directory, so the supervisor's attempt to open it fails after the
+    // callee — which leaves a child in its group — is already spawned.
+    let id = "01a20000-0000-7000-8000-00000000da7a";
+    record["id"] = id.into();
+    record["state"] = "starting".into();
+    for null in [
+        "exit_code",
+        "message",
+        "started_at",
+        "finished_at",
+        "supervisor_pid",
+        "callee_pid",
+        "callee_started",
+        "callee_exit",
+    ] {
+        record[null] = serde_json::Value::Null;
+    }
+    let run_dir = world.state.join("runs").join(id);
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("run.json"), record.to_string()).unwrap();
+    fs::write(run_dir.join("brief"), "FAKE: leak=race.txt").unwrap();
+    fs::create_dir(run_dir.join("events.jsonl")).unwrap();
+
+    // Drive the supervisor directly: it fails post-spawn.
+    let done = world.cahoots().args(["__supervise", id]).output().unwrap();
+    assert!(!done.status.success(), "the supervisor did not fail");
+
+    // The run is marked failed, not left running.
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("run.json")).unwrap()).unwrap();
+    assert_eq!(after["state"], "failed", "{after}");
+
+    // Well past the leftover child's delay: had its group outlived the failed
+    // run, it would have written the tree by now.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(
+        !world.work.join("race.txt").exists(),
+        "a child the callee left wrote the tree after a failed run"
+    );
+}

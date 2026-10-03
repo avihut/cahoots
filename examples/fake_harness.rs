@@ -2,7 +2,8 @@
 //! never call a real harness). Copied into a temp directory under the name
 //! `claude` or `codex`, it answers `--version` with that CLI's fingerprint and
 //! otherwise speaks that CLI's output stream. Named `usage-cli` or `ccusage`,
-//! it is a usage meter instead.
+//! it is a usage meter instead, and named `daft`, it cuts a fork the way its
+//! plan says (so no test ever runs the real daft).
 //!
 //! The brief (stdin) steers it, one directive per line:
 //!
@@ -13,10 +14,15 @@
 //! FAKE: dump           answer with this process's argv, cwd and environment
 //! FAKE: child          leave a long-lived child in its own process group
 //! FAKE: write=<name>   "edit": create <name> in the working directory
+//! FAKE: append=<file>::<text>  add <text> to <file> there (`\n`, `\t`
+//!                      for a newline and a tab); as many as the brief has
+//! FAKE: leak=<name>    leave a child in the callee's group that, a moment
+//!                      after the callee exits, writes <name> in the cwd
 //! ```
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
@@ -160,6 +166,72 @@ fn fake_ccusage(exe: &std::path::Path, argv: &[String]) {
     emit(json!({"blocks": [block]}));
 }
 
+/// As `daft`: `daft -C <base> start --fork …`, done the way `daft.plan` (next
+/// to the binary) says, and logged to `daft.calls`, one JSON object a call —
+/// its argv, where it ran, its PATH and every `GIT_CONFIG_*` it was given —
+/// with its pid in `daft.pid`. The plan: `{"sleep": s, "make":
+/// "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit": n}`; it makes
+/// a worktree and exits 0 unless it says otherwise.
+fn fake_daft(exe: &Path, argv: &[String]) {
+    let git_config: std::collections::BTreeMap<String, String> = std::env::vars()
+        .filter(|(name, _)| name.starts_with("GIT_CONFIG"))
+        .collect();
+    let call = json!({
+        "argv": argv[1..],
+        "cwd": std::env::current_dir().ok(),
+        "path": std::env::var("PATH").ok(),
+        "git_config": git_config,
+    });
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(exe.with_file_name("daft.calls"))
+        .expect("calls");
+    let _ = writeln!(log, "{call}");
+    let _ = std::fs::write(
+        exe.with_file_name("daft.pid"),
+        std::process::id().to_string(),
+    );
+    let plan: serde_json::Value = std::fs::read_to_string(exe.with_file_name("daft.plan"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if let Some(secs) = plan["sleep"].as_u64() {
+        std::thread::sleep(Duration::from_secs(secs));
+    }
+    let print = plan["print"].as_str().unwrap_or_default();
+    match plan["make"].as_str().unwrap_or("worktree") {
+        "worktree" => {
+            let base = argv
+                .iter()
+                .position(|arg| arg == "-C")
+                .and_then(|at| argv.get(at + 1))
+                .expect("daft -C <base>");
+            // The environment cahoots gave daft, so the git it runs gets it too.
+            let made = std::process::Command::new("git")
+                .args(["-C", base, "worktree", "add", "--detach", print, "HEAD"])
+                .stdout(std::io::stderr())
+                .status()
+                .expect("git");
+            if !made.success() {
+                eprintln!("daft (fake): git worktree add failed");
+                std::process::exit(1);
+            }
+        }
+        "dir" => std::fs::create_dir_all(print).expect("a directory"),
+        "file" => {
+            if let Some(parent) = Path::new(print).parent() {
+                std::fs::create_dir_all(parent).expect("its directory");
+            }
+            std::fs::write(print, "not a directory\n").expect("a file");
+        }
+        _ => {}
+    }
+    eprintln!("daft (fake): forked {print}");
+    println!("{print}");
+    std::process::exit(plan["exit"].as_i64().unwrap_or(0) as i32);
+}
+
 fn main() {
     let exe = std::env::current_exe().expect("current_exe");
     let flavor = exe.file_name().unwrap().to_string_lossy().to_string();
@@ -170,6 +242,9 @@ fn main() {
     }
     if flavor == "ccusage" {
         return fake_ccusage(&exe, &argv);
+    }
+    if flavor == "daft" {
+        return fake_daft(&exe, &argv);
     }
 
     if argv.iter().any(|arg| arg == "--version") {
@@ -228,8 +303,41 @@ fn main() {
             .expect("sleep");
         eprintln!("left child {}", child.id());
     }
+    if let Some(name) = directive("leak") {
+        // A child left in the callee's OWN process group (no `process_group`),
+        // stdio detached so it does not hold the supervisor's pipes open. It
+        // waits, then writes `name` in the working directory: a writer that
+        // tries to touch the tree after the callee is gone. The supervisor
+        // kills the group when the run ends, so it never gets to write.
+        use std::process::Stdio;
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 1; printf leaked > '{name}'"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("leak");
+        eprintln!("left a child in the group: {}", child.id());
+    }
     if let Some(name) = directive("write") {
         std::fs::write(&name, "written by the callee\n").expect("write in cwd");
+    }
+    for (file, text) in brief.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("FAKE:")?
+            .trim()
+            .strip_prefix("append=")?
+            .split_once("::")
+    }) {
+        let text = text.replace("\\n", "\n").replace("\\t", "\t");
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .expect("append in cwd");
+        out.write_all(text.as_bytes()).expect("append");
     }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));

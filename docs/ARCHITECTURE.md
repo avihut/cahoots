@@ -222,11 +222,21 @@ binary named `agy` may be the Antigravity IDE launcher, not the agent CLI.
 kind whose role is `implement`, selects the same writer.
 The client decides and checks (`placement::decide`: a writer without `--fork`
 is refused; `--in-place` needs `limits.allow_in_place`); the detached
-supervisor does the cutting (`placement::cut`), because in a daft repository
-a new worktree runs the repo's setup hooks and that can outlast a caller's
-tool call. The run reports `worktree` and `changes`; bringing the change over
-is the caller's job, after reading it. A worktree cahoots cut itself is
-removed when its run ages out; one daft cut is daft's to remove.
+supervisor does the cutting (`placement::cut`), because a checkout of a large
+repository can outlast a caller's tool call. The cut runs none of the
+repository's hooks: daft gets `--skip-hooks all`, and every git that cuts,
+reads or removes a worktree — and the one daft starts — gets an empty hooks
+directory of cahoots' own and no fsmonitor, so the worktree comes up without
+the repository's setup and the caller runs that there. The path daft prints is checked before
+a writer runs in it (`placement::unfit`), and the worktree's git directory is
+read once, at the cut, and recorded (`gitdir`). The run reports `worktree` and
+`changes`, a `git status` read against that recorded git directory — or, when
+the status cannot be read, `changes: null` and `changes_error`, which says
+why. In place, the supervisor records the git configuration status would
+read (`git config --list --show-origin`) before the writer starts, in the run
+directory, and status runs afterwards only if it is unchanged. Bringing the change over is the caller's job, after reading it. A
+worktree cahoots cut itself is removed once the last run on record that
+works in it ages out; one daft cut is daft's to remove.
 
 ## Exit codes (M0)
 

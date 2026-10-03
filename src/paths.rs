@@ -22,14 +22,16 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// A `git` planted in the working directory or its repository is refused
+    /// here, so every verb that asks where it is refuses it.
     pub fn around(cwd: &Path) -> Res<Workspace> {
         let cwd = fs::canonicalize(cwd).map_err(|error| {
             Fail::internal(format!("cannot resolve the working directory: {error}"))
         })?;
-        let roots = spawn::git_roots(&cwd);
+        let roots = spawn::git_roots(&cwd, &[&cwd])?;
         Ok(Workspace {
-            toplevel: roots.as_ref().map(|(top, _)| canonical(top)),
-            common_dir: roots.as_ref().map(|(_, common)| canonical(common)),
+            toplevel: roots.as_ref().map(|(top, _)| top.clone()),
+            common_dir: roots.map(|(_, common)| common),
             cwd,
         })
     }
@@ -106,7 +108,7 @@ pub fn run_dir(requested: Option<&Path>, workspace: &Workspace) -> Res<PathBuf> 
     if resolved.starts_with(&workspace.cwd) {
         return Ok(resolved);
     }
-    let theirs = spawn::git_roots(&resolved).map(|(_, common)| canonical(&common));
+    let theirs = spawn::git_roots(&resolved, &workspace.roots())?.map(|(_, common)| common);
     match (&workspace.common_dir, theirs) {
         (Some(ours), Some(theirs)) if *ours == theirs => Ok(resolved),
         _ => Err(Fail::policy(format!(

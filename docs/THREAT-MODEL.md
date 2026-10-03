@@ -75,7 +75,8 @@ session inherits its old sandbox, so the mode is restated as an exactly-shaped
 `-c sandbox_mode="…"` that `validate` requires. The session id it puts on the
 command line came out of a callee's output stream, so it is held to the shape
 of an id first. A run is resumed only from the workspace it was started in,
-and never by the harness that was its target.
+and never by the harness that was its target, and a writer whose worktree
+was never cut is not resumed: it would start in the caller's own tree.
 
 **Paths.** A brief is stdin, or a regular UTF-8 file, size-capped, under the
 working directory, the git toplevel or a system temp dir — so `cahoots run
@@ -115,9 +116,12 @@ the writer sandbox — and cahoots says so rather than pretending otherwise.
 `mise run smoke` tries to cross each fence with the real CLIs, under your
 configuration.
 
-**Binaries** — the harness, the meter, `git`, `daft` — resolve to canonical
-absolute paths; a path inside the workspace, or group- or world-writable, is
-refused.
+**Binaries** — the harness, the meter, `git`, `daft`, `ps` — resolve to
+canonical absolute paths; one inside the workspace (the caller's working
+directory and repository, the directory a run works in, and the worktree cut
+for it), or group- or world-writable, is refused. `git`, `daft`, `ps`, and a
+harness asked its version, look things up on a PATH without the workspace's
+directories in it, so `daft` cannot find a `git` that cahoots refused.
 
 **The usage meter decides admission, so the caller must not reach it.** It
 is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
@@ -178,6 +182,23 @@ outside every workspace. The caller is handed the path and a `git status`
 summary; nothing lands in its tree until it brings it over. A change another
 agent made is a proposal, and the skill says so.
 
+**No repository hooks.** Cutting a worktree runs no command the repository
+defines. A repository's hooks are content an agent can write — `daft.yml` is
+a tracked file, and `core.hooksPath` may point into the tree — and the cut
+runs outside every sandbox, on an agent's verb. So `daft` runs with
+`--skip-hooks all`, and every `git` that cuts, reads or removes a worktree —
+and the one `daft` starts — is given an empty hooks directory of cahoots' own
+and `core.fsmonitor=false`, as configuration above every config file.
+(cahoots' other `git` calls only ask `rev-parse` where a repository is, which
+runs neither.) The worktree therefore comes up without the repository's
+setup; the caller runs it there, after reading the change. The path `daft`
+prints is used only if it is a directory at the top of a worktree of the same
+repository, not the tree it was cut from or inside it, not inside cahoots'
+own directories (its `worktrees` aside), and a worktree the cut made — never
+one that was there before, the caller's own among them; otherwise the run
+fails before the writer starts. A fork that was never cut cannot be resumed —
+it would start in the caller's own tree.
+
 **How far.** Each harness's own fence, proven on the command line and checked
 by `validate` against the ROLE — a reader can never be handed a writer's
 command line, whatever a builder does:
@@ -186,6 +207,10 @@ command line, whatever a builder does:
 |---|---|---|
 | Codex | `--sandbox read-only` | `--sandbox workspace-write`: writes under its working directory **and the temp directories** (`/tmp`, `$TMPDIR` — Codex's design, which build tools rely on), nowhere else; no network; Codex's repository check stays on |
 | Claude Code | `--tools Read,Grep,Glob` · `dontAsk` | `--tools Read,Grep,Glob,Edit,Write` · `acceptEdits`: Claude Code confines edits to the working directory; **no Bash**, because without a sandbox a shell writes anywhere |
+
+`validate` also refuses each harness's own worktree flag (Claude Code's
+`-w`/`--worktree`, Codex's `--worktree`): a callee never cuts a tree of its
+own, with its own hooks and outside these checks.
 
 `mise run smoke` checks both fences against the real CLIs: each writer is
 asked to create a file in its worktree (it must) and one in the user's home
@@ -205,7 +230,30 @@ nor removes it.
 **What a writer can still do:** anything inside its worktree, and in the temp
 directories under Codex. That is why the caller is told to READ a change
 before running anything in it. A writer cannot commit to the caller's branch,
-and cahoots never merges for anyone.
+and cahoots never merges for anyone. `changes` is read with `git status`
+against the git directory recorded when the worktree was cut, never the one
+the worktree's `.git` names now; and always with `--ignore-submodules=all`,
+so it never descends into a submodule, whose own git directory and config —
+where a writer could name a filter or an fsmonitor command — this does not
+see. A status that fails says so (`changes_error`), never "no changes". In
+place, where the writer had the caller's own tree and perhaps its `.git`,
+`git status` runs only if the git configuration it would read — every scope
+and every included file, as git itself resolves them — is byte for byte what
+it was before the writer started; otherwise `changes_error` says the
+configuration changed, and nothing runs. A resumed in-place run is held to
+the configuration the original run recorded, never a fresh reading, so a
+first writer cannot set the baseline its own resume is judged against. And
+when a run ends — a normal exit, or an error inside the supervisor,
+included — the supervisor kills the callee's whole process group before the
+run is marked terminal, so no process it left behind can still be writing the
+tree, or its `.git/config`, while `changes` is read. A process that left the group (`setsid`, a double fork) is beyond
+that reach, and so is a change `changes` is told to ignore in the submodule
+or outside the configuration it snapshots; the caller is told to read a
+change before trusting it for exactly these reasons. A worktree is removed
+only when no run on record still works in it. One cahoots cut whose git
+directory then fails the pin is refused before the writer starts and left
+where it is: no run on record points at it, so the refusal names its path,
+for a person to remove.
 
 ## Learning is an injection channel
 

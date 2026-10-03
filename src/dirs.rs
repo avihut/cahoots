@@ -90,6 +90,12 @@ impl Dirs {
         self.state.join("slots")
     }
 
+    /// The empty directory every `git` cahoots starts is given as its hooks
+    /// directory, so that none of a repository's hooks runs.
+    pub fn no_hooks(&self) -> PathBuf {
+        self.state.join("no-hooks")
+    }
+
     /// A workspace must never contain cahoots' own directories: a repository
     /// could then ship a config, or a run record, to the tool about to run on
     /// it. Skipped for a dev build's overrides, which are temp dirs by design.

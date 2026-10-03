@@ -112,13 +112,62 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
             )
         })?;
 
-    // A writer's worktree is cut HERE, detached from the caller: in a daft
-    // repository that runs the repo's setup hooks, which can outlast a
-    // caller's tool call.
-    if record.placement == Placement::Fork && record.resumed_from.is_none() {
+    // A writer's worktree is cut HERE, detached from the caller: a checkout of
+    // a large repository can outlast a caller's tool call. A resumed writer
+    // goes back into the worktree it had — and one whose fork was never cut
+    // has none: its `cwd` is still the caller's own tree.
+    if record.placement == Placement::Fork {
         let base = record.base.clone().unwrap_or_else(|| record.cwd.clone());
-        record.cwd = placement::cut(dirs, &base, &record.id)?;
-        dir.save(record)?;
+        if record.resumed_from.is_none() {
+            let (worktree, gitdir) = placement::cut(
+                dirs,
+                &base,
+                &record.id,
+                &record.tool_roots(),
+                Duration::from_secs(record.timeout_secs),
+            )?;
+            record.cwd = worktree;
+            record.gitdir = Some(gitdir);
+            dir.save(record)?;
+        } else if base == record.cwd {
+            return Err(Fail::policy(format!(
+                "run {} has no worktree of its own to go back into",
+                record.id
+            )));
+        }
+    }
+
+    // In place, the writer gets the caller's own tree, `.git` and all. What
+    // git status will read once it is done is recorded now, before it starts,
+    // and status runs afterwards only if that is unchanged
+    // (`placement::changes_in_place`). A reading that fails records nothing,
+    // and then status does not run at all.
+    if record.placement == Placement::InPlace {
+        let recorded = match &record.resumed_from {
+            // A resume is held to the configuration the ORIGINAL run was
+            // recorded against, never a fresh reading of its own: a first
+            // writer that named a filter in the config would otherwise have
+            // set the baseline its resume is compared to, and the resume
+            // would run that filter. The snapshot is copied forward from the
+            // run this one continues — itself a copy, back to the first run's
+            // reading, taken before any writer had touched the tree.
+            Some(original) => RunDir::open(dirs, original)
+                .ok()
+                .and_then(|from| std::fs::read(from.git_config_path()).ok())
+                .ok_or_else(|| {
+                    format!("the git configuration recorded for run {original} is gone")
+                }),
+            None => placement::config_listing(dirs, &record.cwd, &record.tool_roots()),
+        };
+        match recorded {
+            Ok(listing) => write_private(&dir.git_config_path(), &listing)?,
+            Err(why) => {
+                let _ = writeln!(
+                    dir.log(),
+                    "[supervisor] the git configuration was not recorded: {why}"
+                );
+            }
+        }
     }
 
     let spec = RunSpec {
@@ -141,10 +190,21 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     })?;
 
     let pid = child.id() as i32;
+    // From here the callee's process group is killed on EVERY way out of
+    // carry — a normal exit, and any error after the spawn (the save below,
+    // the event log, a session save) — before the run is published terminal.
+    // `changes` (the in-place config comparison, then `git status`) runs in
+    // the reader that reports a terminal run, and a resume waits for one too;
+    // so nothing this run left in its group can still be writing the tree, or
+    // its `.git/config`, in that window. A process that left the group
+    // (setsid, a double fork) is out of reach; that residual is in
+    // docs/THREAT-MODEL.md.
+    let _group = GroupCleanup(pid);
     record.state = State::Running;
     record.started_at = Some(now());
     record.callee_pid = Some(pid);
-    record.callee_started = spawn::process_started(pid);
+    let started = spawn::process_started(pid, &record.tool_roots());
+    record.callee_started = started;
     dir.save(record)?;
 
     let watchdog = Watchdog {
@@ -379,6 +439,21 @@ fn read_lines<R: Read + Send + 'static>(
     })
 }
 
+/// Kills a run's process group when it drops: once the callee is spawned,
+/// every path out of `carry` — a normal exit, and any error after the spawn —
+/// passes through this, so no process the run left in its group outlives the
+/// run into the window where a reader reads `changes` or a resume starts. The
+/// kill itself is `spawn`'s (hard rule 3). The group leader may already be
+/// gone; its pid is still the group's while any member lives, and `killpg`
+/// reaches them.
+struct GroupCleanup(i32);
+
+impl Drop for GroupCleanup {
+    fn drop(&mut self) {
+        spawn::signal_group(self.0, Signal::SIGKILL);
+    }
+}
+
 /// SIGINT → wait → SIGTERM → wait → SIGKILL, to the callee's process group
 /// AND to the descendants snapshotted when the ladder started: Codex puts its
 /// tool commands in groups of their own, and a graceful interrupt is the only
@@ -396,7 +471,7 @@ impl Ladder {
     fn start(pgid: i32, record: &RunRecord) -> Ladder {
         Ladder {
             pgid,
-            descendants: spawn::descendants(pgid),
+            descendants: spawn::descendants(pgid, &record.tool_roots()),
             rung: 0,
             next: Instant::now(),
             int_grace: Duration::from_secs(record.int_grace_secs),
