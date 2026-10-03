@@ -115,7 +115,9 @@ without a prompt. At `150f6b9`, this is what it does.
   one (`src/harness/codex.rs`) refuses `--worktree`, `-C` and `--cd`.
 - **The daft path has no test.**
 
-**#28 fixes all of these, before anything is built on top of them.**
+**#28 fixes all of these but the first, before anything is built on top of
+them.** The first, a repository choosing its own tool, is #32's: it makes
+the tool a person's setting.
 
 - Hooks are off on both paths. git gets an empty `core.hooksPath` directory
   of cahoots' own, and daft gets `--skip-hooks all`.
@@ -225,7 +227,10 @@ it. #28 makes the Claude validator refuse `-w`, as the Codex one already
 refuses `--worktree`.
 
 **Open:** the names. Is it a "provider" or a "forker", and is the table
-`[fork]` or `[worktrees]`? #32 settles this.
+`[fork]` or `[worktrees]`? #32 settles this. Also open: what happens when
+daft is chosen and the repository has a `daft.yml`, but no `daft` resolves.
+Today `cut` falls back to git without saying so, and neither ticket says
+what replaces that.
 
 ### Picker strategies — #41
 
@@ -317,8 +322,8 @@ kind has its own best candidate.
 
 - **`[kinds.<name>]` in config.toml** holds a description in the person's
   words, a role, and an ordered list of candidates (#33). The role sets the
-  fence. The list may hold several efforts of one model, for example
-  `gpt-6-astra` at `high` and at `medium`.
+  fence. The list may hold several efforts of one model, for example one
+  model at `high` and the same model at `medium`.
 - **`--kind <name>` on `pick` and `run`.** The value names a list a person
   wrote. An agent still cannot name a model or an effort, and an unknown
   kind is refused. It is an agent-tier flag, so #33 changes the threat model
@@ -498,17 +503,19 @@ The words used here:
 **Outside graders and systems** come in through #44, #45 and #46, as
 described under the seams.
 
-**Every `evals` verb is a human verb.** It refuses to run without a
-terminal on stdin (`docs/THREAT-MODEL.md`, The boundary), and it is never
-added to the agent tier. When a person picks between the two results of a
+**The `evals` verbs are meant to be human verbs.** #38 says so for `add`,
+and #39 for `run`. The intent is the same for the rest: `list`, `remove`,
+`grade`, `export` and `import`. A human verb refuses to run without a terminal on
+stdin (`docs/THREAT-MODEL.md`, The boundary), and none of these verbs is
+meant for the agent tier. When a person picks between the two results of a
 pair at a terminal, that is a question on the Clack rail. Like every
 question, it also has a flag that answers it (`AGENTS.md`, Talking to a
 person).
 
 ## Changes to the threat model ahead
 
-This document changes no rule. Each of these tickets changes
-`docs/THREAT-MODEL.md` in its own PR:
+This document changes no rule. These tickets name a change to
+`docs/THREAT-MODEL.md`, which lands in their own PRs:
 
 | Ticket | What changes |
 |---|---|
@@ -518,6 +525,10 @@ This document changes no rule. Each of these tickets changes
 | #33 | the agent tier gains `--kind`, which selects among lists a person wrote |
 | #35 | an exploration picks only among the person's listed candidates |
 | #41 | a strategy returns a permutation of the listed candidates, and nothing else |
+
+Two more touch the boundary without naming the threat model: #44 runs a
+pinned outside binary on the explicit path, and #48 adds a new way to launch
+a target. Each says how it changes the threat model in its own PR.
 
 ## The build order
 
