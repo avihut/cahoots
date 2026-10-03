@@ -287,6 +287,9 @@ fn doctor_warnings_do_not_fail_or_launch_runs() {
 #[test]
 fn doctor_evidence_warning_has_the_same_exit_when_piped() {
     let world = World::new();
+    // A terminal of its own has only the world's bin on PATH: a git there,
+    // as most machines have one, keeps doctor's `fork` check passing.
+    world.git_on_path();
     world.configure(CONFIG);
     let person = world.as_a_person(&["doctor"]).finish();
     assert_eq!(person.code, 0, "{}", person.text());

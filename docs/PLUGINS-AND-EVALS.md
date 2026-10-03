@@ -184,7 +184,7 @@ evidence.
 
 | Seam | What varies | Chosen by | Today | Tickets |
 |---|---|---|---|---|
-| Worktree providers | how a writer's worktree is cut | a setting | `placement::cut`, hard-wired | #28, #32, #47 |
+| Worktree providers | how a writer's worktree is cut | a setting | git, or daft by `fork.provider` | #28, #32, #47 |
 | Picker strategies | the order candidates are tried in | a setting, per role or kind | the person's order, plus at most one learned swap | #41 |
 | How a target is driven | a headless subprocess, or a pane | a setting (pinned) | headless only | #48 |
 | Kinds of task | the categories, and their candidate lists | the person's config | roles only | #33, #34, #36 |
@@ -226,11 +226,16 @@ to the threat model and a smoke check of its own. Nothing on the board does
 it. #28 makes the Claude validator refuse `-w`, as the Codex one already
 refuses `--worktree`.
 
-**Open:** the names. Is it a "provider" or a "forker", and is the table
-`[fork]` or `[worktrees]`? #32 settles this. Also open: what happens when
-daft is chosen and the repository has a `daft.yml`, but no `daft` resolves.
-Today `cut` falls back to git without saying so, and neither ticket says
-what replaces that.
+**Settled in #32.** It is a provider, set in a `[fork]` table:
+`fork.provider`, `fork.daft.binary` and `fork.daft.hooks`. `worktree_owner`
+is `"cahoots"` for a worktree git cut, `"daft"` for one daft cut, and null
+where nothing was cut. A chosen daft that is not pinned, not there, or not
+fit fails the run, with 34 (or 33 when the binary policy refuses it); it
+never falls back to git. daft runs only from the pinned path, never from a
+PATH lookup. With `fork.daft.hooks` on, a repository whose own git
+configuration sets a `daft.hooks` key is refused (33). Every cut also turns
+off the filters the configuration defines, and runs in a process group of
+its own.
 
 ### Picker strategies — #41
 

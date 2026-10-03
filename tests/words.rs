@@ -292,6 +292,7 @@ fn line<'a>(text: &'a str, start: &str) -> &'a str {
 #[test]
 fn doctor_marks_every_check_and_ends_with_the_rules_to_paste() {
     let world = World::new();
+    world.git_on_path();
     let after = world.as_a_person(&["doctor"]).finish();
     assert_eq!(after.code, 0, "{}", after.text());
     let text = after.text();
@@ -331,6 +332,32 @@ fn doctor_marks_every_check_and_ends_with_the_rules_to_paste() {
         text.ends_with("prefix_rule(pattern=[\"cahoots\", \"review\"], decision=\"allow\")\n"),
         "the rules end it, flush left:\n{text}"
     );
+    no_json(&after);
+}
+
+#[test]
+fn doctor_without_a_git_fails_and_says_why_in_plain_words() {
+    // Only the world's own bin on PATH, and no git in it.
+    let world = World::new();
+    let after = world.as_a_person(&["doctor"]).finish();
+    assert_eq!(after.code, 34, "{}", after.text());
+    let text = after.text();
+    assert!(line(&text, "■  fork ").contains("no git on PATH"), "{text}");
+    // However the rail wraps it.
+    let flat = text
+        .split_whitespace()
+        .filter(|word| *word != "│")
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains(
+            "no git on PATH — cahoots cannot see a repository without one, so --fork is \
+             refused until git is there"
+        ),
+        "{text}"
+    );
+    let last = line(&text, "└  ");
+    assert!(last.ends_with(", 1 failed"), "{last:?}");
     no_json(&after);
 }
 
@@ -519,6 +546,7 @@ fn doctor_and_report_keep_the_envelope_when_stdin_is_not_a_terminal() {
     // A terminal on stdout alone proves nothing: an agent may run a
     // command with one.
     let world = World::new();
+    world.git_on_path();
     for args in [vec!["doctor"], vec!["report"]] {
         let after = world.with_stdin_elsewhere(&args).finish();
         assert_eq!(after.code, 0, "{args:?}: {}", after.text());

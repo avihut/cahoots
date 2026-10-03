@@ -38,6 +38,9 @@ pub struct World {
     /// config.toml is written from both.
     enabled: RefCell<Vec<String>>,
     extra: RefCell<String>,
+    /// What cuts a writer's worktree: dotted `fork.*` keys, written before
+    /// `extra` so that neither a `configure` nor a table in it can take them.
+    fork: RefCell<String>,
     /// Directories put before the inherited PATH, first one first: `daft`
     /// puts `bin` there, `prefix_path` anything else.
     path_prefix: RefCell<Vec<PathBuf>>,
@@ -125,6 +128,7 @@ impl World {
             work: base.join("work"),
             enabled: RefCell::new(Vec::new()),
             extra: RefCell::new(String::new()),
+            fork: RefCell::new(String::new()),
             path_prefix: RefCell::new(Vec::new()),
             _root: root,
         };
@@ -172,10 +176,13 @@ impl World {
     }
 
     /// Installs a fake `daft` beside the harnesses, writes its `plan` (see the
-    /// fake), puts `bin` first on PATH and opts the repository into daft with
-    /// a `daft.yml`. All four together, always: a `daft.yml` with the real
-    /// daft first on PATH would have the developer's daft cut — and catalog —
-    /// this world's repository. Nothing else writes a `daft.yml`.
+    /// fake), chooses it in the config (`fork.provider = "daft"` and
+    /// `fork.daft.binary` pinned to it), puts `bin` first on PATH and opts the
+    /// repository into daft with a `daft.yml`. All of it together, always: a
+    /// `daft.yml` with the real daft chosen would have the developer's daft
+    /// cut — and catalog — this world's repository. Nothing else writes a
+    /// `daft.yml`. On PATH too, so a test can show that what runs is the
+    /// pinned daft, and never one PATH finds.
     pub fn daft(&self, plan: Value) -> PathBuf {
         let path = self.bin.join("daft");
         fake_at(&path);
@@ -184,15 +191,45 @@ impl World {
             self.path_prefix.borrow_mut().push(self.bin.clone());
         }
         fs::write(self.work.join("daft.yml"), "hooks: {}\n").unwrap();
+        self.fork(&format!(
+            "fork.provider = \"daft\"\nfork.daft.binary = {:?}",
+            path
+        ));
         path
     }
 
-    /// Every call the fake daft took, as it logged them.
+    /// Replaces what cuts a writer's worktree: dotted `fork.*` keys only —
+    /// a `[fork.daft]` table would be refused after them.
+    pub fn fork(&self, keys: &str) {
+        *self.fork.borrow_mut() = keys.to_string();
+        self.write_config();
+    }
+
+    /// Every call the fake daft took, as it logged them (`--version` aside).
     pub fn daft_calls(&self) -> Vec<Value> {
         self.calls("daft.calls")
             .iter()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    /// Every time the fake daft was asked its version: its PATH and where it
+    /// ran.
+    pub fn daft_versions(&self) -> Vec<Value> {
+        self.calls("daft.versions")
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Puts the suite's own `git` in `bin`, which is all the PATH a command at
+    /// a terminal of its own gets (`at_terminal`): most machines have one.
+    pub fn git_on_path(&self) {
+        let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file() && !git.starts_with(&self.root))
+            .expect("git on PATH");
+        std::os::unix::fs::symlink(git, self.bin.join("git")).unwrap();
     }
 
     /// Puts `dir` first on PATH for every later command.
@@ -341,8 +378,8 @@ impl World {
     }
 
     /// Writes config.toml: the fake binaries, the targets `enable` named, a
-    /// fast kill ladder, then `extra` — dotted keys (`harness.codex.cap = 80`)
-    /// first, new tables after.
+    /// fast kill ladder, what `fork` chose, then `extra` — dotted keys
+    /// (`harness.codex.cap = 80`) first, new tables after.
     pub fn configure(&self, extra: &str) {
         *self.extra.borrow_mut() = extra.to_string();
         self.write_config();
@@ -362,7 +399,8 @@ impl World {
             })
             .collect();
         let text = format!(
-            "schema = 1\n{harness}limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n",
+            "schema = 1\n{harness}limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n{}\n",
+            self.fork.borrow(),
             self.extra.borrow(),
         );
         fs::write(self.config.join("config.toml"), text).unwrap();

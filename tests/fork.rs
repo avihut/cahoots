@@ -117,9 +117,19 @@ fn a_daft_fork_runs_no_hooks_and_is_used() {
                 .expect("a base commit")
         ])
     );
-    // The git daft runs is told where its hooks are: nowhere.
+    // The git daft runs is told where its hooks are: nowhere. Every setting
+    // after the two turns off a filter the configuration names, which on a
+    // developer's machine may be their own (Git LFS's, say).
     let config = &calls[0]["git_config"];
-    assert_eq!(config["GIT_CONFIG_COUNT"], "2", "{config}");
+    let count: usize = config["GIT_CONFIG_COUNT"]
+        .as_str()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("{config}"));
+    assert!(count >= 2, "{config}");
+    for n in 2..count {
+        let key = config[format!("GIT_CONFIG_KEY_{n}")].as_str().unwrap();
+        assert!(key.starts_with("filter."), "{key}: {config}");
+    }
     assert_eq!(config["GIT_CONFIG_KEY_0"], "core.hooksPath");
     let hooks = Path::new(config["GIT_CONFIG_VALUE_0"].as_str().unwrap());
     assert!(hooks.starts_with(&world.state), "{}", hooks.display());
@@ -564,15 +574,20 @@ fn a_git_fork_runs_no_hooks() {
 #[test]
 fn a_daft_inside_the_workspace_is_not_run() {
     let world = World::new();
-    // The fake is on PATH too, behind the planted one: if the planted one
-    // were let through, it — not the real daft — would be what ran.
+    // The fake is on PATH too, behind the planted one, which is the daft
+    // config.toml names: if it were let through, it — not the fake — would
+    // be what ran.
     world.daft(json!({"make": "worktree", "print": world.root.join("forks/f")}));
     let marker = world.root.join("planted-daft-ran");
+    let planted = world.work.join("bin/daft");
     world.script_at(
-        &world.work.join("bin/daft"),
+        &planted,
         &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
     world.prefix_path(&world.work.join("bin"));
+    world.fork(&format!(
+        "fork.provider = \"daft\"\nfork.daft.binary = {planted:?}"
+    ));
     let answer = fork(&world, &[]);
     assert_eq!(answer.code, 33, "{}", answer.json);
     assert!(
@@ -787,4 +802,468 @@ fn daft_gets_no_workspace_directory_on_its_path() {
             );
         }
     }
+}
+
+// ── No filter runs during the cut ───────────────────────────────────────────
+//
+// A filter driver the configuration names, for a path the attributes give
+// it, would run during the cut's checkout, outside every sandbox — and no
+// commit is needed to plant one: `.git/config` and `.git/info/attributes`
+// both apply to a new worktree. Each case first shows the route is live: a
+// worktree cut by hand runs the filter.
+
+/// Where a planted filter leaves its mark, the first time it runs.
+fn filter_mark(world: &World) -> PathBuf {
+    world.root.join("filter-ran")
+}
+
+/// A filter command that marks that it ran, and smudges what it is given.
+fn filter_script(world: &World) -> PathBuf {
+    let script = world.root.join("filter");
+    world.script_at(
+        &script,
+        &format!(
+            "#!/bin/sh\n[ -e '{mark}' ] || touch '{mark}'\necho smudged\n",
+            mark = filter_mark(world).display()
+        ),
+    );
+    script
+}
+
+/// A file a filter converts on checkout: the empty first commit has none.
+fn commit_data(world: &World) {
+    fs::write(world.work.join("data.txt"), "stored\n").unwrap();
+    world.git(&["add", "data.txt"]);
+    world.git(&["commit", "-q", "-m", "chore: data"]);
+}
+
+/// `* filter=<name>` for every path, in `.git/info/attributes`: no commit.
+fn attribute_everything(world: &World, name: &str) {
+    let info = world.work.join(".git/info");
+    fs::create_dir_all(&info).unwrap();
+    let mut attributes = fs::read_to_string(info.join("attributes")).unwrap_or_default();
+    attributes.push_str(&format!("* filter={name}\n"));
+    fs::write(info.join("attributes"), attributes).unwrap();
+}
+
+/// Adds `bytes` to the end of the file at `path`, as they are.
+fn append_bytes(path: &Path, bytes: &[u8]) {
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(bytes)
+        .unwrap();
+}
+
+/// The control: a worktree cut by hand runs the planted filter. Its exit is
+/// not asked — a process filter that speaks no protocol fails the checkout,
+/// after it ran.
+fn the_route_is_live(world: &World, case: &str) {
+    let _ = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            path_str(&world.root.join("control")),
+            "HEAD",
+        ])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        filter_mark(world).exists(),
+        "{case}: the control never ran the filter"
+    );
+    fs::remove_file(filter_mark(world)).unwrap();
+}
+
+/// Whether the planted filter ran before the writer did: during the cut.
+fn ran_before_the_writer(world: &World, worktree: &Path) -> bool {
+    let Ok(mark) = fs::metadata(filter_mark(world)) else {
+        return false;
+    };
+    let writer = fs::metadata(worktree.join("callee-ran.txt")).unwrap();
+    mark.modified().unwrap() <= writer.modified().unwrap()
+}
+
+#[test]
+fn a_git_cut_runs_no_filter_the_repository_planted() {
+    for case in [
+        "a smudge in .git/config, for every path in .git/info/attributes",
+        "a smudge in .git/config, for every path in a committed .gitattributes",
+        "a process in .git/config",
+        "a smudge in the worktree's own config",
+        "a smudge in an included file, under a mixed-case dotted name",
+        "a smudge under a name that is not UTF-8",
+    ] {
+        let world = World::new();
+        let script = filter_script(&world);
+        commit_data(&world);
+        let script = path_str(&script);
+        let mut name = "evil";
+        match case {
+            "a smudge in .git/config, for every path in .git/info/attributes" => {
+                world.git(&["config", "filter.evil.smudge", script]);
+                attribute_everything(&world, name);
+            }
+            "a smudge in .git/config, for every path in a committed .gitattributes" => {
+                fs::write(world.work.join(".gitattributes"), "* filter=evil\n").unwrap();
+                world.git(&["add", ".gitattributes"]);
+                world.git(&["commit", "-q", "-m", "chore: attributes"]);
+                world.git(&["config", "filter.evil.smudge", script]);
+            }
+            "a process in .git/config" => {
+                world.git(&["config", "filter.evil.process", script]);
+                attribute_everything(&world, name);
+            }
+            "a smudge in the worktree's own config" => {
+                world.git(&["config", "extensions.worktreeConfig", "true"]);
+                world.git(&["config", "--worktree", "filter.evil.smudge", script]);
+                world.git(&["config", "--worktree", "filter.evil.required", "true"]);
+                attribute_everything(&world, name);
+            }
+            "a smudge under a name that is not UTF-8" => {
+                // Not text: a name made into text would turn off another.
+                name = "not UTF-8";
+                append_bytes(
+                    &world.work.join(".git/config"),
+                    &[
+                        &b"[filter \"ev\xffil\"]\n\tsmudge = "[..],
+                        script.as_bytes(),
+                        b"\n\trequired = true\n",
+                    ]
+                    .concat(),
+                );
+                fs::create_dir_all(world.work.join(".git/info")).unwrap();
+                append_bytes(
+                    &world.work.join(".git/info/attributes"),
+                    b"* filter=ev\xffil\n",
+                );
+            }
+            _ => {
+                name = "Inc.Name";
+                let included = world.root.join("included.gitconfig");
+                fs::write(
+                    &included,
+                    format!("[filter \"Inc.Name\"]\n\tsmudge = {script}\n\trequired = true\n"),
+                )
+                .unwrap();
+                world.git(&["config", "include.path", path_str(&included)]);
+                attribute_everything(&world, name);
+            }
+        }
+        // Required: a filter that is turned off but still required fails
+        // the checkout.
+        if !case.contains("worktree's own") && name == "evil" {
+            world.git(&["config", "filter.evil.required", "true"]);
+        }
+        the_route_is_live(&world, case);
+
+        let answer = fork(&world, &[]);
+        assert_eq!(answer.code, 0, "{case}: {}", answer.json);
+        let worktree = PathBuf::from(answer.data()["worktree"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(worktree.join("data.txt")).unwrap(),
+            "stored\n",
+            "{case}: the file is not as git stores it"
+        );
+        if case == "a process in .git/config" {
+            // A process filter cleans too, and what reads the writer's
+            // change afterwards honours a clean filter (docs/THREAT-MODEL.md,
+            // Writers): only the cut is held here.
+            assert!(
+                !ran_before_the_writer(&world, &worktree),
+                "{case}: the filter ran during the cut"
+            );
+        } else {
+            assert!(
+                !filter_mark(&world).exists(),
+                "{case}: a planted filter ran"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_daft_cut_runs_no_filter_the_repository_planted() {
+    let world = World::new();
+    let script = filter_script(&world);
+    commit_data(&world);
+    world.git(&["config", "filter.evil.smudge", path_str(&script)]);
+    world.git(&["config", "filter.evil.required", "true"]);
+    attribute_everything(&world, "evil");
+    the_route_is_live(&world, "daft");
+
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "a planted filter ran");
+    assert_eq!(fs::read_to_string(f1.join("data.txt")).unwrap(), "stored\n");
+    // The git daft runs is told, above every config file, that the filter
+    // has no command and is not required.
+    let config = &world.daft_calls()[0]["git_config"];
+    let count: usize = config["GIT_CONFIG_COUNT"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let told: Vec<(String, String)> = (0..count)
+        .map(|n| {
+            (
+                config[format!("GIT_CONFIG_KEY_{n}")]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                config[format!("GIT_CONFIG_VALUE_{n}")]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(told[0].0, "core.hooksPath");
+    assert_eq!(told[1], ("core.fsmonitor".into(), "false".into()));
+    for (var, value) in [
+        ("smudge", ""),
+        ("clean", ""),
+        ("process", ""),
+        ("required", "false"),
+    ] {
+        let setting = (format!("filter.evil.{var}"), value.to_string());
+        assert!(told[2..].contains(&setting), "{setting:?} in {told:?}");
+    }
+}
+
+#[test]
+fn a_filter_that_appears_during_the_cut_fails_the_run() {
+    let world = World::new();
+    let script = filter_script(&world);
+    commit_data(&world);
+    let f1 = world.root.join("forks/f1");
+    // A process writing the repository's git configuration while daft cuts:
+    // the filter is named after the configuration was read.
+    world.daft(json!({"make": "worktree", "print": f1, "plant_filter": script}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    assert!(
+        answer.message().contains("gained a filter (planted)"),
+        "{}",
+        answer.json
+    );
+    assert!(
+        answer
+            .message()
+            .contains(&format!("{} is left for a person to remove", f1.display())),
+        "{}",
+        answer.json
+    );
+    assert!(answer.data()["worktree_owner"].is_null(), "{}", answer.json);
+    assert_never_ran(&world, &answer, &f1);
+    assert!(f1.is_dir(), "what was cut is left where it is");
+    // The residual, held visible: in that window the filter could run.
+    assert!(
+        filter_mark(&world).exists(),
+        "the planted filter never ran: this test shows nothing"
+    );
+}
+
+#[test]
+fn an_in_place_writer_cannot_plant_a_filter_for_the_next_cut() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    let script = filter_script(&world);
+    commit_data(&world);
+    // A writer let into the caller's own tree, `.git` and all, names a
+    // filter for every path of the repository's.
+    let brief = world.brief(&format!(
+        "FAKE: append=.git/config::[filter \"evil\"]\\n\\tsmudge = {}\\n\\trequired = true\\n\n\
+         FAKE: append=.git/info/attributes::* filter=evil\\n",
+        script.display()
+    ));
+    let planted = world.ask(&[
+        "run",
+        "--role",
+        "implement",
+        "--caller",
+        "claude",
+        "--in-place",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(planted.code, 0, "{}", planted.json);
+    the_route_is_live(&world, "in place");
+
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the planted filter ran");
+    let worktree = PathBuf::from(answer.data()["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("data.txt")).unwrap(),
+        "stored\n"
+    );
+}
+
+/// An include git reads for each worktree apart, naming a filter for a new
+/// linked worktree alone: in the tree the worktree is cut from, nothing
+/// names it. In the repository's own `.git/config`, where a test can put
+/// it, it stands in for one in a person's own config, which a test may not
+/// touch. The control shows the route is live on this machine's git.
+fn plant_a_filter_for_new_worktrees_alone(world: &World) {
+    let script = filter_script(world);
+    commit_data(world);
+    let included = world.root.join("per-worktree.gitconfig");
+    fs::write(
+        &included,
+        format!(
+            "[filter \"wt\"]\n\tsmudge = {}\n\trequired = true\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    world.git(&[
+        "config",
+        "includeIf.gitdir:**/worktrees/**.path",
+        path_str(&included),
+    ]);
+    attribute_everything(world, "wt");
+    let listed = std::process::Command::new("git")
+        .args(["config", "--list"])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("filter.wt"),
+        "the base's own reading names the filter: this test shows nothing"
+    );
+    the_route_is_live(world, "for new worktrees alone");
+}
+
+#[test]
+fn a_git_cut_turns_off_a_filter_only_the_new_worktree_names() {
+    // git cuts with no checkout, reads the configuration as git reads it in
+    // the new worktree, and checks out with what it names turned off.
+    let world = World::new();
+    plant_a_filter_for_new_worktrees_alone(&world);
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    let worktree = PathBuf::from(answer.data()["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("data.txt")).unwrap(),
+        "stored\n"
+    );
+    // Exit 0 also means #29's check held: it was checked out at the commit
+    // the run recorded.
+    assert!(
+        worktree.join("callee-ran.txt").is_file(),
+        "the writer ran there"
+    );
+}
+
+#[test]
+fn a_daft_cut_turns_off_a_filter_behind_a_condition_that_does_not_match_yet() {
+    // daft checks out as it cuts, so cahoots reads, before it runs, every
+    // file an include could reach, as if every condition held.
+    let world = World::new();
+    plant_a_filter_for_new_worktrees_alone(&world);
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    assert_eq!(fs::read_to_string(f1.join("data.txt")).unwrap(), "stored\n");
+    let told = &world.daft_calls()[0]["git_config"];
+    let keys: Vec<&str> = told
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name.starts_with("GIT_CONFIG_KEY_"))
+        .map(|(_, key)| key.as_str().unwrap())
+        .collect();
+    for var in ["smudge", "clean", "process", "required"] {
+        let key = format!("filter.wt.{var}");
+        assert!(keys.contains(&key.as_str()), "{key} in {keys:?}");
+    }
+}
+
+#[test]
+fn a_daft_cut_turns_off_a_filter_behind_a_condition_that_matches() {
+    // A condition that holds here and in the new worktree alike.
+    let world = World::new();
+    let script = filter_script(&world);
+    commit_data(&world);
+    let included = world.root.join("everywhere.gitconfig");
+    fs::write(
+        &included,
+        format!(
+            "[filter \"all\"]\n\tsmudge = {}\n\trequired = true\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    world.git(&["config", "includeIf.gitdir:**.path", path_str(&included)]);
+    attribute_everything(&world, "all");
+    let listed = std::process::Command::new("git")
+        .args(["config", "--list"])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("filter.all.smudge"),
+        "the condition does not hold here: this test shows nothing"
+    );
+    the_route_is_live(&world, "a condition that matches");
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    assert_eq!(fs::read_to_string(f1.join("data.txt")).unwrap(), "stored\n");
+}
+
+#[test]
+fn a_daft_cut_is_refused_where_an_include_cannot_be_read() {
+    // A file not read is a filter that might not be turned off: refused,
+    // never skipped, though git itself would skip a missing one.
+    let world = World::new();
+    let missing = world.root.join("missing.gitconfig");
+    world.git(&["config", "include.path", path_str(&missing)]);
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    let message = answer.message();
+    assert!(
+        message.starts_with(&format!(
+            "cannot cut a worktree: {} includes {}, which cannot be read (",
+            world.work.join(".git/config").display(),
+            missing.display()
+        )),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(
+            "— daft checks a new worktree out before cahoots can see what such an include names \
+             there, so every file an include could reach is read first"
+        ),
+        "{message}"
+    );
+    assert_never_ran(&world, &answer, &f1);
+    assert!(world.daft_calls().is_empty(), "daft ran");
+
+    // git cuts with no checkout and reads the configuration as git does in
+    // the new worktree, where git skips a missing include: it cuts.
+    world.fork("fork.provider = \"git\"");
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
 }

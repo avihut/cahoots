@@ -5,6 +5,8 @@
 //! the gaps their words, `envelope` makes the checks the one JSON envelope, and
 //! a person at a terminal reads the same checks in words (`cli::endings`).
 
+use std::path::Path;
+
 use serde::Serialize;
 use serde_json::json;
 
@@ -12,13 +14,17 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Res};
 use crate::harness;
+use crate::harness::Version;
 use crate::history::{self, Story};
 use crate::install::files::{Stale, StaleWhy};
 use crate::install::rules;
 use crate::meter::{Answer, Ask, Ccusage, Chosen, UsageMeter, detect, tokens};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
+use crate::paths::Workspace;
 use crate::pick;
+use crate::placement::provider::{self, ProviderId};
 use crate::registry::{Origin, Registry};
+use crate::spawn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -251,6 +257,8 @@ pub fn checks() -> Res<Diagnostics> {
         });
     }
 
+    checks.push(fork_check(&registry));
+
     let stale = crate::install::files::stale(&dirs, &registry.kinds);
     checks.push(if stale.is_empty() {
         check(
@@ -284,8 +292,112 @@ pub fn checks() -> Res<Diagnostics> {
     Ok(Diagnostics { checks, gaps })
 }
 
-/// The usage meter: is it there and usable, and what does it say about each
-/// enabled target?
+/// What cuts a writer's worktree, and whether it can: the provider a person
+/// chose, held to the same checks a cut makes, and — where git cuts in a
+/// repository that has a `daft.yml` — that daft could. Read around the
+/// working directory: the repository it is in, if any.
+fn fork_check(registry: &Registry) -> Check {
+    let fork = &registry.fork;
+    let cwd = std::env::current_dir().ok();
+    // A `git` planted in the workspace is refused here as everywhere, and
+    // never asked its version: that refusal is the check's answer.
+    let workspace = match cwd.as_deref().map(Workspace::around) {
+        Some(Err(fail)) if fail.exit == Exit::Policy => {
+            return check("fork", Status::Fail, fail.message);
+        }
+        Some(Ok(workspace)) => Some(workspace),
+        _ => None,
+    };
+    let roots: Vec<&Path> = match &workspace {
+        Some(workspace) => workspace.roots(),
+        None => cwd.as_deref().into_iter().collect(),
+    };
+    let daft_yml = workspace
+        .as_ref()
+        .and_then(|workspace| workspace.toplevel.as_ref())
+        .is_some_and(|top| top.join("daft.yml").is_file());
+    let tool = provider::provider(fork.provider);
+    let newer = |version: Version| {
+        if version >= tool.tested().1 {
+            " — newer than the versions cahoots was tested against"
+        } else {
+            ""
+        }
+    };
+    match fork.provider {
+        ProviderId::Git => {
+            // The provider's binary is missing: a failure, as for any provider.
+            // Without a git nothing is a repository either, so it is said so.
+            // A git that is there but refused — by the binary policy, or as
+            // too old to be held to never fetching lazily — says why itself.
+            if spawn::find_on_path("git", env::path_var().as_deref()).is_none() {
+                return check(
+                    "fork",
+                    Status::Fail,
+                    "no git on PATH — cahoots cannot see a repository without one, so --fork is \
+                     refused until git is there",
+                );
+            }
+            match provider::locate(ProviderId::Git, fork, &roots) {
+                Err(fail) => check("fork", Status::Fail, fail.message),
+                Ok((_, version)) if daft_yml => check(
+                    "fork",
+                    Status::Warn,
+                    format!(
+                        "git {version} cuts each writer's worktree, and this repository has a \
+                         daft.yml: choose daft with `cahoots settings` (fork.provider and \
+                         fork.daft.binary) to have daft cut them here{}",
+                        newer(version)
+                    ),
+                ),
+                Ok((_, version)) => check(
+                    "fork",
+                    if newer(version).is_empty() {
+                        Status::Ok
+                    } else {
+                        Status::Warn
+                    },
+                    format!(
+                        "git {version} cuts each writer's worktree (fork.provider = \"git\"){}",
+                        newer(version)
+                    ),
+                ),
+            }
+        }
+        ProviderId::Daft if fork.daft_binary.is_none() => check(
+            "fork",
+            Status::Fail,
+            "cahoots needs `daft`: none is chosen — fork.provider is \"daft\"; choose one with \
+             fork.daft.binary (`cahoots settings`)",
+        ),
+        ProviderId::Daft => match provider::locate(ProviderId::Daft, fork, &roots) {
+            Err(fail) => check("fork", Status::Fail, fail.message),
+            Ok((binary, version)) => {
+                let what = format!(
+                    "daft {version} ({}) cuts each writer's worktree where the repository has a \
+                     daft.yml, git elsewhere",
+                    binary.display()
+                );
+                let (status, hooks) = if fork.daft_hooks {
+                    (
+                        Status::Warn,
+                        "daft runs the repository's hooks in each new worktree, when daft trusts \
+                         the repository (fork.daft.hooks = on)",
+                    )
+                } else {
+                    (Status::Ok, "daft's hooks are off")
+                };
+                let status = if newer(version).is_empty() {
+                    status
+                } else {
+                    Status::Warn
+                };
+                check("fork", status, format!("{what}; {hooks}{}", newer(version)))
+            }
+        },
+    }
+}
+
 /// Doctor's words for what `install` would change, each path with why.
 fn stale_detail(stale: &[Stale]) -> String {
     let paths: Vec<String> = stale
@@ -302,6 +414,8 @@ fn stale_detail(stale: &[Stale]) -> String {
     format!("out of date — run `cahoots install`: {}", paths.join(", "))
 }
 
+/// The usage meter: is it there and usable, and what does it say about each
+/// enabled target?
 fn meter_checks(checks: &mut Vec<Check>, registry: &Registry, meter: &UsageMeter) {
     let name = format!("meter: {}", meter.id());
     let by = match registry.meters.usage_chosen_by {

@@ -248,7 +248,7 @@ says what changed: at a terminal, each setting's last save line, or
 | `❯  label` | the highlighted setting | cyan |
 | `• value` | set in config.toml | the value plain |
 | `value` | a default, or what cahoots found | dim |
-| a heading | a section: each harness, the usage meter, runs, review, roles | bold |
+| a heading | a section: each harness, the usage meter, runs, worktrees, review, roles | bold |
 | `↑` `↓` at the right edge | more of the list above, or below | dim |
 | `╭─ Section · Label ─╮` | the box that changes one setting: its help, the answer, the keys | gray edges |
 | `●  choice (hint)` / `○  choice` / `✓` | a choice: the highlighted one, the others, the one chosen now | green, dim, gray |

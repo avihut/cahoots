@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::exit::{Fail, Res};
 use crate::meter::{MeterId, Selection};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
+use crate::placement::provider::ProviderId;
 
 pub const SCHEMA: u32 = 1;
 
@@ -39,6 +40,30 @@ pub struct UserConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub explore: ExploreConfig,
+    #[serde(default)]
+    pub fork: ForkConfig,
+}
+
+/// `[fork]`: what cuts a writer's worktree. A person's choice, here and only
+/// here — never a flag on `run`, and never the repository's: a repository's
+/// content must not choose a tool that runs the repository's own commands.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkConfig {
+    /// `git` (the default) or `daft`, which cuts only where the repository
+    /// has a `daft.yml`, and git everywhere else.
+    pub provider: Option<ProviderId>,
+    pub daft: Option<DaftConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaftConfig {
+    /// Absolute path to `daft`. daft runs only from here, never from PATH.
+    pub binary: Option<PathBuf>,
+    /// Let daft run the repository's hooks in a new worktree. Off unless a
+    /// person turns it on.
+    pub hooks: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -373,6 +398,15 @@ impl UserConfig {
         if let Some(rate) = self.review.sample_rate {
             in_range("review.sample_rate", rate, &SAMPLE_RATE)?;
         }
+        if let Some(binary) = self
+            .fork
+            .daft
+            .as_ref()
+            .and_then(|daft| daft.binary.as_ref())
+            && !binary.is_absolute()
+        {
+            return Err(Fail::config("fork.daft.binary must be an absolute path"));
+        }
         let limits = &self.limits;
         let checks = [
             (
@@ -523,6 +557,43 @@ mod tests {
         );
         let unknown = UserConfig::parse("schema = 1\n[meter]\nuse = \"codexbar\"").unwrap_err();
         assert!(unknown.message.contains("codexbar"), "{}", unknown.message);
+    }
+
+    #[test]
+    fn the_provider_is_a_name_and_daft_a_path() {
+        let config = UserConfig::parse(
+            "schema = 1\nfork.provider = \"daft\"\nfork.daft.binary = \"/opt/homebrew/bin/daft\"\nfork.daft.hooks = true",
+        )
+        .unwrap();
+        assert_eq!(config.fork.provider, Some(ProviderId::Daft));
+        let daft = config.fork.daft.unwrap();
+        assert_eq!(
+            daft.binary.as_deref(),
+            Some(Path::new("/opt/homebrew/bin/daft"))
+        );
+        assert_eq!(daft.hooks, Some(true));
+        let unknown =
+            UserConfig::parse("schema = 1\n[fork]\nprovider = \"worktrunk\"").unwrap_err();
+        assert_eq!(unknown.exit, Exit::Config);
+        assert!(unknown.message.contains("worktrunk"), "{}", unknown.message);
+        let relative = UserConfig::parse("schema = 1\n[fork.daft]\nbinary = \"daft\"").unwrap_err();
+        assert_eq!(relative.exit, Exit::Config);
+        assert_eq!(
+            relative.message,
+            "fork.daft.binary must be an absolute path"
+        );
+        for text in [
+            "schema = 1\n[fork]\ncommand = \"daft start\"",
+            "schema = 1\n[fork.daft]\nargs = [\"-x\"]",
+            "schema = 1\n[fork.git]\nbinary = \"/usr/bin/git\"",
+            "schema = 1\n[fork.daft]\nhooks = \"yes\"",
+        ] {
+            assert_eq!(
+                UserConfig::parse(text).unwrap_err().exit,
+                Exit::Config,
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::model::{HarnessId, Role, TaskKindName};
 use crate::patch::{self, Commit};
 use crate::paths::{self, Workspace};
 use crate::pick;
+use crate::placement::provider::{self, ProviderId};
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{self, RunDir, RunRecord, State, now};
@@ -195,6 +196,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             base: (placement == Placement::Fork).then(|| run_dir.clone()),
             cwd: run_dir,
             gitdir: None,
+            worktree_provider: None,
             roots,
             base_commit,
             base_repo,
@@ -226,6 +228,7 @@ struct Launch {
     base: Option<PathBuf>,
     cwd: PathBuf,
     gitdir: Option<PathBuf>,
+    worktree_provider: Option<ProviderId>,
     /// The asking client's workspace and the run's directory (`RunRecord::roots`).
     roots: Vec<PathBuf>,
     base_commit: Option<Commit>,
@@ -262,6 +265,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         exploration: launch.exploration,
         base: launch.base,
         gitdir: launch.gitdir,
+        worktree_provider: launch.worktree_provider,
         roots: launch.roots,
         base_commit: launch.base_commit,
         patch: None,
@@ -443,6 +447,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             base: old.base,
             cwd: old.cwd,
             gitdir: old.gitdir,
+            worktree_provider: old.worktree_provider,
             roots,
             base_commit,
             base_repo,
@@ -602,9 +607,10 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
         },
         "resumable": record.progress.session_id.is_some(),
         "resumed_from": record.resumed_from,
-        // Neither says anything of the target, so a blind run shows both.
+        // None of these says anything of the target, so a blind run shows them.
         "base_commit": record.base_commit,
         "patch": record.patch,
+        "worktree_owner": worktree_owner(record),
         "notes": record.progress.notes,
         "gate_notes": record.admission.notes,
     });
@@ -615,6 +621,14 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
         data["exploration"] = json!(record.exploration);
     }
     data
+}
+
+/// Who removes a fork's worktree: `"cahoots"` for one git cut, `"daft"` for
+/// one daft cut, and `None` where nothing was cut for the run.
+fn worktree_owner(record: &RunRecord) -> Option<&'static str> {
+    record
+        .worktree_provider
+        .map(|id| provider::provider(id).owner().as_str())
 }
 
 /// A run as `run`, `wait`, `result` and `cancel` report it: the run's own exit
@@ -736,7 +750,7 @@ pub fn reconcile(dirs: &Dirs, invoker: &[&Path]) {
                 {
                     let mut roots = invoker.to_vec();
                     roots.extend(record.tool_roots());
-                    placement::discard(dirs, base, &record.cwd, &roots);
+                    placement::discard(dirs, base, &record.cwd, record.worktree_provider, &roots);
                 }
                 let _ = fs::remove_dir_all(&dir.path);
             }

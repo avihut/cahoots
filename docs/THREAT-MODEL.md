@@ -132,9 +132,16 @@ configuration.
 **Binaries** — the harness, the meter, `git`, `daft`, `ps` — resolve to
 canonical absolute paths; one inside the workspace (the caller's working
 directory and repository, the directory a run works in, and the worktree cut
-for it), or group- or world-writable, is refused. `git`, `daft`, `ps`, and a
-harness asked its version, look things up on a PATH without the workspace's
-directories in it, so `daft` cannot find a `git` that cahoots refused.
+for it), or group- or world-writable, is refused. `daft` runs only from the
+path a person chose (`fork.daft.binary`), never from a PATH lookup, and only
+once a person chose it (`fork.provider = "daft"`). A provider that cuts a
+worktree — `git` or `daft` — must identify itself by its `--version`, at a
+version cahoots was written against, before it cuts; that check runs from
+`/`. `git`, `daft`, `ps`, and a harness or a provider asked its version, look
+things up on a PATH without the workspace's directories in it, so `daft`
+cannot find a `git` that cahoots refused. `git`, `ps`, and a harness with no
+pinned binary still come from the caller's PATH, outside the workspace,
+until #61 pins them as `daft` is pinned here.
 
 **The usage meter decides admission, so the caller must not reach it.** It
 is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
@@ -195,11 +202,19 @@ WHERE, and how far?
 
 **Where.** Never the caller's own tree, unless a person set
 `limits.allow_in_place = true`. A writer gets a worktree of its own, cut from
-the caller's `HEAD` — by `daft start --fork` in a repository that opted into
-daft, otherwise a detached `git worktree` under cahoots' state directory,
-outside every workspace. The caller is handed the path and a `git status`
-summary; nothing lands in its tree until it brings it over. A change another
-agent made is a proposal, and the skill says so.
+the caller's `HEAD` by one of two providers — a closed set, chosen by a
+person in config.toml (`fork.provider`), never by a flag and never by the
+repository. **git**, the default, cuts a detached `git worktree` under
+cahoots' state directory, outside every workspace; cahoots removes it once
+no run on record works in it. **daft** cuts with `daft start --fork`, where
+daft's layout puts it, and only where the repository has a `daft.yml` at its
+top — git everywhere else; that worktree is daft's, and stays until a person
+removes it. A `daft.yml` only says where daft applies once a person chose
+it; it never turns daft on, and a chosen daft that is missing or unfit fails
+the run rather than falling back to git. The run records which provider cut
+its worktree and reports it as `worktree_owner`. The caller is handed the
+path and a `git status` summary; nothing lands in its tree until it brings
+it over. A change another agent made is a proposal, and the skill says so.
 
 **No repository hooks.** Cutting a worktree runs no command the repository
 defines. A repository's hooks are content an agent can write — `daft.yml` is
@@ -216,7 +231,40 @@ that keep its patch; and, for a fork writer that has a recorded patch,
 and by `report`; and `evals`, a person's verb, reads the common git directory
 a writer's fork belongs to and whether a task's base commit is still in it
 (`rev-parse`). They get the same empty hooks directory and
-`core.fsmonitor=false`.) The worktree therefore comes up without the repository's
+`core.fsmonitor=false`.) daft skips its hooks unless a person sets
+`fork.daft.hooks = true` (config.toml only). Then daft runs the repository's
+own hooks in the new worktree, in the foreground and under the cut's
+deadline, if daft trusts the repository by its own trust list, which lives
+in daft's directory, outside every workspace. Those hooks are the
+repository's commands, which an agent can commit, and they run outside every
+sandbox on an agent's verb: that is what the setting turns on. With it on, a
+cut is refused when the repository's own git configuration sets any
+`daft.hooks` key — in a file any of its includes could reach, too, whatever
+the include's condition — so the repository cannot point daft at other
+hooks or settings of its choosing. The tool that cuts runs in a process group of its
+own, killed when the cut returns, so nothing it or a hook started keeps
+running beside the writer, short of leaving the group. No filter runs while
+the worktree is checked out either: every filter driver that any
+configuration defines — the repository's, which an agent that can write
+`.git/config` and `.git/info/attributes` could plant without a commit, and
+the person's own — is emptied, by its name byte for byte, as configuration
+above every config file, so each filtered file comes up as git stores it.
+That is a known limit: a fork of a Git LFS or git-crypt repository holds
+pointers or ciphertext until the caller runs that setup there. Filters are
+named in configuration, and git weighs a conditional include (`includeIf`)
+for each worktree apart, so the configuration is read as git reads it for
+the new worktree: git cuts it with no checkout, and cahoots checks it out
+once it has read the configuration there, through the worktree's pinned git
+directory. It is read again after the checkout; a filter that appeared in
+between fails the run before the writer starts, though its command may have
+run by then — a race only a process writing the repository's git
+configuration at that moment can run. daft checks out as it cuts, so for
+daft every file an include could reach — the repository's and the
+person's, every condition taken as holding — is read before daft runs, and
+every filter driver named in any of them is turned off: more than the new
+worktree may need, which does nothing. An include that cannot be read, or
+that names a path cahoots cannot resolve as git would, refuses the cut
+rather than being skipped. All of it is read again after the cut. The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
 repository, not the tree it was cut from or inside it, not inside cahoots'
@@ -320,7 +368,8 @@ tree, or its `.git/config`, while `changes` is read. A process that left the gro
 that reach, and so is a change `changes` is told to ignore in the submodule
 or outside the configuration it snapshots; the caller is told to read a
 change before trusting it for exactly these reasons. A worktree is removed
-only when no run on record still works in it. One cahoots cut whose git
+only if git cut it (`worktree_owner: "cahoots"`) and no run on record still
+works in it; one daft cut is never removed by cahoots. One cahoots cut whose git
 directory then fails the pin is refused before the writer starts and left
 where it is: no run on record points at it, so the refusal names its path,
 for a person to remove.

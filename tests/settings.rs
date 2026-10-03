@@ -7,7 +7,7 @@ mod common;
 use std::fs;
 use std::time::Duration;
 
-use common::{Finished, World};
+use common::{Finished, World, fake_at};
 use nix::sys::termios::LocalFlags;
 use serde_json::json;
 
@@ -467,8 +467,9 @@ fn the_page_edits_a_kind_role_and_candidate_order() {
         };
         terminal.wait_for("❯ Enabled");
         terminal.resize(40, 180);
-        // Claude, Codex, meter, runs, review, roles, then the first kind.
-        for _ in 0..6 {
+        // Claude, Codex, meter, runs, worktrees, review, roles, then the
+        // first kind.
+        for _ in 0..7 {
             terminal.press(TAB);
         }
         terminal.wait_for("❯ Description");
@@ -535,7 +536,8 @@ fn blind_setting_toggles_sets_and_resets_without_touching_other_config() {
     assert!(!default.locked);
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
-    for _ in 0..4 {
+    // Claude, Codex, meter, runs, worktrees, then review.
+    for _ in 0..5 {
         terminal.press(TAB);
     }
     terminal.wait_for("❯ Review runs");
@@ -764,8 +766,8 @@ fn the_page_edits_role_and_kind_exploration_shares() {
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
     terminal.resize(40, 180);
-    // Claude, Codex, meter, runs, review: then the roles.
-    for _ in 0..5 {
+    // Claude, Codex, meter, runs, worktrees, review: then the roles.
+    for _ in 0..6 {
         terminal.press(TAB);
     }
     terminal.wait_for("❯ Advise");
@@ -836,4 +838,174 @@ fn the_page_edits_role_and_kind_exploration_shares() {
             33
         );
     }
+}
+
+/// `settings set <key> <value>`, at a terminal as a human verb needs.
+fn set(world: &World, key: &str, value: &str) -> Finished {
+    world.at_terminal(&["settings", "set", key, value]).finish()
+}
+
+#[test]
+fn fork_settings_are_set_and_reset_through_the_flags() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let daft = world.bin.join("daft");
+    fake_at(&daft);
+
+    for (key, value, shown) in [
+        ("fork.provider", "daft", json!("daft")),
+        ("fork.daft.hooks", "on", json!(true)),
+        ("fork.daft.binary", daft.to_str().unwrap(), json!(daft)),
+    ] {
+        let after = set(&world, key, value);
+        assert_eq!(after.code, 0, "{key}: {}", after.json);
+        assert_eq!(
+            after.json["data"]["changed"],
+            json!([{"key": key, "value": shown, "origin": "config"}]),
+            "{key}"
+        );
+    }
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with(before.trim_end()), "{text}");
+    assert!(
+        text.contains(&format!(
+            "\n[fork]\nprovider = \"daft\"\n\n[fork.daft]\nhooks = true\nbinary = {daft:?}\n"
+        )),
+        "{text}"
+    );
+    let registry =
+        cahoots::registry::Registry::effective(&cahoots::config::UserConfig::load(&file).unwrap());
+    assert_eq!(
+        registry.fork.provider,
+        cahoots::placement::provider::ProviderId::Daft
+    );
+    assert_eq!(registry.fork.daft_binary.as_deref(), Some(daft.as_path()));
+    assert!(registry.fork.daft_hooks);
+    // Asked its version once, when it was chosen; nothing else of it ran.
+    assert_eq!(world.daft_versions().len(), 1);
+    assert!(world.daft_calls().is_empty());
+
+    for (key, back) in [
+        ("fork.provider", json!("git")),
+        ("fork.daft.hooks", json!(false)),
+        ("fork.daft.binary", json!(null)),
+    ] {
+        let reset = world.at_terminal(&["settings", "reset", key]).finish();
+        assert_eq!(reset.code, 0, "{key}: {}", reset.json);
+        assert_eq!(
+            reset.json["data"]["changed"],
+            json!([{"key": key, "value": back, "origin": "default"}]),
+            "{key}"
+        );
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn a_provider_that_is_not_one_is_refused() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let after = set(&world, "fork.provider", "worktrunk");
+    assert_eq!(after.code, 2, "{}", after.json);
+    assert_eq!(
+        after.json["message"],
+        "fork.provider = worktrunk: one of git, daft"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
+fn a_daft_program_that_is_not_there_or_not_daft_is_refused() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let old = world.root.join("old/daft");
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fake_at(&old);
+    fs::write(world.root.join("old/daft.version"), "daft 1.20.0\n").unwrap();
+    let missing = world.root.join("nope/daft");
+    let codex = world.bin.join("codex");
+    for (value, says) in [
+        (
+            "daft".to_string(),
+            "fork.daft.binary = daft: an absolute path".to_string(),
+        ),
+        (
+            missing.display().to_string(),
+            format!("fork.daft.binary = {}: ", missing.display()),
+        ),
+        (
+            codex.display().to_string(),
+            format!("{} does not identify itself as daft", codex.display()),
+        ),
+        (
+            old.display().to_string(),
+            "daft 1.20.0 is older than the oldest version cahoots supports (1.27.0)".to_string(),
+        ),
+    ] {
+        let after = set(&world, "fork.daft.binary", &value);
+        assert_eq!(after.code, 2, "{value}: {}", after.json);
+        let message = after.json["message"].as_str().unwrap();
+        assert!(message.contains(&says), "{value}: {message}");
+        if value == missing.display().to_string() {
+            assert!(message.contains("No such file"), "{message}");
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), before, "{value}");
+    }
+}
+
+#[test]
+fn a_config_naming_an_unknown_provider_is_refused() {
+    let world = World::new();
+    world.fork("fork.provider = \"worktrunk\"");
+    let run = world.run("hello", &[]);
+    assert_eq!(run.code, 34, "{}", run.json);
+    assert!(run.message().contains("worktrunk"), "{}", run.json);
+    assert!(!world.state.join("runs").exists(), "a run was created");
+    let doctor = world.ask(&["doctor"]);
+    assert_eq!(doctor.code, 34, "{}", doctor.json);
+    let config = doctor.data()["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "config")
+        .unwrap()
+        .clone();
+    assert_eq!(config["status"], "fail", "{config}");
+    assert!(
+        config["detail"].as_str().unwrap().contains("worktrunk"),
+        "{config}"
+    );
+}
+
+#[test]
+fn the_page_chooses_daft_in_the_worktrees_section() {
+    let world = World::new();
+    let terminal = world.at_terminal(&["settings"]);
+    terminal.wait_for("❯ Enabled");
+    terminal.resize(30, 180);
+    // Claude, Codex, meter, runs, then worktrees.
+    for _ in 0..4 {
+        terminal.press(TAB);
+    }
+    terminal.wait_for("❯ Cut by");
+    terminal.wait_for("What cuts a writer's worktree.");
+    terminal.press(ENTER);
+    terminal.wait_for("● git ✓ (a detached worktree in cahoots' state directory");
+    terminal.press(DOWN);
+    terminal.wait_for("● daft (daft's own layout, where the repository has a daft.yml");
+    terminal.press(ENTER);
+    terminal.wait_for("Saved to config.toml: [fork] provider = \"daft\"");
+    terminal.press(ESC);
+    let after = terminal.finish();
+    assert_eq!(after.code, 0, "{}", after.json);
+    assert_eq!(
+        after.json["data"]["changed"],
+        json!([{"key": "fork.provider", "value": "daft", "origin": "config"}])
+    );
+    given_back(&after);
+    let text = fs::read_to_string(world.config.join("config.toml")).unwrap();
+    assert!(text.contains("\n[fork]\nprovider = \"daft\"\n"), "{text}");
 }
