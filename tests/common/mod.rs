@@ -24,6 +24,8 @@ use serde_json::Value;
 
 pub struct World {
     _root: tempfile::TempDir,
+    /// Where all of this world lives: its own directory, canonical.
+    pub root: PathBuf,
     pub bin: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
@@ -34,6 +36,9 @@ pub struct World {
     /// config.toml is written from both.
     enabled: RefCell<Vec<String>>,
     extra: RefCell<String>,
+    /// Directories put before the inherited PATH, first one first: `daft`
+    /// puts `bin` there, `prefix_path` anything else.
+    path_prefix: RefCell<Vec<PathBuf>>,
 }
 
 /// The `fake_harness` example, which cargo builds next to the test binaries.
@@ -109,6 +114,7 @@ impl World {
         let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let base = fs::canonicalize(root.path()).unwrap();
         let world = World {
+            root: base.clone(),
             bin: base.join("bin"),
             config: base.join("config"),
             state: base.join("state"),
@@ -116,6 +122,7 @@ impl World {
             work: base.join("work"),
             enabled: RefCell::new(Vec::new()),
             extra: RefCell::new(String::new()),
+            path_prefix: RefCell::new(Vec::new()),
             _root: root,
         };
         for dir in [
@@ -142,29 +149,104 @@ impl World {
             .unwrap();
         assert!(git.success());
         // A HEAD to cut worktrees from. Local identity, never signed.
-        for args in [
-            vec!["config", "user.name", "World"],
-            vec!["config", "user.email", "world@example.invalid"],
-            vec!["config", "commit.gpgsign", "false"],
-            vec![
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "chore: a first commit",
-            ],
-        ] {
-            let done = StdCommand::new("git")
-                .args(&args)
-                .current_dir(&world.work)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
-                .status()
-                .unwrap();
-            assert!(done.success(), "git {args:?}");
-        }
+        world.git(&["config", "user.name", "World"]);
+        world.git(&["config", "user.email", "world@example.invalid"]);
+        world.git(&["config", "commit.gpgsign", "false"]);
+        world.git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: a first commit",
+        ]);
         world
+    }
+
+    /// `git <args>` in this world's repository, which must succeed.
+    pub fn git(&self, args: &[&str]) {
+        git_in(&self.work, args);
+    }
+
+    /// Installs a fake `daft` beside the harnesses, writes its `plan` (see the
+    /// fake), puts `bin` first on PATH and opts the repository into daft with
+    /// a `daft.yml`. All four together, always: a `daft.yml` with the real
+    /// daft first on PATH would have the developer's daft cut — and catalog —
+    /// this world's repository. Nothing else writes a `daft.yml`.
+    pub fn daft(&self, plan: Value) -> PathBuf {
+        let path = self.bin.join("daft");
+        fake_at(&path);
+        fs::write(self.bin.join("daft.plan"), plan.to_string()).unwrap();
+        if !self.path_prefix.borrow().contains(&self.bin) {
+            self.path_prefix.borrow_mut().push(self.bin.clone());
+        }
+        fs::write(self.work.join("daft.yml"), "hooks: {}\n").unwrap();
+        path
+    }
+
+    /// Every call the fake daft took, as it logged them.
+    pub fn daft_calls(&self) -> Vec<Value> {
+        self.calls("daft.calls")
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Puts `dir` first on PATH for every later command.
+    pub fn prefix_path(&self, dir: &Path) {
+        self.path_prefix.borrow_mut().insert(0, dir.to_path_buf());
+    }
+
+    /// Makes `run` look `secs` older than it is: created and finished then.
+    pub fn age(&self, run: &str, secs: u64) {
+        let path = self.state.join("runs").join(run).join("run.json");
+        let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        record["created_at"] = (now - secs).into();
+        record["finished_at"] = (now - secs).into();
+        fs::write(&path, record.to_string()).unwrap();
+    }
+
+    /// A shell script at `path`, runnable, written the way `fake_at` writes a
+    /// fake: by `cp`, from a file beside it.
+    pub fn script_at(&self, path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let source = path.with_extension("src");
+        fs::write(&source, text).unwrap();
+        let _ = fs::remove_file(path);
+        let copied = StdCommand::new("cp")
+            .arg(&source)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(
+            copied.success(),
+            "cp could not put a script at {}",
+            path.display()
+        );
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A `post-checkout` hook in `hooks` that leaves a mark when it runs.
+    pub fn hook_that_marks(&self, hooks: &Path) {
+        self.script_at(
+            &hooks.join("post-checkout"),
+            &format!(
+                "#!/bin/sh\necho ran >> '{}'\n",
+                self.root.join("hook-ran").display()
+            ),
+        );
+    }
+
+    /// Whether a hook from `hook_that_marks` has run since the last `clear_hook_mark`.
+    pub fn hook_ran(&self) -> bool {
+        self.root.join("hook-ran").exists()
+    }
+
+    pub fn clear_hook_mark(&self) {
+        let _ = fs::remove_file(self.root.join("hook-ran"));
     }
 
     /// Turns these targets on, and every other one off, in config.toml.
@@ -349,6 +431,18 @@ impl World {
 
     fn cahoots_std(&self) -> StdCommand {
         let mut command = StdCommand::new(env!("CARGO_BIN_EXE_cahoots"));
+        let prefix = self.path_prefix.borrow();
+        if !prefix.is_empty() {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let path = std::env::join_paths(
+                prefix
+                    .iter()
+                    .cloned()
+                    .chain(std::env::split_paths(&inherited)),
+            )
+            .unwrap();
+            command.env("PATH", path);
+        }
         command
             .current_dir(&self.work)
             .env("CAHOOTS_CONFIG_DIR", &self.config)
@@ -440,6 +534,25 @@ fn uuid_like() -> String {
 
 pub fn path_str(path: &Path) -> &str {
     path.to_str().unwrap()
+}
+
+/// `git <args>` in `dir`, which must succeed — with none of the variables git
+/// exports to a hook, which would point it at another repository.
+pub fn git_in(dir: &Path, args: &[&str]) {
+    let done = StdCommand::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&done.stderr)
+    );
 }
 
 /// Where a command at a terminal reads its stdin.

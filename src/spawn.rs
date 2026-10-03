@@ -38,7 +38,10 @@ pub fn resolve_binary(name: &str, configured: Option<&Path>, workspace: &[&Path]
             canonical.display()
         )));
     }
-    if let Some(root) = workspace.iter().find(|root| canonical.starts_with(root)) {
+    if let Some(root) = workspace
+        .iter()
+        .find(|root| canonical.starts_with(root) || canonical.starts_with(canonical_of(root)))
+    {
         return Err(Fail::policy(format!(
             "{} is inside the workspace {} — refusing to run a binary the workspace supplies",
             canonical.display(),
@@ -100,6 +103,10 @@ fn is_executable_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
+fn canonical_of(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// What a finished helper command produced.
 pub struct Output {
     pub status: Option<i32>,
@@ -114,7 +121,7 @@ pub fn run_helper<S: AsRef<OsStr>>(
     cwd: Option<&Path>,
     deadline: Duration,
 ) -> Res<Output> {
-    run_helper_with_path(binary, args, cwd, deadline, env::path_var())
+    run_helper_with_env(binary, args, cwd, deadline, env::path_var(), &[])
 }
 
 /// [`run_helper`], with the PATH given instead of this process's — for a
@@ -126,6 +133,20 @@ pub fn run_helper_with_path<S: AsRef<OsStr>>(
     cwd: Option<&Path>,
     deadline: Duration,
     path: Option<OsString>,
+) -> Res<Output> {
+    run_helper_with_env(binary, args, cwd, deadline, path, &[])
+}
+
+/// The general form: the PATH given, and `vars` set on top of the minimal
+/// environment — for a tool whose own children must be told something too,
+/// as the `git` that `daft` starts is told where its hooks are.
+pub fn run_helper_with_env<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
+    vars: &[(OsString, OsString)],
 ) -> Res<Output> {
     let mut command = Command::new(binary);
     command
@@ -140,6 +161,7 @@ pub fn run_helper_with_path<S: AsRef<OsStr>>(
     if let Ok(home) = crate::dirs::passwd_home() {
         command.env("HOME", home);
     }
+    command.envs(vars.iter().map(|(name, value)| (name, value)));
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -184,43 +206,113 @@ pub fn run_helper_with_path<S: AsRef<OsStr>>(
     })
 }
 
-/// A system tool cahoots itself needs (`git`, `ps`), held to the same binary
-/// policy as a harness.
+/// A system tool cahoots itself needs (`git`, `daft`, `ps`), held to the same
+/// binary policy as a harness. One that is missing is a setup problem (34);
+/// one the policy refuses is a refusal (33), and is never run.
 pub fn system_tool(name: &str, workspace: &[&Path]) -> Res<PathBuf> {
-    resolve_binary(name, None, workspace).map_err(|fail| {
-        Fail::new(
+    as_system_tool(name, resolve_binary(name, None, workspace))
+}
+
+fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
+    resolved.map_err(|fail| match fail.exit {
+        Exit::Policy => Fail::policy(format!("refusing to run `{name}`: {}", fail.message)),
+        _ => Fail::new(
             Exit::Config,
             format!("cahoots needs `{name}`: {}", fail.message),
-        )
+        ),
     })
 }
 
+/// The PATH a system tool runs with: the caller's, without its relative
+/// entries and without any directory inside `workspace`. cahoots resolves
+/// the tool itself under the binary policy; this holds what the tool then
+/// looks up for itself — the `git` that `daft` runs, git's own helpers and
+/// filter programs — to the same rule.
+pub fn helper_path(workspace: &[&Path]) -> Option<OsString> {
+    helper_path_from(env::path_var().as_deref(), workspace)
+}
+
+fn helper_path_from(path: Option<&OsStr>, workspace: &[&Path]) -> Option<OsString> {
+    let roots: Vec<PathBuf> = workspace
+        .iter()
+        .flat_map(|root| [root.to_path_buf(), canonical_of(root)])
+        .collect();
+    let kept: Vec<PathBuf> = std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .filter(|dir| {
+            let resolved = canonical_of(dir);
+            !roots
+                .iter()
+                .any(|root| dir.starts_with(root) || resolved.starts_with(root))
+        })
+        .collect();
+    // Nothing left is no PATH at all, never an empty one: an empty entry
+    // means the working directory to a shell's lookup.
+    std::env::join_paths(kept)
+        .ok()
+        .filter(|joined| !joined.is_empty())
+}
+
 /// `git rev-parse` in `dir`: the toplevel and the common dir (which is what
-/// two worktrees of one repository share). `None` outside a repository.
-pub fn git_roots(dir: &Path) -> Option<(PathBuf, PathBuf)> {
-    let git = system_tool("git", &[]).ok()?;
+/// two worktrees of one repository share), both canonical. `Ok(None)` outside
+/// a repository, or with no `git` at all. A `git` inside `workspace`, `dir`
+/// or the repository around it is refused, and is never run.
+pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBuf)>> {
+    let here = canonical_of(dir);
+    // The repository's top as its `.git` shows it, before any git is run: a
+    // `git` planted at the top of the repository, above `dir`, is refused
+    // here, not after it has answered.
+    let top = here
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").symlink_metadata().is_ok())
+        .map(Path::to_path_buf);
+    let mut roots = workspace.to_vec();
+    roots.push(&here);
+    roots.extend(top.as_deref());
+    let git = match system_tool("git", &roots) {
+        Ok(git) => git,
+        Err(fail) if fail.exit == Exit::Policy => return Err(fail),
+        Err(_) => return Ok(None),
+    };
+    let path = helper_path(&roots);
     let ask = |what: &str| {
-        let output = run_helper(
+        let output = run_helper_with_env(
             &git,
             &["rev-parse", "--path-format=absolute", what],
             Some(dir),
             Duration::from_secs(10),
+            path.clone(),
+            &[],
         )
         .ok()?;
-        (output.status == Some(0)).then(|| PathBuf::from(output.stdout.trim()))
+        (output.status == Some(0)).then(|| canonical_of(Path::new(output.stdout.trim())))
     };
-    Some((ask("--show-toplevel")?, ask("--git-common-dir")?))
+    let Some(toplevel) = ask("--show-toplevel") else {
+        return Ok(None);
+    };
+    if git.starts_with(&toplevel) {
+        return Err(Fail::policy(format!(
+            "refusing to run `git`: {} is inside the workspace {} — refusing to run a binary the \
+             workspace supplies",
+            git.display(),
+            toplevel.display()
+        )));
+    }
+    Ok(ask("--git-common-dir").map(|common| (toplevel, common)))
 }
 
 /// When a process started, as `ps` tells it — the identity check that stops
-/// reconcile from signalling a recycled pid.
-pub fn process_started(pid: i32) -> Option<String> {
-    let ps = system_tool("ps", &[]).ok()?;
-    let output = run_helper(
+/// reconcile from signalling a recycled pid. A `ps` the policy refuses is not
+/// run, and nothing is known.
+pub fn process_started(pid: i32, workspace: &[&Path]) -> Option<String> {
+    let ps = system_tool("ps", workspace).ok()?;
+    let output = run_helper_with_env(
         &ps,
         &["-o", "lstart=", "-p", &pid.to_string()],
         None,
         Duration::from_secs(5),
+        helper_path(workspace),
+        &[],
     )
     .ok()?;
     let started = output.stdout.trim();
@@ -230,11 +322,18 @@ pub fn process_started(pid: i32) -> Option<String> {
 /// Every descendant of `root`, from one `ps` snapshot. Codex runs its tool
 /// commands in their own process groups, so signalling the callee's group
 /// does not reach them (docs/SPIKE.md S3).
-pub fn descendants(root: i32) -> Vec<i32> {
-    let Ok(ps) = system_tool("ps", &[]) else {
+pub fn descendants(root: i32, workspace: &[&Path]) -> Vec<i32> {
+    let Ok(ps) = system_tool("ps", workspace) else {
         return Vec::new();
     };
-    let Ok(output) = run_helper(&ps, &["-axo", "pid=,ppid="], None, Duration::from_secs(5)) else {
+    let Ok(output) = run_helper_with_env(
+        &ps,
+        &["-axo", "pid=,ppid="],
+        None,
+        Duration::from_secs(5),
+        helper_path(workspace),
+        &[],
+    ) else {
         return Vec::new();
     };
     let table: Vec<(i32, i32)> = output
@@ -406,6 +505,69 @@ mod tests {
                 .exit,
             Exit::Policy
         );
+    }
+
+    #[test]
+    fn a_policy_refusal_of_a_system_tool_is_policy() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(workspace.path()).unwrap();
+        let planted = executable(&root, "git", 0o755);
+        let fail =
+            as_system_tool("git", resolve_binary("git", Some(&planted), &[&root])).unwrap_err();
+        assert_eq!(fail.exit, Exit::Policy);
+        assert!(
+            fail.message.contains("refusing to run `git`"),
+            "{}",
+            fail.message
+        );
+
+        let open = executable(&root, "daft", 0o777);
+        let fail = as_system_tool("daft", resolve_binary("daft", Some(&open), &[])).unwrap_err();
+        assert_eq!(fail.exit, Exit::Policy);
+
+        // Missing is not a refusal: it is something to install.
+        let missing = Path::new("/nonexistent/git");
+        let fail = as_system_tool("git", resolve_binary("git", Some(missing), &[])).unwrap_err();
+        assert_eq!(fail.exit, Exit::Config);
+        assert!(
+            fail.message.contains("cahoots needs `git`"),
+            "{}",
+            fail.message
+        );
+    }
+
+    #[test]
+    fn helper_path_drops_workspace_and_relative_entries() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(workspace.path()).unwrap();
+        let inside = root.join("bin");
+        fs::create_dir(&inside).unwrap();
+        let path = std::env::join_paths([
+            Path::new("/usr/bin"),
+            &inside,
+            Path::new("relative/bin"),
+            Path::new("/bin"),
+            // Not there yet, and still inside: judged by its name.
+            &root.join("later"),
+        ])
+        .unwrap();
+        let kept = helper_path_from(Some(&path), &[&root]).unwrap();
+        assert_eq!(kept, OsString::from("/usr/bin:/bin"));
+
+        // The same directory by another name is still inside.
+        let other = tempfile::tempdir().unwrap();
+        let link = other.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let path = std::env::join_paths([link.join("bin"), PathBuf::from("/bin")]).unwrap();
+        assert_eq!(
+            helper_path_from(Some(&path), &[&root]).unwrap(),
+            OsString::from("/bin")
+        );
+
+        // Nothing left is no PATH, not an empty one.
+        let path = std::env::join_paths([&inside]).unwrap();
+        assert_eq!(helper_path_from(Some(&path), &[&root]), None);
+        assert_eq!(helper_path_from(None, &[&root]), None);
     }
 
     #[test]

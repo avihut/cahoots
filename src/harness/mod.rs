@@ -340,6 +340,37 @@ mod tests {
         }
     }
 
+    /// A callee never cuts a worktree of its own: it would come up with that
+    /// harness's own hooks, outside cahoots' checks on where a writer works.
+    #[test]
+    fn a_harness_never_cuts_its_own_worktree() {
+        let refused: [(HarnessId, &[&[&str]]); 2] = [
+            (
+                HarnessId::Claude,
+                &[
+                    &["-w"],
+                    &["--worktree"],
+                    &["--worktree", "x"],
+                    &["--worktree=x"],
+                ],
+            ),
+            (HarnessId::Codex, &[&["--worktree"], &["--worktree=x"]]),
+        ];
+        for (id, extras) in refused {
+            for role in Role::ALL {
+                let good = command_line(&spec(id, role)).unwrap();
+                for extra in extras {
+                    let mut argv = good.clone();
+                    argv.extend(extra.iter().map(|s| s.to_string()));
+                    assert!(
+                        validate(harness(id), role, &argv).is_err(),
+                        "{id} {role}: {extra:?} was let through"
+                    );
+                }
+            }
+        }
+    }
+
     /// A reader never gets a writer's command line, whatever a builder does:
     /// the validator is told the ROLE, and holds the argv to that role's fence.
     #[test]

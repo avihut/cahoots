@@ -111,8 +111,8 @@ impl Harness for Codex {
                     ));
                 }
             }
-            if arg == "-p" || arg == "-C" || arg == "--cd" || arg == "--oss" || arg == "--worktree"
-            {
+            let flag = arg.split('=').next().unwrap_or(arg);
+            if ["-p", "-C", "--cd", "--oss", "--worktree"].contains(&flag) {
                 return Err(format!("{arg} is not a flag cahoots emits"));
             }
         }

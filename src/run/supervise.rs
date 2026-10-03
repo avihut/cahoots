@@ -112,13 +112,29 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
             )
         })?;
 
-    // A writer's worktree is cut HERE, detached from the caller: in a daft
-    // repository that runs the repo's setup hooks, which can outlast a
-    // caller's tool call.
-    if record.placement == Placement::Fork && record.resumed_from.is_none() {
+    // A writer's worktree is cut HERE, detached from the caller: a checkout of
+    // a large repository can outlast a caller's tool call. A resumed writer
+    // goes back into the worktree it had — and one whose fork was never cut
+    // has none: its `cwd` is still the caller's own tree.
+    if record.placement == Placement::Fork {
         let base = record.base.clone().unwrap_or_else(|| record.cwd.clone());
-        record.cwd = placement::cut(dirs, &base, &record.id)?;
-        dir.save(record)?;
+        if record.resumed_from.is_none() {
+            let (worktree, gitdir) = placement::cut(
+                dirs,
+                &base,
+                &record.id,
+                &record.tool_roots(),
+                Duration::from_secs(record.timeout_secs),
+            )?;
+            record.cwd = worktree;
+            record.gitdir = Some(gitdir);
+            dir.save(record)?;
+        } else if base == record.cwd {
+            return Err(Fail::policy(format!(
+                "run {} has no worktree of its own to go back into",
+                record.id
+            )));
+        }
     }
 
     let spec = RunSpec {
@@ -144,7 +160,8 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     record.state = State::Running;
     record.started_at = Some(now());
     record.callee_pid = Some(pid);
-    record.callee_started = spawn::process_started(pid);
+    let started = spawn::process_started(pid, &record.tool_roots());
+    record.callee_started = started;
     dir.save(record)?;
 
     let watchdog = Watchdog {
@@ -396,7 +413,7 @@ impl Ladder {
     fn start(pgid: i32, record: &RunRecord) -> Ladder {
         Ladder {
             pgid,
-            descendants: spawn::descendants(pgid),
+            descendants: spawn::descendants(pgid, &record.tool_roots()),
             rung: 0,
             next: Instant::now(),
             int_grace: Duration::from_secs(record.int_grace_secs),

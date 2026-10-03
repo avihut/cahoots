@@ -4,7 +4,11 @@
 
 mod common;
 
-use common::World;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use common::{World, git_in, path_str};
 
 fn argv_of(answer: &common::Answer) -> Vec<String> {
     let dump: serde_json::Value = serde_json::from_str(answer.text()).unwrap();
@@ -279,4 +283,199 @@ candidates = [{ harness = "codex", model = "custom", effort = "medium" }]
             .code,
         24
     );
+}
+
+/// The worktrees the repository knows of, as `git worktree list` has them.
+fn worktrees(world: &World) -> String {
+    let listed = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    String::from_utf8(listed.stdout).unwrap()
+}
+
+#[test]
+fn a_shared_worktree_outlives_the_run_that_cut_it() {
+    let world = World::new();
+    let brief = world.brief("FAKE: write=first.txt");
+    let first = world.ask(&[
+        "run",
+        "--role",
+        "implement",
+        "--fork",
+        "--caller",
+        "claude",
+        "--brief",
+        brief.to_str().unwrap(),
+    ]);
+    assert_eq!(first.code, 0, "{}", first.json);
+    let worktree = PathBuf::from(first.data()["worktree"].as_str().unwrap());
+    let brief = world.brief("FAKE: write=second.txt");
+    let again = world.ask(&[
+        "resume",
+        &first.run_id(),
+        "--caller",
+        "claude",
+        "--brief",
+        brief.to_str().unwrap(),
+    ]);
+    assert_eq!(again.code, 0, "{}", again.json);
+    assert_eq!(again.data()["worktree"], path_str(&worktree));
+    assert_eq!(
+        world.record(&again.run_id())["gitdir"],
+        world.record(&first.run_id())["gitdir"],
+        "a resumed run reads its changes against another git directory"
+    );
+
+    // The run that cut it ages out; the run that continues it is still here.
+    let week_and_a_day = 8 * 24 * 3600;
+    world.age(&first.run_id(), week_and_a_day);
+    assert_eq!(world.ask(&["status"]).code, 0);
+    assert!(
+        !world.state.join("runs").join(first.run_id()).exists(),
+        "a run past retention was kept"
+    );
+    assert!(
+        worktree.is_dir(),
+        "a worktree a run still works in was removed"
+    );
+    assert!(worktrees(&world).contains(path_str(&worktree)));
+    let result = world.ask(&["result", &again.run_id()]);
+    assert_eq!(result.code, 0, "{}", result.json);
+    for file in ["first.txt", "second.txt"] {
+        assert!(
+            result.data()["changes"].to_string().contains(file),
+            "{file}: {}",
+            result.json
+        );
+    }
+
+    // Now the last run in it ages out too.
+    world.age(&again.run_id(), week_and_a_day);
+    assert_eq!(world.ask(&["status"]).code, 0);
+    assert!(!worktree.exists(), "the worktree outlived every run in it");
+    assert!(!worktrees(&world).contains(path_str(&worktree)));
+}
+
+#[test]
+fn a_fork_that_was_never_cut_cannot_be_resumed() {
+    let world = World::new();
+    let empty = world.root.join("no-commits");
+    fs::create_dir_all(&empty).unwrap();
+    git_in(&empty, &["init", "-q"]);
+    let ask_in = |args: &[&str]| {
+        let mut command = world.cahoots();
+        command.current_dir(&empty).args(args);
+        common::answer(&mut command)
+    };
+    // Codex asks Claude, whose session cahoots presets: the failed run looks
+    // resumable.
+    let brief = empty.join("first.md");
+    fs::write(&brief, "FAKE: write=first.txt").unwrap();
+    let first = ask_in(&[
+        "run",
+        "--role",
+        "implement",
+        "--caller",
+        "codex",
+        "--fork",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(first.code, 40, "{}", first.json);
+    assert_eq!(first.data()["target"]["harness"], "claude");
+    assert!(first.data()["resumable"] == true, "{}", first.json);
+
+    let brief = empty.join("second.md");
+    fs::write(&brief, "FAKE: write=second.txt").unwrap();
+    let again = ask_in(&[
+        "resume",
+        &first.run_id(),
+        "--caller",
+        "codex",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(again.code, 2, "{}", again.json);
+    assert!(
+        again.message().contains("never got a worktree of its own"),
+        "{}",
+        again.json
+    );
+    let runs = fs::read_dir(world.state.join("runs")).unwrap().count();
+    assert_eq!(runs, 1, "a resume that was refused left a run behind");
+    assert!(!empty.join("second.txt").exists());
+    assert!(!Path::new(&empty).join("first.txt").exists());
+}
+
+#[test]
+fn a_resume_from_another_worktree_keeps_both_workspaces_out_of_its_tools() {
+    let world = World::new();
+    // The first run is asked for from a subdirectory: its workspace is that
+    // directory and the top of the repository, `work`.
+    let sub = world.work.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let brief = world.brief("hello");
+    let mut command = world.cahoots();
+    command.current_dir(&sub).args([
+        "run",
+        "--role",
+        "advise",
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    let first = common::answer(&mut command);
+    assert_eq!(first.code, 0, "{}", first.json);
+
+    // It is resumed from another worktree of the repository, by a caller with
+    // a `ps` from the first run's workspace first on its PATH — which the
+    // resumed run's supervisor inherits.
+    let second = world.root.join("second");
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        path_str(&second),
+        "HEAD",
+    ]);
+    let marker = world.root.join("planted-ps-ran");
+    world.script_at(
+        &world.work.join("bin/ps"),
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    world.prefix_path(&world.work.join("bin"));
+    let brief = second.join("more.md");
+    fs::write(&brief, "and more").unwrap();
+    let mut command = world.cahoots();
+    command.current_dir(&second).args([
+        "resume",
+        &first.run_id(),
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    let again = common::answer(&mut command);
+    assert_eq!(again.code, 0, "{}", again.json);
+    assert!(
+        !marker.exists(),
+        "a ps from the workspace that started the run ran for its resume"
+    );
+    let record = world.record(&again.run_id());
+    let roots = record["roots"].as_array().unwrap();
+    for workspace in [&world.work, &second] {
+        assert!(
+            roots.iter().any(|root| root == path_str(workspace)),
+            "{} is not among the resumed run's roots: {roots:?}",
+            workspace.display()
+        );
+    }
 }

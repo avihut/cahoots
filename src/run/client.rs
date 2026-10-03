@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -135,7 +135,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
     dirs.refuse_inside(&roots)?;
     let brief = paths::read_brief(&args.brief, &workspace)?;
 
-    reconcile(&dirs);
+    reconcile(&dirs, &roots);
     let live = record::all(&dirs)
         .iter()
         .filter(|(_, r)| !r.state.is_terminal())
@@ -149,6 +149,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
 
     let choice = pick::choose(&dirs, &registry, &routing, caller, args.to, &roots)?;
     let target = choice.target;
+    let roots = owned(&roots);
 
     launch(
         &dirs,
@@ -161,6 +162,8 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             placement,
             base: (placement == Placement::Fork).then(|| run_dir.clone()),
             cwd: run_dir,
+            gitdir: None,
+            roots,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -185,6 +188,9 @@ struct Launch {
     placement: Placement,
     base: Option<PathBuf>,
     cwd: PathBuf,
+    gitdir: Option<PathBuf>,
+    /// The asking client's workspace and the run's directory (`RunRecord::roots`).
+    roots: Vec<PathBuf>,
     depth: u32,
     timeout_secs: Option<u64>,
     wait_secs: Option<u64>,
@@ -215,6 +221,8 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         target: launch.target,
         blind: registry.review.blind,
         base: launch.base,
+        gitdir: launch.gitdir,
+        roots: launch.roots,
         cwd: launch.cwd,
         placement: launch.placement,
         depth: launch.depth,
@@ -242,7 +250,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
 
     let wait = launch.wait_secs.unwrap_or(registry.limits.wait_secs);
     let record = wait_for(&dir, Duration::from_secs(wait))?;
-    Ok(report(dirs, &dir, &record, true))
+    Ok(report(dirs, &dir, &record, true, &[]))
 }
 
 pub struct ResumeArgs {
@@ -273,7 +281,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
         .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
     let workspace = Workspace::around(&cwd)?;
 
-    reconcile(&dirs);
+    reconcile(&dirs, &workspace.roots());
     let old = RunDir::open(&dirs, &args.run)?.load()?;
     if !old.state.is_terminal() {
         return Err(Fail::new(
@@ -313,8 +321,28 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             ),
         ));
     }
+    // A fork whose cut failed never left the caller's tree: its `cwd` is that
+    // tree, and a writer resumed there would work in it.
+    if old.placement == Placement::Fork && old.base.as_ref().is_none_or(|base| *base == old.cwd) {
+        return Err(Fail::new(
+            Exit::Usage,
+            format!(
+                "run {} never got a worktree of its own (its fork was not cut), so there is \
+                 nothing to resume — start a new run with --fork",
+                old.id
+            ),
+        ));
+    }
+    // Both workspaces, the one that started the run and the one resuming it:
+    // the supervisor inherits this caller's PATH, and a tool for the run may
+    // come from neither.
     let mut roots = workspace.roots();
     roots.push(&old.cwd);
+    for root in &old.roots {
+        if !roots.contains(&root.as_path()) {
+            roots.push(root);
+        }
+    }
     dirs.refuse_inside(&roots)?;
     let brief = paths::read_brief(&args.brief, &workspace)?;
 
@@ -342,6 +370,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
     }
     let (binary, version, admission) =
         pick::eligible(&dirs, &registry, &old.target, old.role, &roots)?;
+    let roots = owned(&roots);
 
     launch(
         &dirs,
@@ -354,6 +383,8 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             placement: old.placement,
             base: old.base,
             cwd: old.cwd,
+            gitdir: old.gitdir,
+            roots,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -380,24 +411,27 @@ fn wait_for(dir: &RunDir, patience: Duration) -> Res<RunRecord> {
 
 pub fn wait(id: &str, timeout_secs: Option<u64>) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
-    reconcile(&dirs);
+    let invoker = invoker_roots()?;
+    reconcile(&dirs, &borrowed(&invoker));
     let dir = RunDir::open(&dirs, id)?;
     let patience = timeout_secs.unwrap_or(Registry::load(&dirs)?.limits.wait_secs);
     let record = wait_for(&dir, Duration::from_secs(patience))?;
-    Ok(report(&dirs, &dir, &record, true))
+    Ok(report(&dirs, &dir, &record, true, &borrowed(&invoker)))
 }
 
 pub fn result(id: &str) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
-    reconcile(&dirs);
+    let invoker = invoker_roots()?;
+    reconcile(&dirs, &borrowed(&invoker));
     let dir = RunDir::open(&dirs, id)?;
     let record = dir.load()?;
-    Ok(report(&dirs, &dir, &record, true))
+    Ok(report(&dirs, &dir, &record, true, &borrowed(&invoker)))
 }
 
 pub fn status(id: Option<&str>) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
-    reconcile(&dirs);
+    let invoker = invoker_roots()?;
+    reconcile(&dirs, &borrowed(&invoker));
     let outcomes = outcome_ids(&dirs);
     if let Some(id) = id {
         let dir = RunDir::open(&dirs, id)?;
@@ -423,16 +457,18 @@ pub fn status(id: Option<&str>) -> Res<Envelope> {
 pub fn cancel(id: &str) -> Res<Envelope> {
     refuse_inside_a_sandbox("cancel")?;
     let dirs = Dirs::resolve()?;
-    reconcile(&dirs);
+    let invoker = invoker_roots()?;
+    let invoker = borrowed(&invoker);
+    reconcile(&dirs, &invoker);
     let dir = RunDir::open(&dirs, id)?;
     let record = dir.load()?;
     if !record.state.is_terminal() {
         record::write_private(&dir.cancel_path(), b"")?;
         let patience = Duration::from_secs(record.int_grace_secs + record.term_grace_secs + 10);
         let record = wait_for(&dir, patience)?;
-        return Ok(report(&dirs, &dir, &record, false));
+        return Ok(report(&dirs, &dir, &record, false, &invoker));
     }
-    Ok(report(&dirs, &dir, &record, false))
+    Ok(report(&dirs, &dir, &record, false, &invoker))
 }
 
 /// `outcome`: what became of a run's result. The caller says so right after
@@ -441,7 +477,8 @@ pub fn cancel(id: &str) -> Res<Envelope> {
 pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
     refuse_inside_a_sandbox("outcome")?;
     let dirs = Dirs::resolve()?;
-    reconcile(&dirs);
+    let invoker = invoker_roots()?;
+    reconcile(&dirs, &borrowed(&invoker));
     record::validate_id(id)?;
     let finished = crate::history::stories(&crate::history::read(&dirs))
         .iter()
@@ -507,7 +544,15 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
 
 /// A run as `run`, `wait`, `result` and `cancel` report it: the run's own exit
 /// code, its summary, and — when finished — the answer, marked for what it is.
-fn report(dirs: &Dirs, dir: &RunDir, record: &RunRecord, with_result: bool) -> Envelope {
+/// `invoker` is the asking process's workspace: no tool run here comes from
+/// it either.
+fn report(
+    dirs: &Dirs,
+    dir: &RunDir,
+    record: &RunRecord,
+    with_result: bool,
+    invoker: &[&Path],
+) -> Envelope {
     let events = crate::history::read(dirs);
     let stories = crate::history::stories(&events);
     let has_outcome = stories
@@ -543,9 +588,29 @@ fn report(dirs: &Dirs, dir: &RunDir, record: &RunRecord, with_result: bool) -> E
             data["pending_reviews"] = json!(waiting);
         }
     }
-    if record.placement != Placement::Caller && record.state.is_terminal() {
+    // A writer's place: its own tree in place, or the worktree cut for it. A
+    // fork that was never cut has none — its `cwd` is still the caller's
+    // tree, which is not the writer's work.
+    let place = match record.placement {
+        Placement::Caller => false,
+        Placement::InPlace => true,
+        Placement::Fork => record.base.as_ref().is_some_and(|base| *base != record.cwd),
+    };
+    if place && record.state.is_terminal() {
         data["worktree"] = json!(record.cwd);
-        data["changes"] = json!(placement::changes(&record.cwd));
+        let mut roots = invoker.to_vec();
+        roots.extend(record.tool_roots());
+        let (base, gitdir) = match record.placement {
+            Placement::Fork => (record.base.as_deref(), record.gitdir.as_deref()),
+            _ => (None, None),
+        };
+        match placement::changes(dirs, &record.cwd, base, gitdir, &roots) {
+            Ok(lines) => data["changes"] = json!(lines),
+            Err(why) => {
+                data["changes"] = Value::Null;
+                data["changes_error"] = json!(why);
+            }
+        }
     }
     let exit = Exit::ALL
         .into_iter()
@@ -564,14 +629,32 @@ fn report(dirs: &Dirs, dir: &RunDir, record: &RunRecord, with_result: bool) -> E
 /// Every invocation tidies up after supervisors that died: a live-looking
 /// record whose lock is free gets marked `crashed`, and the process group it
 /// recorded is signalled ONLY if that pid is still the process it was. Also
-/// drops the content of runs past retention.
-pub fn reconcile(dirs: &Dirs) {
-    for (dir, mut record) in record::all(dirs) {
+/// drops the content of runs past retention, and the worktree such a run
+/// worked in once no run kept on record works there too. `invoker` is the
+/// asking process's workspace: no tool run here comes from it.
+pub fn reconcile(dirs: &Dirs, invoker: &[&Path]) {
+    let runs = record::all(dirs);
+    let expired = |record: &RunRecord| {
+        record.state.is_terminal()
+            && now().saturating_sub(record.finished_at.unwrap_or(record.created_at))
+                > RETENTION_SECS
+    };
+    // Where the runs that stay work: a resumed run shares its worktree with
+    // the run it continues, which may age out first.
+    let in_use: Vec<PathBuf> = runs
+        .iter()
+        .filter(|(_, record)| !expired(record))
+        .map(|(_, record)| record.cwd.clone())
+        .collect();
+    for (dir, mut record) in runs {
         if record.state.is_terminal() {
-            let age = now().saturating_sub(record.finished_at.unwrap_or(record.created_at));
-            if age > RETENTION_SECS {
-                if let Some(base) = &record.base {
-                    placement::discard(dirs, base, &record.cwd);
+            if expired(&record) {
+                if let Some(base) = &record.base
+                    && !works_in(&record.cwd, &in_use)
+                {
+                    let mut roots = invoker.to_vec();
+                    roots.extend(record.tool_roots());
+                    placement::discard(dirs, base, &record.cwd, &roots);
                 }
                 let _ = fs::remove_dir_all(&dir.path);
             }
@@ -585,12 +668,14 @@ pub fn reconcile(dirs: &Dirs) {
         let Ok(Some(_lock)) = dir.try_lock() else {
             continue; // a live supervisor holds it
         };
-        if let (Some(pid), Some(started)) = (record.callee_pid, &record.callee_started)
-            && spawn::process_started(pid).as_ref() == Some(started)
-        {
-            let orphans = spawn::descendants(pid);
-            spawn::signal_group(pid, Signal::SIGKILL);
-            spawn::signal_processes(&orphans, Signal::SIGKILL);
+        if let (Some(pid), Some(started)) = (record.callee_pid, &record.callee_started) {
+            let mut roots = invoker.to_vec();
+            roots.extend(record.tool_roots());
+            if spawn::process_started(pid, &roots).as_ref() == Some(started) {
+                let orphans = spawn::descendants(pid, &roots);
+                spawn::signal_group(pid, Signal::SIGKILL);
+                spawn::signal_processes(&orphans, Signal::SIGKILL);
+            }
         }
         record.finish(
             State::Crashed,
@@ -599,4 +684,40 @@ pub fn reconcile(dirs: &Dirs) {
         );
         let _ = dir.save(&record);
     }
+}
+
+/// Whether one of `in_use` is `worktree`: the same path, or the same
+/// directory by another name.
+fn works_in(worktree: &Path, in_use: &[PathBuf]) -> bool {
+    if in_use.iter().any(|other| other == worktree) {
+        return true;
+    }
+    let Ok(canonical) = fs::canonicalize(worktree) else {
+        return false;
+    };
+    in_use
+        .iter()
+        .any(|other| fs::canonicalize(other).is_ok_and(|other| other == canonical))
+}
+
+/// The asking process's workspace, for the verbs that look a run up: they
+/// start `git` and `ps` too. A `git` planted in it is refused, as it is for
+/// `run`; a working directory that cannot be read adds nothing.
+fn invoker_roots() -> Res<Vec<PathBuf>> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Ok(Vec::new());
+    };
+    match Workspace::around(&cwd) {
+        Ok(workspace) => Ok(owned(&workspace.roots())),
+        Err(fail) if fail.exit == Exit::Policy => Err(fail),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+fn owned(roots: &[&Path]) -> Vec<PathBuf> {
+    roots.iter().map(|root| root.to_path_buf()).collect()
+}
+
+fn borrowed(roots: &[PathBuf]) -> Vec<&Path> {
+    roots.iter().map(PathBuf::as_path).collect()
 }

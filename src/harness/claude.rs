@@ -88,10 +88,12 @@ impl Harness for Claude {
         if argv.iter().any(|arg| arg == "--no-session-persistence") {
             return Err("--no-session-persistence makes the run unresumable".to_string());
         }
-        if let Some(arg) = argv
-            .iter()
-            .find(|arg| ["-c", "--continue", "--bare"].contains(&arg.as_str()))
-        {
+        // `-w`/`--worktree` would have the callee cut a tree of its own, with
+        // its own hooks and outside cahoots' checks on where a writer works.
+        if let Some(arg) = argv.iter().find(|arg| {
+            let flag = arg.split('=').next().unwrap_or(arg);
+            ["-c", "--continue", "--bare", "-w", "--worktree"].contains(&flag)
+        }) {
             return Err(format!("{arg} is not a flag cahoots emits"));
         }
         // The fence is the PAIR (tool set, permission mode), and each role has

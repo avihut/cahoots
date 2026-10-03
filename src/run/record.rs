@@ -77,6 +77,16 @@ pub struct RunRecord {
     /// What a fork was cut from.
     #[serde(default)]
     pub base: Option<PathBuf>,
+    /// A fork's git directory, read once when the worktree was cut, before
+    /// the writer ran: what its changes are read against later, whatever the
+    /// worktree's `.git` names by then.
+    #[serde(default)]
+    pub gitdir: Option<PathBuf>,
+    /// The launching client's workspace and the directory the run works in.
+    /// No tool started for this run — `git`, `daft`, `ps` — may come from one
+    /// of them. Internal: never in the envelope.
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
     pub depth: u32,
     pub timeout_secs: u64,
     pub int_grace_secs: u64,
@@ -117,6 +127,16 @@ impl RunRecord {
             Some(code) if self.state.is_terminal() => code,
             _ => Exit::NotFinished.code(),
         }
+    }
+
+    /// Every directory a tool started for this run may not come from: the
+    /// launching client's workspace, where the run works, and what a fork was
+    /// cut from.
+    pub fn tool_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = self.roots.iter().map(PathBuf::as_path).collect();
+        roots.push(&self.cwd);
+        roots.extend(self.base.as_deref());
+        roots
     }
 }
 

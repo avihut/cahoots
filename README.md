@@ -111,11 +111,12 @@ A change comes back in a worktree of its own, cut from your `HEAD`:
 cahoots run --role implement --caller claude --fork --brief change.md
 ```
 
-The output names the worktree (`data.worktree`). Read the change with
-`git -C <worktree> diff`, run the tests there, and bring over what you want.
-cahoots never commits or merges for you. In a
-[daft](https://github.com/avihut/daft) repository the worktree is cut with
-`daft start --fork`.
+The output names the worktree (`data.worktree`). It is cut without the
+repository's hooks, so the repository's setup has not run there: run it
+yourself before the tests. Read the change with `git -C <worktree> diff`, run
+the tests there, and bring over what you want. cahoots never commits or
+merges for you. In a [daft](https://github.com/avihut/daft) repository the
+worktree is cut with `daft start --fork`, with daft's hooks skipped too.
 
 Each command an agent runs prints one JSON object and exits with a code that
 means something (`cahoots exit-codes` lists them), so neither your agent nor
