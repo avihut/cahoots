@@ -257,34 +257,55 @@ return the same code for the same run.
 
 ## Install (M2)
 
-`cahoots install` writes five plain files, each only if that harness's home
+`cahoots install` writes plain files, each only if that harness's home
 already exists (it never invents one):
 
 | File | For |
 |---|---|
-| `~/.agents/skills/cahoots/SKILL.md` | the shared skills location |
-| `~/.claude/skills/cahoots/SKILL.md`, `~/.claude/agents/cahoots-delegate.md` | Claude Code |
-| `~/.codex/skills/cahoots/SKILL.md`, `~/.codex/agents/cahoots-delegate.toml` | Codex |
+| `~/.agents/skills/cahoots/SKILL.md`, `~/.agents/skills/cahoots-review/SKILL.md` | the shared skills location |
+| `~/.claude/skills/cahoots/SKILL.md`, `~/.claude/skills/cahoots-review/SKILL.md`, `~/.claude/agents/cahoots-delegate.md` | Claude Code |
+| `~/.codex/skills/cahoots/SKILL.md`, `~/.codex/skills/cahoots-review/SKILL.md`, `~/.codex/agents/cahoots-delegate.toml` | Codex |
+| `~/.claude/agents/cahoots-kind-<name>.md`, `~/.codex/agents/cahoots-kind-<name>.toml` | one subagent per kind of task, per harness |
 
 The texts are embedded in the binary (`src/install/assets/` — those files ARE
 the reviewable source; the only substitution is the version). The skill is the
 same everywhere and tells an agent to pass `--caller`; each agent definition
 fixes it for its own harness.
 
+**A subagent per kind.** Each `[kinds.<name>]` in config.toml gets
+`cahoots-kind-<name>` in each harness, so a session hands a matching task
+over by itself. It runs `cahoots run --kind <name>` (with `--fork` for an
+`implement` kind) and nothing else. Its description is the person's own,
+followed by a fixed sentence (`assets/kind-description.txt`), quoted for the
+file's syntax and put in after every placeholder, so nothing in it is read
+as one. It never enters the instructions. A harness gets no subagent for a
+kind whose candidates are all on that harness: `pick` leaves the caller out,
+so it could never be delegated from there. The prefix keeps a kind named
+`delegate` off the fixed definition.
+
 - **Install is update.** Every file carries a `cahoots_version` stamp, and the
   stamp is the only thing that makes a file cahoots' to touch: `installed`,
   `updated {from}`, `refreshed`, `up_to_date` — or `skipped`, for a file of
   the same name that a person wrote.
+  The stamp is read only from a line that begins with it, so a description
+  that mentions it does not make an adopted file cahoots' again.
 - **`uninstall` removes exactly what `install` wrote:** files the manifest
   lists (`<state>/install-manifest.json`) that still carry the stamp, then the
   `cahoots` directories it emptied. A file someone adopted (stamp gone) stays.
+- **Install follows the kinds.** It removes the subagents the current kinds
+  no longer want (a kind removed or renamed, or left with no candidate on
+  another harness), by uninstall's rule, only in the homes the run covers
+  (`--harness`), and not on a dry run. `files::prune` is the only place it
+  removes anything.
 - **Writes are confined to the home directory**, judged by where the path
   resolves and *before* anything is created — an agent home that is a symlink
   out of `$HOME` does not even get a directory made through it.
 - **Permission rules are printed, never applied.** `install` ends by listing
   the rules still missing and the file each belongs in: at a terminal, as
   lines to paste, flush left under that file. `doctor` checks them, and the
-  installed copies' freshness, read-only.
+  installed copies' freshness, read-only: each file `install` would change,
+  and why — `changed`, `not installed yet` (a kind's subagent, where install
+  has run for that harness), or `no longer wanted`.
 - **It chooses the usage meter** (see *The gate*) — before it writes a file,
   so a question left unanswered leaves nothing half-done. It asks on the
   Clack rail (`docs/TUI.md`), with the arrow keys, on stderr, and only when

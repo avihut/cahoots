@@ -27,7 +27,11 @@ watched=(
 
 fingerprint() {
     local path
-    for path in "${watched[@]}"; do
+    # One subagent per kind of task, expanded on every call so that one which
+    # appears shows up. A pattern that matches nothing stays as written and
+    # fingerprints as absent.
+    local kinds=("$home/.claude/agents/cahoots-kind-"*.md "$home/.codex/agents/cahoots-kind-"*.toml)
+    for path in "${watched[@]}" "${kinds[@]}"; do
         if [ -e "$path" ] || [ -L "$path" ]; then
             # Names catch what appeared or vanished; checksums, what changed.
             find "$path" -print | LC_ALL=C sort

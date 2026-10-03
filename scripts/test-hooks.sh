@@ -62,9 +62,16 @@ fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "mkdir -p '$fake_home/.codex/agents' && echo x >'$fake_home/.codex/agents/cahoots-delegate.toml'"
 fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "rm '$fake_home/.claude/skills/cahoots/SKILL.md'"
+# A kind's subagent appearing, or one that was there changing, trips it too.
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "mkdir -p '$fake_home/.claude/agents' && echo x >'$fake_home/.claude/agents/cahoots-kind-rust-review.md'"
+fails env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "echo edited >>'$fake_home/.claude/agents/cahoots-kind-rust-review.md'"
 # Somebody else's files in an agent home are none of its business.
 passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "mkdir -p '$fake_home/.claude/skills/other' && echo x >'$fake_home/.claude/skills/other/SKILL.md'"
+passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
+    /bin/sh -c "echo x >'$fake_home/.claude/agents/mine.md'"
 fails "$scripts/real-state.sh" guard
 
 # ── a fixture shaped like this repository ───────────────────────────────────

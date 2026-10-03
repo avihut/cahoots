@@ -1,0 +1,1 @@
+{{description}} Hands it to another coding agent through cahoots (task kind {{kind}}) and reports back what it said.

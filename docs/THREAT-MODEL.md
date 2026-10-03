@@ -60,6 +60,13 @@ as a label, and resuming preserves the recorded kind, role and candidate
 under the existing resume checks; later edits to the kind cannot change
 that session's fence.
 
+`install` writes a kind's description — the person's own text — into that
+kind's subagent definition in the caller's harness, where the caller's model
+reads it to decide when to hand a task over. It sits in the definition's
+description field only, quoted for that file's syntax and substituted after
+every placeholder. The subagent's instructions are fixed text naming the
+validated kind, so the description cannot change what the subagent runs.
+
 **Resuming is not a side door.** `resume` continues a harness's own session,
 and is a new run in every other respect: gated, slotted, depth-checked,
 recorded. It carries the ROLE's fence again rather than trusting what the
@@ -249,5 +256,6 @@ list is left in the order a person wrote.
 
 No network code. No credential file is ever read. No shell is ever spawned.
 No harness settings or permission file is ever edited — rules are printed for
-a human to add, and `doctor` checks them read-only. `uninstall` removes only
-files that still carry cahoots' name.
+a human to add, and `doctor` checks them read-only. `install` and
+`uninstall` remove only files the manifest lists that still carry cahoots'
+name — `install` only the subagents of kinds that are gone.

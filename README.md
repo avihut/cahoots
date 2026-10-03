@@ -64,6 +64,7 @@ cahoots settings        # see and change every setting
 ```
 
 `install` adds cahoots' skills and a delegate agent to Claude Code and Codex,
+plus one subagent for each [task kind](#task-kinds) you define,
 and looks for a [usage meter](#usage-meters): if it finds one it uses it, and
 if it finds more than one it asks you which. It also prints the permission
 rules that let each agent call cahoots without asking you every time. It
@@ -217,6 +218,13 @@ at most 1024 Unicode characters and contain no control characters or Unicode
 line/paragraph separators. Description text is preserved as metadata and
 never added to argv or a brief. Candidate lists must be nonempty, with no
 exact duplicate harness/model/effort triples. Unknown fields are refused.
+
+Each kind also becomes a subagent in Claude Code and Codex,
+`cahoots-kind-<name>`, described in your words, so your agent hands a
+matching task over by itself. `cahoots install` writes them: run it again
+after you add, change or remove a kind, and `cahoots doctor` tells you when
+it is due. A harness gets no subagent for a kind whose candidates are all on
+that harness, since an agent never delegates to itself.
 
 Create, rename or remove a kind by editing its complete table in config.toml.
 No kinds ship by default. Description, role and candidates inside each

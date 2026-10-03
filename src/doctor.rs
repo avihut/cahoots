@@ -11,6 +11,7 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Res};
 use crate::harness;
+use crate::install::files::{Stale, StaleWhy};
 use crate::install::rules;
 use crate::meter::{Answer, Ask, Ccusage, Chosen, UsageMeter, detect, tokens};
 use crate::model::HarnessId;
@@ -172,7 +173,7 @@ pub fn checks() -> Res<Vec<Check>> {
         });
     }
 
-    let stale = crate::install::files::stale(&dirs);
+    let stale = crate::install::files::stale(&dirs, &registry.kinds);
     checks.push(if stale.is_empty() {
         check(
             "installed files",
@@ -180,12 +181,7 @@ pub fn checks() -> Res<Vec<Check>> {
             "nothing installed is out of date",
         )
     } else {
-        let paths: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
-        check(
-            "installed files",
-            Status::Warn,
-            format!("out of date — run `cahoots install`: {}", paths.join(", ")),
-        )
+        check("installed files", Status::Warn, stale_detail(&stale))
     });
 
     match &registry.meters.usage {
@@ -211,6 +207,22 @@ pub fn checks() -> Res<Vec<Check>> {
 
 /// The usage meter: is it there and usable, and what does it say about each
 /// enabled target?
+/// Doctor's words for what `install` would change, each path with why.
+fn stale_detail(stale: &[Stale]) -> String {
+    let paths: Vec<String> = stale
+        .iter()
+        .map(|file| {
+            let why = match file.why {
+                StaleWhy::Changed => "changed",
+                StaleWhy::NotInstalled => "not installed yet",
+                StaleWhy::NoLongerWanted => "no longer wanted",
+            };
+            format!("{} ({why})", file.path.display())
+        })
+        .collect();
+    format!("out of date — run `cahoots install`: {}", paths.join(", "))
+}
+
 fn meter_checks(checks: &mut Vec<Check>, registry: &Registry, meter: &UsageMeter) {
     let name = format!("meter: {}", meter.id());
     let by = match registry.meters.usage_chosen_by {
@@ -375,5 +387,23 @@ mod tests {
         ]);
         assert_eq!(envelope.code, 34);
         assert_eq!(envelope.message.as_deref(), Some("1 check(s) failed"));
+    }
+
+    #[test]
+    fn a_stale_file_says_why() {
+        let stale = [
+            (StaleWhy::Changed, "/h/a.md"),
+            (StaleWhy::NotInstalled, "/h/b.toml"),
+            (StaleWhy::NoLongerWanted, "/h/c.md"),
+        ]
+        .map(|(why, path)| Stale {
+            path: path.into(),
+            why,
+        });
+        assert_eq!(
+            stale_detail(&stale),
+            "out of date — run `cahoots install`: /h/a.md (changed), /h/b.toml (not installed \
+             yet), /h/c.md (no longer wanted)"
+        );
     }
 }
