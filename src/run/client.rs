@@ -24,6 +24,7 @@ use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{self, RunDir, RunRecord, State, now};
 use crate::spawn;
+use crate::survival;
 
 const POLL: Duration = Duration::from_millis(150);
 /// A `starting` record this young may simply not have its supervisor yet.
@@ -172,6 +173,12 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
     // The commit the run starts from: for a fork, the one it will be cut at;
     // in place, the caller's tree as it is before the writer exists.
     let base_commit = patch::head(&dirs, &run_dir, None, &roots);
+    // A fork's repository, pinned here, before the writer exists: what its
+    // survival is read against later, whatever the tree's `.git` says then.
+    let base_repo = match placement {
+        Placement::Fork => survival::pin(&dirs, &run_dir, &roots),
+        _ => None,
+    };
     let roots = owned(&roots);
 
     launch(
@@ -190,6 +197,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             gitdir: None,
             roots,
             base_commit,
+            base_repo,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -221,6 +229,7 @@ struct Launch {
     /// The asking client's workspace and the run's directory (`RunRecord::roots`).
     roots: Vec<PathBuf>,
     base_commit: Option<Commit>,
+    base_repo: Option<survival::RepoPin>,
     depth: u32,
     timeout_secs: Option<u64>,
     wait_secs: Option<u64>,
@@ -256,6 +265,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         roots: launch.roots,
         base_commit: launch.base_commit,
         patch: None,
+        base_repo: launch.base_repo,
         cwd: launch.cwd,
         placement: launch.placement,
         depth: launch.depth,
@@ -410,6 +420,11 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
         Placement::Fork => old.base_commit.clone(),
         _ => patch::head(&dirs, &old.cwd, None, &roots),
     };
+    // Its repository too: the pin taken when the chain began.
+    let base_repo = match old.placement {
+        Placement::Fork => old.base_repo.clone(),
+        _ => None,
+    };
     let roots = owned(&roots);
 
     launch(
@@ -430,6 +445,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             gitdir: old.gitdir,
             roots,
             base_commit,
+            base_repo,
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
@@ -519,16 +535,19 @@ pub fn cancel(id: &str) -> Res<Envelope> {
 /// `outcome`: what became of a run's result. The caller says so right after
 /// it used (or dropped) the answer — it is the only ground truth the learning
 /// has, which is why a missing outcome stays "unknown" and is never guessed.
+///
+/// A fork writer's is followed by a first measurement of how much of its
+/// diff survived (`survival`), filed in the history. Whatever that finds, or
+/// fails to find, the outcome and its envelope are the same.
 pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
     refuse_inside_a_sandbox("outcome")?;
     let dirs = Dirs::resolve()?;
     let invoker = invoker_roots()?;
     reconcile(&dirs, &borrowed(&invoker));
     record::validate_id(id)?;
-    let finished = crate::history::stories(&crate::history::read(&dirs))
-        .iter()
-        .any(|story| story.run == id);
-    if !finished {
+    let stories = crate::history::stories(&crate::history::read(&dirs));
+    let story = stories.iter().find(|story| story.run == id);
+    let Some(story) = story else {
         // Still going, or never existed: the run directory tells which.
         let record = RunDir::open(&dirs, id)?.load()?;
         return Err(Fail::new(
@@ -538,7 +557,7 @@ pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
                 record.id
             ),
         ));
-    }
+    };
     crate::history::append(
         &dirs,
         &crate::history::Event::Outcome {
@@ -547,6 +566,11 @@ pub fn outcome(id: &str, outcome: crate::history::Outcome) -> Res<Envelope> {
             outcome,
         },
     )?;
+    if survival::measurable(story) && !survival::superseded(&stories).contains(id) {
+        // The outcome is recorded already: a measurement that cannot be
+        // filed is lost, and nothing else.
+        let _ = survival::record(&dirs, story, &borrowed(&invoker));
+    }
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({ "run": id, "outcome": outcome })))
 }
 

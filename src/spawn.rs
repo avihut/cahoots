@@ -553,6 +553,24 @@ fn is_repository_marker(marker: &Path, top: &Path) -> bool {
         && fs::canonicalize(&gitdir).is_ok_and(|real| owned(&real))
 }
 
+/// `path`, canonical, if it is a git directory and this user's — the path
+/// and what it resolves to — as git asks before it uses a repository. For a
+/// git directory cahoots pins and later passes to git as `--git-dir`, which
+/// skips git's own ownership check: this is that check.
+pub fn owned_git_dir(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = fs::canonicalize(path).ok()?;
+    (is_git_directory(&canonical) && owned(path) && owned(&canonical)).then_some(canonical)
+}
+
+/// The line in a small file git reads whole (a `commondir`), its line end
+/// trimmed — read without blocking, so a FIFO in its place holds nothing up.
+pub(crate) fn small_file_line(path: &Path) -> Option<Vec<u8>> {
+    whole_small_file(path).map(|bytes| trim_line_ends(&bytes).to_vec())
+}
+
 /// git's test for a git directory: a `HEAD` it takes, and `objects` and
 /// `refs` it may enter in the common directory.
 fn is_git_directory(dir: &Path) -> bool {
@@ -811,7 +829,7 @@ pub fn spawn_supervisor(run_id: &str, log: &Path) -> Res<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -820,6 +838,47 @@ mod tests {
         fs::write(&path, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         path
+    }
+
+    /// A git directory by hand: a HEAD git takes, `objects` and `refs`.
+    pub(crate) fn fake_git_dir(dir: &Path) {
+        fs::create_dir_all(dir.join("objects")).unwrap();
+        fs::create_dir_all(dir.join("refs")).unwrap();
+        fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    }
+
+    #[test]
+    fn an_owned_git_dir_is_a_git_directory_of_this_users_given_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = fs::canonicalize(root.path()).unwrap();
+        let gitdir = canonical.join("repo.git");
+        fake_git_dir(&gitdir);
+        assert_eq!(owned_git_dir(&gitdir), Some(gitdir.clone()));
+        // Through a link, it is what the link resolves to.
+        std::os::unix::fs::symlink(&gitdir, canonical.join("alias")).unwrap();
+        assert_eq!(owned_git_dir(&canonical.join("alias")), Some(gitdir));
+        fs::create_dir(canonical.join("plain")).unwrap();
+        for refused in [
+            Path::new("repo.git"),
+            &canonical.join("plain"),
+            &canonical.join("missing"),
+            Path::new("/"),
+        ] {
+            assert_eq!(owned_git_dir(refused), None, "{}", refused.display());
+        }
+    }
+
+    #[test]
+    fn a_small_file_line_is_read_whole_or_not_at_all() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("commondir");
+        fs::write(&file, "../..\n").unwrap();
+        assert_eq!(small_file_line(&file), Some(b"../..".to_vec()));
+        fs::write(&file, vec![b'x'; SMALL_FILE as usize + 1]).unwrap();
+        assert_eq!(small_file_line(&file), None);
+        let fifo = root.path().join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert_eq!(small_file_line(&fifo), None, "a FIFO is not waited on");
     }
 
     #[test]

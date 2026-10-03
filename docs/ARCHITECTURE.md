@@ -24,7 +24,8 @@ There are three layers, and only one of them holds both ends (`AGENTS.md`
 hard rule 11, held by `scripts/guard.sh`):
 
 - **The logic** is everything that decides or does: the registry, the gate
-  and its meters, runs, install, learning, the settings. It returns data:
+  and its meters, runs, install, learning and survival, the settings. It
+  returns data:
   results, refusals, and, when it needs a person, a *question* and a way to
   take the answer back. For install's meter choice, `Decision::Ask { options }`
   goes out and `detect::picked(selection, …)` takes the answer back; for the
@@ -419,6 +420,18 @@ the same job with no native dependency.)
   classification over the whole history, with no window and not cleared by
   `learn reset`, to warn about each candidate in a current kind list or a
   person-written role list that has none.
+- **Survival** — how much of a fork writer's diff is still part of the
+  repository's change since its base commit: the share of its blocks (two
+  lines or more, matched by path and hash) found in the net `git diff
+  <base> <HEAD>`, so a block a later commit rewrote falls out again. HEAD is
+  the run's own tree's, read against the git directory pinned when the run
+  started (`base_repo`), or the repository's if that worktree was removed.
+  `outcome` measures once; `report` measures once more after a 14-day window,
+  and each row, role or kind, shows the settled share, how many fell from
+  their first measure, the share still settling, and what is unknown. Each
+  measurement is a history line: a commit hash and two counts. `survival.rs`
+  is the logic and returns data; its words are `endings::reported`'s.
+  Nothing in routing reads it.
 
 **The review loop (opt-in: `[review] enabled = true`).**
 

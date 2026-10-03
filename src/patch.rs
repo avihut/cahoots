@@ -516,6 +516,26 @@ pub fn block_hash(block: &[u8]) -> String {
 /// would call a hunk — so it does not depend on the context width. Lines
 /// before the first `diff --git ` belong to no file and are not read.
 pub fn summarize(patch: &[u8]) -> PatchSummary {
+    walk(patch).summary
+}
+
+/// One changed block of a patch: the file it is in, as `summarize` lists
+/// it, and its hash and line count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub path: String,
+    pub hash: String,
+    pub lines: u32,
+}
+
+/// Every block of a patch, in its order, none left out: what `summarize`
+/// lists, before its lists are cut at `LISTED`. Pure.
+pub fn blocks(patch: &[u8]) -> Vec<Block> {
+    walk(patch).blocks
+}
+
+/// The one reading of a patch that `summarize` and `blocks` share.
+fn walk(patch: &[u8]) -> Summing {
     let mut sum = Summing::default();
     let body = patch.strip_suffix(b"\n").unwrap_or(patch);
     for line in body
@@ -559,7 +579,7 @@ pub fn summarize(patch: &[u8]) -> PatchSummary {
         }
     }
     sum.end_file();
-    sum.summary
+    sum
 }
 
 /// What `summarize` carries from line to line: the summary so far, and the
@@ -573,6 +593,8 @@ struct Summing {
     block: Vec<u8>,
     block_lines: u32,
     listed_hunks: usize,
+    /// Every block, listed or not.
+    blocks: Vec<Block>,
 }
 
 impl Summing {
@@ -599,6 +621,13 @@ impl Summing {
         let pair = (block_hash(&self.block), self.block_lines);
         self.block.clear();
         self.block_lines = 0;
+        if let Some(file) = &self.file {
+            self.blocks.push(Block {
+                path: file.path.clone(),
+                hash: pair.0.clone(),
+                lines: pair.1,
+            });
+        }
         match &mut self.file {
             Some(file) if self.listed_hunks < LISTED => {
                 file.hunks.push(pair);
@@ -775,6 +804,39 @@ mod tests {
             short,
             serde_json::json!({"files": [], "added": 0, "removed": 0})
         );
+    }
+
+    #[test]
+    fn blocks_are_what_the_summary_lists_and_none_is_left_out() {
+        let patch = concat!(
+            "diff --git a/f b/f\n@@ -1,3 +1,3 @@\n-a\n+b\n c\n-d\n",
+            "diff --git a/logo.png b/logo.png\nGIT binary patch\nliteral 3\n",
+            "diff --git \"a/caf\\303\\251\" \"b/caf\\303\\251\"\n@@ -0,0 +1 @@\n+x\n",
+        );
+        let summary = summarize(patch.as_bytes());
+        let listed: Vec<(String, String, u32)> = summary
+            .files
+            .iter()
+            .flat_map(|file| {
+                file.hunks
+                    .iter()
+                    .map(|(hash, lines)| (file.path.clone(), hash.clone(), *lines))
+            })
+            .collect();
+        let all: Vec<(String, String, u32)> = blocks(patch.as_bytes())
+            .into_iter()
+            .map(|block| (block.path, block.hash, block.lines))
+            .collect();
+        assert_eq!(all, listed);
+        assert_eq!(all.len(), 3);
+
+        // Past `LISTED`, the summary stops listing; `blocks` does not.
+        let mut long = String::new();
+        for n in 0..1001 {
+            long.push_str(&format!("diff --git a/f{n} b/f{n}\n@@ -0,0 +1 @@\n+x\n"));
+        }
+        assert_eq!(blocks(long.as_bytes()).len(), 1001);
+        assert!(blocks(b"").is_empty());
     }
 
     #[test]

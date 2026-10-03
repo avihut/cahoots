@@ -209,6 +209,25 @@ impl World {
         fs::write(&path, record.to_string()).unwrap();
     }
 
+    /// Makes `run`'s history `secs` older than it is: every line about it
+    /// (finished, outcome, survival) moved back by as much, so a window can
+    /// pass without a clock.
+    pub fn age_history(&self, run: &str, secs: u64) {
+        let path = self.state.join("history.jsonl");
+        let text: String = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut event: Value = serde_json::from_str(line).unwrap();
+                if event["run"] == run {
+                    event["t"] = (event["t"].as_u64().unwrap() - secs).into();
+                }
+                format!("{event}\n")
+            })
+            .collect();
+        fs::write(&path, text).unwrap();
+    }
+
     /// A shell script at `path`, runnable, written the way `fake_at` writes a
     /// fake: by `cp`, from a file beside it.
     pub fn script_at(&self, path: &Path, text: &str) {

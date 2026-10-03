@@ -337,7 +337,7 @@ fn linked_worktrees(common: &Path) -> Res<Vec<OsString>> {
 }
 
 /// The git directory git takes `worktree` to have now, canonical.
-fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Option<PathBuf> {
+pub(crate) fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Option<PathBuf> {
     let mut roots = roots.to_vec();
     roots.push(worktree);
     let git = spawn::system_tool("git", &roots).ok()?;
@@ -365,7 +365,7 @@ fn git_dir_of(dirs: &Dirs, worktree: &Path, roots: &[&Path]) -> Option<PathBuf> 
 
 /// Whether `gitdir` is where git keeps a linked worktree of the repository
 /// whose common directory is `common`.
-fn is_linked_gitdir(gitdir: &Path, common: &Path) -> bool {
+pub(crate) fn is_linked_gitdir(gitdir: &Path, common: &Path) -> bool {
     gitdir.parent() == Some(canonical_of(common).join("worktrees").as_path())
 }
 

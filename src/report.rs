@@ -9,6 +9,10 @@
 //! themselves (`calibrate::Evidence`, the one definition), the share of each
 //! kind of result with its standard error, and the score with its own. They
 //! describe; they never decide — nothing here reaches routing, a gate or a cap.
+//!
+//! It also settles survival (`survival`): a fork writer whose window has
+//! passed is measured once more, here, and the measurement filed in the
+//! history; each row says how much of its writers' diffs survived.
 
 use std::collections::BTreeMap;
 
@@ -21,8 +25,10 @@ use crate::dirs::Dirs;
 use crate::exit::{Envelope, Exit, Res};
 use crate::history::{self, Outcome, Story};
 use crate::model::{Candidate, Effort, HarnessId, ModelName, Role, TaskKindName};
+use crate::paths::Workspace;
 use crate::registry::{KindEntry, Registry};
 use crate::run::record::{State, now};
+use crate::survival::{self, Standing};
 
 /// How many rated or failed runs a row needs before its estimates are put in
 /// words. A presentation floor only: it moves no route, and the JSON keeps
@@ -123,6 +129,10 @@ pub struct Row {
     pub tokens_out: u64,
     pub median_secs: u64,
     pub evidence: EvidenceView,
+    /// How much of the row's fork writers' diffs survived; absent when it
+    /// has no writer that can be measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub survival: Option<survival::Tally>,
 }
 
 /// A row being added to: its counters, the durations its median comes from,
@@ -132,10 +142,12 @@ struct Tally {
     row: Row,
     secs: Vec<u64>,
     evidence: Evidence,
+    /// The survival standings of the row's measured runs.
+    standings: Vec<Standing>,
 }
 
 impl Tally {
-    fn add(&mut self, story: &Story) {
+    fn add(&mut self, story: &Story, standing: Option<&Standing>) {
         let row = &mut self.row;
         row.runs += 1;
         match story.state {
@@ -157,6 +169,7 @@ impl Tally {
         row.tokens_out += story.tokens_out;
         self.secs.push(story.secs);
         self.evidence.observe(story);
+        self.standings.extend(standing.cloned());
     }
 
     fn finish(mut self) -> Row {
@@ -164,15 +177,24 @@ impl Tally {
         self.row.median_secs = self.secs.get(self.secs.len() / 2).copied().unwrap_or(0);
         self.evidence.finish();
         self.row.evidence = view(&self.evidence);
+        self.row.survival = (!self.standings.is_empty()).then(|| survival::tally(&self.standings));
         self.row
     }
 }
 
-pub fn rows(stories: &[Story]) -> BTreeMap<String, (Candidate, Row)> {
-    role_rows(stories.iter())
+/// The role rows, from the stories and the survival standings of the runs
+/// that are measured (`survival::standings`). Pure: it runs no git.
+pub fn rows(
+    stories: &[Story],
+    standings: &BTreeMap<&str, Standing>,
+) -> BTreeMap<String, (Candidate, Row)> {
+    role_rows(stories.iter(), standings)
 }
 
-fn role_rows<'a>(stories: impl Iterator<Item = &'a Story>) -> BTreeMap<String, (Candidate, Row)> {
+fn role_rows<'a>(
+    stories: impl Iterator<Item = &'a Story>,
+    standings: &BTreeMap<&str, Standing>,
+) -> BTreeMap<String, (Candidate, Row)> {
     let mut grouped: BTreeMap<String, (Candidate, Tally)> = BTreeMap::new();
     for story in stories {
         let key = format!(
@@ -186,7 +208,7 @@ fn role_rows<'a>(stories: impl Iterator<Item = &'a Story>) -> BTreeMap<String, (
             .entry(key)
             .or_insert_with(|| (story.target.clone(), Tally::default()))
             .1
-            .add(story);
+            .add(story, standings.get(story.run.as_str()));
     }
     grouped
         .into_iter()
@@ -240,10 +262,11 @@ pub struct Summary {
 /// The role totals and the kind groups. Every candidate of every kind in
 /// `kinds` has a row, runs or none; a kind or candidate no longer configured
 /// keeps the row its runs in the window earned. Runs with no kind are in the
-/// role totals only.
+/// role totals only. A row's survival is from `standings`.
 pub fn summarize(
     stories: &[Story],
     kinds: &BTreeMap<TaskKindName, KindEntry>,
+    standings: &BTreeMap<&str, Standing>,
     since: u64,
 ) -> Summary {
     let window: Vec<&Story> = stories.iter().filter(|story| story.t >= since).collect();
@@ -260,12 +283,12 @@ pub fn summarize(
             groups
                 .entry(KindGroup::new(kind, story.role, &story.target))
                 .or_default()
-                .add(story);
+                .add(story, standings.get(story.run.as_str()));
         }
     }
     Summary {
         runs: window.len(),
-        by_role_and_target: role_rows(window.iter().copied())
+        by_role_and_target: role_rows(window.iter().copied(), standings)
             .into_iter()
             .map(|(key, (_, row))| (key, row))
             .collect(),
@@ -329,20 +352,62 @@ pub fn report(days: u64, suggest: bool) -> Res<Envelope> {
     let dirs = Dirs::resolve()?;
     let config = UserConfig::load(&dirs.config_file())?;
     let registry = Registry::effective(&config);
-    let stories = history::stories(&history::read(&dirs));
-    let since = now().saturating_sub(days * 24 * 3600);
-    let summary = summarize(&stories, &registry.kinds, since);
+    let now = now();
+    let since = now.saturating_sub(days * 24 * 3600);
+    let mut events = history::read(&dirs);
+    // Over the whole history: a resumed run outside the window still
+    // stands for the run it continues.
+    let superseded = survival::superseded(&history::stories(&events));
+    let shown: Vec<Story> = history::stories(&events)
+        .into_iter()
+        .filter(|story| story.t >= since)
+        .collect();
+    let caught = settle(&dirs, &shown, &superseded, now);
+    let measured = caught.events.len();
+    events.extend(caught.events);
+    let stories = history::stories(&events);
+    let standings = survival::standings(&stories, &superseded, now);
+    let summary = summarize(&stories, &registry.kinds, &standings, since);
     let mut data = json!({
         "days": days,
         "runs": summary.runs,
         "sample_floor": SAMPLE_FLOOR,
         "by_role_and_target": summary.by_role_and_target,
         "by_kind_and_target": summary.by_kind_and_target,
+        "survival": {
+            "window_days": survival::WINDOW_DAYS,
+            "measured": measured,
+            "pending": caught.pending,
+        },
     });
     if suggest {
         data["routing"] = routing(&dirs, &registry, &stories)?;
     }
     Ok(Envelope::new(Exit::Ok, None).with_data(data))
+}
+
+/// Measures the shown runs whose window has passed. Never a refusal: inside
+/// the Codex sandbox, or where the asking workspace cannot be read, nothing
+/// is measured and every due run stays pending.
+fn settle(
+    dirs: &Dirs,
+    stories: &[Story],
+    superseded: &std::collections::BTreeSet<String>,
+    now: u64,
+) -> survival::CatchUp {
+    let untouched = || survival::CatchUp {
+        events: Vec::new(),
+        pending: survival::due(stories, superseded, now).len(),
+    };
+    if crate::env::in_codex_sandbox() {
+        return untouched();
+    }
+    let Ok(workspace) = std::env::current_dir().and_then(|cwd| {
+        Workspace::around(&cwd).map_err(|fail| std::io::Error::other(fail.message))
+    }) else {
+        return untouched();
+    };
+    survival::catch_up(dirs, stories, superseded, now, &workspace.roots())
 }
 
 #[cfg(test)]
@@ -389,7 +454,10 @@ mod tests {
             sampled: false,
             base_commit: None,
             patch: None,
+            resumed_from: None,
+            base_repo: None,
             outcome,
+            measures: Vec::new(),
         }
     }
 
@@ -513,7 +581,7 @@ mod tests {
                 None,
             ),
         ];
-        let summary = summarize(&stories, &BTreeMap::new(), 0);
+        let summary = summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 0);
         let row = &summary.by_kind_and_target["k · review · codex · m · high"];
         // Counters keep their own definitions…
         assert_eq!(
@@ -550,12 +618,15 @@ mod tests {
                 None,
             ),
         ];
-        let summary = summarize(&stories, &BTreeMap::new(), 100);
+        let summary = summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 100);
         assert_eq!(summary.runs, 1);
         assert_eq!(summary.by_kind_and_target.values().next().unwrap().runs, 1);
-        assert_eq!(summarize(&stories, &BTreeMap::new(), 101).runs, 0);
+        assert_eq!(
+            summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 101).runs,
+            0
+        );
         assert!(
-            summarize(&stories, &BTreeMap::new(), 101)
+            summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 101)
                 .by_kind_and_target
                 .is_empty()
         );
@@ -579,7 +650,7 @@ mod tests {
             None,
         );
         let plain = story("c", 10, None, Role::Review, &high, State::Done, None);
-        let summary = summarize(&[old_role, removed, plain], &kinds, 0);
+        let summary = summarize(&[old_role, removed, plain], &kinds, &BTreeMap::new(), 0);
         let keys: Vec<&str> = summary
             .by_kind_and_target
             .keys()
@@ -608,5 +679,40 @@ mod tests {
             summary.by_role_and_target["review · codex · m · high"].runs,
             2
         );
+    }
+
+    #[test]
+    fn a_row_shows_survival_only_for_the_runs_measured() {
+        let target = candidate("m", Effort::High);
+        let stories = vec![
+            story(
+                "w",
+                5,
+                Some("rust-fix"),
+                Role::Implement,
+                &target,
+                State::Done,
+                None,
+            ),
+            story("r", 5, None, Role::Advise, &target, State::Done, None),
+        ];
+        let plain = rows(&stories, &BTreeMap::new());
+        for (_, row) in plain.values() {
+            let json = serde_json::to_value(row).unwrap();
+            assert!(json.get("survival").is_none(), "{json}");
+        }
+        let standings = BTreeMap::from([("w", Standing::default())]);
+        let with = rows(&stories, &standings);
+        let (_, writer) = &with["implement · codex · m · high"];
+        assert_eq!(
+            serde_json::to_value(writer).unwrap()["survival"],
+            json!({"unknown": 0, "unmeasured": 1})
+        );
+        let (_, reader) = &with["advise · codex · m · high"];
+        assert!(reader.survival.is_none());
+        // A kind's row inherits it.
+        let summary = summarize(&stories, &BTreeMap::new(), &standings, 0);
+        let kind_row = &summary.by_kind_and_target["rust-fix · implement · codex · m · high"];
+        assert_eq!(kind_row.survival.as_ref().unwrap().unmeasured, 1);
     }
 }

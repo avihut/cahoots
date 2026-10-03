@@ -353,8 +353,8 @@ has its place.
 - **The caller's outcome label** (`cahoots outcome`) is the only grader
   today. It stays, as one signal among several.
 - **The kept-diff ratio** (#37) is implicit and costs nothing. It is the
-  share of a writer's hunks that turn up in the repository's history after
-  the base commit. It is computed when the outcome is recorded, and again
+  share of a writer's hunks that are still part of the change since the
+  base commit. It is computed when the outcome is recorded, and again
   after a survival window. It is read-only, with `git` under the binary
   policy.
 - **Hidden tests on replay** (#39) follow the SWE-bench pattern:
