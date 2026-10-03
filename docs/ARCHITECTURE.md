@@ -232,7 +232,9 @@ a writer runs in it (`placement::unfit`), and the worktree's git directory is
 read once, at the cut, and recorded (`gitdir`). The run reports `worktree` and
 `changes`, a `git status` read against that recorded git directory — or, when
 the status cannot be read, `changes: null` and `changes_error`, which says
-why. Bringing the change over is the caller's job, after reading it. A
+why. In place, the supervisor records the git configuration status would
+read (`git config --list --show-origin`) before the writer starts, in the run
+directory, and status runs afterwards only if it is unchanged. Bringing the change over is the caller's job, after reading it. A
 worktree cahoots cut itself is removed once the last run on record that
 works in it ages out; one daft cut is daft's to remove.
 

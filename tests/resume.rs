@@ -479,3 +479,43 @@ fn a_resume_from_another_worktree_keeps_both_workspaces_out_of_its_tools() {
         );
     }
 }
+
+#[test]
+fn a_resumed_in_place_run_is_held_to_the_configuration_it_started_with() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    let brief = world.brief("FAKE: write=first.txt");
+    let first = world.ask(&[
+        "run",
+        "--role",
+        "implement",
+        "--in-place",
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(first.code, 0, "{}", first.json);
+    // Between the runs the configuration changes, a person's doing; during
+    // the resumed run it does not.
+    world.git(&["config", "cahoots.test", "between-the-runs"]);
+    let brief = world.brief("FAKE: write=second.txt");
+    let again = world.ask(&[
+        "resume",
+        &first.run_id(),
+        "--caller",
+        "claude",
+        "--brief",
+        path_str(&brief),
+    ]);
+    assert_eq!(again.code, 0, "{}", again.json);
+    let changes = again.data()["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no changes: {}", again.json));
+    assert!(
+        changes
+            .iter()
+            .any(|line| line.as_str().unwrap().ends_with("second.txt")),
+        "{changes:?}"
+    );
+}

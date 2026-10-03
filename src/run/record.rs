@@ -6,6 +6,7 @@
 //! events.jsonl    the callee's stdout, verbatim
 //! final.md        the callee's answer
 //! supervisor.log  what the supervisor saw, and the callee's stderr
+//! git-config      in place: the git configuration before the writer ran
 //! lock            held exclusively for the supervisor's lifetime — liveness
 //! cancel          a marker the supervisor polls
 //! ```
@@ -201,6 +202,11 @@ impl RunDir {
     }
     pub fn log_path(&self) -> PathBuf {
         self.path.join("supervisor.log")
+    }
+    /// An in-place run's git configuration as it was before the writer ran
+    /// (`placement::config_listing`).
+    pub fn git_config_path(&self) -> PathBuf {
+        self.path.join("git-config")
     }
 
     /// The run's log, to append a line to: what the supervisor saw, for a

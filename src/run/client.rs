@@ -600,11 +600,18 @@ fn report(
         data["worktree"] = json!(record.cwd);
         let mut roots = invoker.to_vec();
         roots.extend(record.tool_roots());
-        let (base, gitdir) = match record.placement {
-            Placement::Fork => (record.base.as_deref(), record.gitdir.as_deref()),
-            _ => (None, None),
+        let read = match (record.placement, record.base.as_deref()) {
+            (Placement::Fork, Some(base)) => {
+                placement::changes(dirs, &record.cwd, base, record.gitdir.as_deref(), &roots)
+            }
+            _ => placement::changes_in_place(
+                dirs,
+                &record.cwd,
+                fs::read(dir.git_config_path()).ok().as_deref(),
+                &roots,
+            ),
         };
-        match placement::changes(dirs, &record.cwd, base, gitdir, &roots) {
+        match read {
             Ok(lines) => data["changes"] = json!(lines),
             Err(why) => {
                 data["changes"] = Value::Null;

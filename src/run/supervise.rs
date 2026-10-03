@@ -137,6 +137,23 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         }
     }
 
+    // In place, the writer gets the caller's own tree, `.git` and all. What
+    // git status will read once it is done is recorded now, before it starts,
+    // and status runs afterwards only if that is unchanged
+    // (`placement::changes_in_place`). A reading that fails records nothing,
+    // and then status does not run at all.
+    if record.placement == Placement::InPlace {
+        match placement::config_listing(dirs, &record.cwd, &record.tool_roots()) {
+            Ok(listing) => write_private(&dir.git_config_path(), &listing)?,
+            Err(why) => {
+                let _ = writeln!(
+                    dir.log(),
+                    "[supervisor] the git configuration was not recorded: {why}"
+                );
+            }
+        }
+    }
+
     let spec = RunSpec {
         role: record.role,
         target: record.target.clone(),

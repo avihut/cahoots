@@ -449,6 +449,38 @@ fn a_daft_that_hangs_is_stopped() {
 }
 
 #[test]
+fn a_git_cut_that_fails_its_pin_is_refused_and_left_where_it_is() {
+    let world = World::new();
+    // A git, outside the workspace, that cuts as git does but says the new
+    // worktree's git directory is not where git's layout puts it.
+    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|git| git.is_file())
+        .expect("git on PATH");
+    let wrap = world.root.join("wrap");
+    world.script_at(
+        &wrap.join("git"),
+        &format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = --absolute-git-dir ] && \
+             echo / && exit 0\ndone\nexec '{}' \"$@\"\n",
+            real.display()
+        ),
+    );
+    world.prefix_path(&wrap);
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    let left = world.state.join("worktrees").join(answer.run_id());
+    assert!(
+        answer.message().contains(path_str(&left)),
+        "the refusal does not name the worktree: {}",
+        answer.json
+    );
+    assert!(answer.message().contains("left"), "{}", answer.json);
+    assert!(left.is_dir(), "the worktree was not left where it is");
+    assert_never_ran(&world, &answer, &left);
+}
+
+#[test]
 fn a_git_fork_runs_no_hooks() {
     let world = World::new();
     let cut_by_hand = |name: &str| {
@@ -657,6 +689,31 @@ fn a_ps_inside_the_workspace_is_not_run() {
     assert!(!marker.exists(), "the planted ps ran");
     // Without a ps it may run, nothing is known of when the callee started.
     assert!(world.record(&answer.run_id())["callee_started"].is_null());
+}
+
+#[test]
+fn a_harness_asked_its_version_finds_nothing_in_the_workspace() {
+    let world = World::new();
+    // Claude Code as a launcher installs it: a script that runs a tool of
+    // its own, found on PATH, then answers.
+    world.script_at(
+        &world.bin.join("claude"),
+        "#!/bin/sh\nharness-helper >/dev/null 2>&1\necho '2.1.278 (Claude Code)'\n",
+    );
+    let marker = world.root.join("planted-helper-ran");
+    world.script_at(
+        &world.work.join("bin/harness-helper"),
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    world.prefix_path(&world.work.join("bin"));
+    // Picking runs the target's `--version`, and nothing else of it.
+    let answer = world.ask(&["pick", "--role", "advise", "--caller", "codex"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert_eq!(answer.data()["target"]["harness"], "claude");
+    assert!(
+        !marker.exists(),
+        "the harness's version check ran a tool from the workspace"
+    );
 }
 
 #[test]

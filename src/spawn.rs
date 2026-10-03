@@ -111,7 +111,10 @@ fn canonical_of(path: &Path) -> PathBuf {
 /// What a finished helper command produced.
 pub struct Output {
     pub status: Option<i32>,
+    /// Its stdout as text, or empty when it is not UTF-8.
     pub stdout: String,
+    /// Its stdout as it came, byte for byte.
+    pub bytes: Vec<u8>,
 }
 
 /// Runs a short-lived helper (`--version`, `git`, `ps`) with a deadline and a
@@ -174,9 +177,9 @@ pub fn run_helper_with_env<S: AsRef<OsStr>>(
     let reader = child.stdout.take().map(|mut pipe| {
         std::thread::spawn(move || {
             use std::io::Read;
-            let mut text = String::new();
-            let _ = pipe.read_to_string(&mut text);
-            text
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
         })
     });
     let started = Instant::now();
@@ -198,12 +201,13 @@ pub fn run_helper_with_env<S: AsRef<OsStr>>(
             Err(error) => return Err(Fail::internal(format!("waiting for a helper: {error}"))),
         }
     };
-    let stdout = reader
+    let bytes = reader
         .and_then(|thread| thread.join().ok())
         .unwrap_or_default();
     Ok(Output {
         status: status.code(),
-        stdout,
+        stdout: String::from_utf8(bytes.clone()).unwrap_or_default(),
+        bytes,
     })
 }
 

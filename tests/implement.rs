@@ -497,3 +497,66 @@ fn a_status_git_cannot_read_is_said_and_the_run_keeps_its_code() {
         later.json
     );
 }
+
+#[test]
+fn in_place_changes_are_read_while_the_git_configuration_is_unchanged() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    let answer = implement(&world, "FAKE: write=edit.txt", &["--in-place"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(
+        answer.data()["changes"].to_string().contains("edit.txt"),
+        "{}",
+        answer.json
+    );
+    assert!(
+        answer.data().get("changes_error").is_none(),
+        "{}",
+        answer.json
+    );
+    assert!(
+        world.run_file(&answer.run_id(), "git-config").is_file(),
+        "nothing was recorded before the writer ran"
+    );
+}
+
+#[test]
+fn in_place_changes_are_not_read_once_the_git_configuration_changed() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    // What the fake writes, so that its rewrite keeps the size and git
+    // must read the file again, through any filter, to tell.
+    fs::write(world.work.join("tracked.txt"), "written by the callee\n").unwrap();
+    world.git(&["add", "tracked.txt"]);
+    world.git(&["commit", "-q", "-m", "chore: a tracked file"]);
+    let marker = world.root.join("filter-ran");
+    let filter = world.root.join("filter");
+    world.script_at(
+        &filter,
+        &format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+    );
+    // The writer names a filter in the tree's own config, puts every file
+    // through it and rewrites a tracked one: a git status there would run it.
+    let brief = format!(
+        "FAKE: append=.git/config::[filter \"evil\"]\\n\\tclean = {}\\n\n\
+         FAKE: append=.gitattributes::* filter=evil\\n\n\
+         FAKE: write=tracked.txt\n",
+        filter.display()
+    );
+    let answer = implement(&world, &brief, &["--in-place"]);
+    assert_eq!(
+        answer.code, 0,
+        "the run keeps its own code: {}",
+        answer.json
+    );
+    assert!(answer.data()["changes"].is_null(), "{}", answer.json);
+    assert_eq!(
+        answer.data()["changes_error"],
+        "the git configuration changed during the run, so git status was not run — read the \
+         tree yourself before trusting it"
+    );
+    assert!(!marker.exists(), "cahoots ran the writer's filter");
+    // The control: git status there, as anyone runs it, does run it.
+    git_in(&world.work, &["status", "--short"]);
+    assert!(marker.exists(), "the control never ran the filter");
+}

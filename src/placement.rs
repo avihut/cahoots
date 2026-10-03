@@ -148,9 +148,12 @@ pub fn cut(
             "`git worktree add` refused (a repository with no commit has no HEAD to cut from)",
         ));
     }
+    // A refused pin leaves the worktree where it is: no run on record points
+    // at it, so the refusal names it, for a person to remove.
     let gitdir = pin(dirs, &path, &common, &roots, &before).map_err(|why| {
         Fail::policy(format!(
-            "cannot cut a worktree: {}, {why} — refusing to run a writer there",
+            "cannot cut a worktree: {}, {why} — refusing to run a writer there, and the \
+             worktree is left there for a person to remove",
             path.display()
         ))
     })?;
@@ -371,7 +374,7 @@ fn is_linked_gitdir(gitdir: &Path, common: &Path) -> bool {
 pub fn changes(
     dirs: &Dirs,
     worktree: &Path,
-    base: Option<&Path>,
+    base: &Path,
     gitdir: Option<&Path>,
     roots: &[&Path],
 ) -> Result<Vec<String>, String> {
@@ -380,25 +383,93 @@ pub fn changes(
     }
     let mut roots = roots.to_vec();
     roots.push(worktree);
-    let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
-    // In place there is no base: the caller's own tree, which a person let
-    // the writer into, and no cut to hold it to.
-    if let Some(base) = base {
-        let gitdir = fork_git_dir(dirs, worktree, base, gitdir, &roots)?;
-        let (mut git_dir, mut work_tree) =
-            (OsString::from("--git-dir="), OsString::from("--work-tree="));
-        git_dir.push(gitdir);
-        work_tree.push(worktree);
-        args.extend([git_dir, work_tree]);
+    let gitdir = fork_git_dir(dirs, worktree, base, gitdir, &roots)?;
+    status(dirs, worktree, Some(&gitdir), &roots)
+}
+
+/// [`changes`] for a writer that worked in the caller's own tree, which a
+/// person let it into: there is no cut to hold it to, and the tree's `.git`
+/// may have been within its reach. So `git status` runs only while the git
+/// configuration it would read is what it was before the writer started
+/// (`before`, from [`config_listing`]); otherwise this says why it did not.
+pub fn changes_in_place(
+    dirs: &Dirs,
+    tree: &Path,
+    before: Option<&[u8]>,
+    roots: &[&Path],
+) -> Result<Vec<String>, String> {
+    if !tree.is_dir() {
+        return Err(format!("{} is not there any more", tree.display()));
     }
-    args.extend(["status", "--short", "--untracked-files=all"].map(OsString::from));
+    let mut roots = roots.to_vec();
+    roots.push(tree);
+    let not_run = |what: &str| {
+        format!(
+            "the git configuration {what}, so git status was not run — read the tree yourself \
+             before trusting it"
+        )
+    };
+    let Some(before) = before else {
+        return Err(not_run("was not recorded before the run"));
+    };
+    match config_listing(dirs, tree, &roots) {
+        Ok(now) if now == before => status(dirs, tree, None, &roots),
+        Ok(_) => Err(not_run("changed during the run")),
+        Err(_) => Err(not_run("could not be read after the run")),
+    }
+}
+
+/// The git configuration git would read in `dir`, as git itself resolves it:
+/// every scope, includes and `includeIf` followed, each value with the file
+/// it came from (`git config --list --show-origin --show-scope -z`). It runs
+/// nothing. The snapshot taken before an in-place run and the reading
+/// compared with it after are both this, so that they can only differ where
+/// the configuration did.
+pub fn config_listing(dirs: &Dirs, dir: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
+    let mut roots = roots.to_vec();
+    roots.push(dir);
     let git = spawn::system_tool("git", &roots).map_err(|fail| fail.message)?;
+    let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
+    args.extend(["config", "--list", "--show-origin", "--show-scope", "-z"].map(OsString::from));
     let output = spawn::run_helper_with_env(
         &git,
         &args,
-        Some(worktree),
-        Duration::from_secs(30),
+        Some(dir),
+        Duration::from_secs(10),
         spawn::helper_path(&roots),
+        &[],
+    )
+    .map_err(|fail| fail.message)?;
+    match output.status {
+        Some(0) => Ok(output.bytes),
+        _ => Err(format!("`git config --list` failed in {}", dir.display())),
+    }
+}
+
+/// `git status --short` in `tree`, against `gitdir` when there is one, with
+/// the quiet settings.
+fn status(
+    dirs: &Dirs,
+    tree: &Path,
+    gitdir: Option<&Path>,
+    roots: &[&Path],
+) -> Result<Vec<String>, String> {
+    let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
+    if let Some(gitdir) = gitdir {
+        let (mut git_dir, mut work_tree) =
+            (OsString::from("--git-dir="), OsString::from("--work-tree="));
+        git_dir.push(gitdir);
+        work_tree.push(tree);
+        args.extend([git_dir, work_tree]);
+    }
+    args.extend(["status", "--short", "--untracked-files=all"].map(OsString::from));
+    let git = spawn::system_tool("git", roots).map_err(|fail| fail.message)?;
+    let output = spawn::run_helper_with_env(
+        &git,
+        &args,
+        Some(tree),
+        Duration::from_secs(30),
+        spawn::helper_path(roots),
         &[],
     )
     .map_err(|fail| fail.message)?;
@@ -411,11 +482,11 @@ pub fn changes(
             .collect()),
         Some(code) => Err(format!(
             "`git status` failed in {} (exit {code})",
-            worktree.display()
+            tree.display()
         )),
         None => Err(format!(
             "`git status` was killed by a signal in {}",
-            worktree.display()
+            tree.display()
         )),
     }
 }

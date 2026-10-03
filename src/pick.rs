@@ -91,20 +91,29 @@ fn slot_free(dirs: &Dirs, registry: &Registry, harness: HarnessId) -> bool {
     })
 }
 
-/// The harness binary, held to the binary policy and to its fingerprint.
+/// The harness binary, held to the binary policy and to its fingerprint. Its
+/// `--version` runs on the PATH the system tools get (`spawn::helper_path`):
+/// what a launcher looks up for itself comes from no workspace directory.
 pub fn locate(registry: &Registry, id: HarnessId, workspace: &[&Path]) -> Res<(PathBuf, Version)> {
     let tool = harness::harness(id);
     let configured = registry.harness(id).binary.as_deref();
     let binary = spawn::resolve_binary(tool.binary_name(), configured, workspace)?;
-    let version = spawn::run_helper(&binary, &["--version"], None, Duration::from_secs(15))
-        .ok()
-        .and_then(|output| tool.fingerprint(&output.stdout))
-        .ok_or_else(|| {
-            Fail::new(
-                Exit::TargetUnavailable,
-                format!("{} does not identify itself as {id}", binary.display()),
-            )
-        })?;
+    let version = spawn::run_helper_with_env(
+        &binary,
+        &["--version"],
+        None,
+        Duration::from_secs(15),
+        spawn::helper_path(workspace),
+        &[],
+    )
+    .ok()
+    .and_then(|output| tool.fingerprint(&output.stdout))
+    .ok_or_else(|| {
+        Fail::new(
+            Exit::TargetUnavailable,
+            format!("{} does not identify itself as {id}", binary.display()),
+        )
+    })?;
     if version < tool.tested().0 {
         return Err(Fail::new(
             Exit::TargetUnavailable,

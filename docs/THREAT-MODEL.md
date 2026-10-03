@@ -112,9 +112,9 @@ configuration.
 **Binaries** — the harness, the meter, `git`, `daft`, `ps` — resolve to
 canonical absolute paths; one inside the workspace (the caller's working
 directory and repository, the directory a run works in, and the worktree cut
-for it), or group- or world-writable, is refused. `git`, `daft` and `ps`
-look things up on a PATH without the workspace's directories in it, so `daft`
-cannot find a `git` that cahoots refused.
+for it), or group- or world-writable, is refused. `git`, `daft`, `ps`, and a
+harness asked its version, look things up on a PATH without the workspace's
+directories in it, so `daft` cannot find a `git` that cahoots refused.
 
 **The usage meter decides admission, so the caller must not reach it.** It
 is a third-party CLI — the Agent Usage tracker's `usage-cli`, or ccusage — and
@@ -226,8 +226,15 @@ before running anything in it. A writer cannot commit to the caller's branch,
 and cahoots never merges for anyone. `changes` is read with `git status`
 against the git directory recorded when the worktree was cut, never the one
 the worktree's `.git` names now; a status that fails says so
-(`changes_error`), never "no changes". A worktree is removed only when no run
-on record still works in it.
+(`changes_error`), never "no changes". In place, where the writer had the
+caller's own tree and perhaps its `.git`, `git status` runs only if the git
+configuration it would read — every scope and every included file, as git
+itself resolves them — is byte for byte what it was before the writer
+started; otherwise `changes_error` says the configuration changed, and
+nothing runs. A worktree is removed only when no run on record still works in
+it. One cahoots cut whose git directory then fails the pin is refused before
+the writer starts and left where it is: no run on record points at it, so
+the refusal names its path, for a person to remove.
 
 ## Learning is an injection channel
 

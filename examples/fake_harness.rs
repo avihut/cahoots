@@ -14,6 +14,8 @@
 //! FAKE: dump           answer with this process's argv, cwd and environment
 //! FAKE: child          leave a long-lived child in its own process group
 //! FAKE: write=<name>   "edit": create <name> in the working directory
+//! FAKE: append=<file>::<text>  add <text> to <file> there (`\n`, `\t`
+//!                      for a newline and a tab); as many as the brief has
 //! ```
 
 use std::io::{Read, Write};
@@ -301,6 +303,21 @@ fn main() {
     }
     if let Some(name) = directive("write") {
         std::fs::write(&name, "written by the callee\n").expect("write in cwd");
+    }
+    for (file, text) in brief.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("FAKE:")?
+            .trim()
+            .strip_prefix("append=")?
+            .split_once("::")
+    }) {
+        let text = text.replace("\\n", "\n").replace("\\t", "\t");
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+            .expect("append in cwd");
+        out.write_all(text.as_bytes()).expect("append");
     }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));
