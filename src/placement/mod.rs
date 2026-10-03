@@ -150,9 +150,11 @@ pub fn cut(
     // refused here, as it always was, before anything cuts.
     let quiet = quiet_git_args(dirs)?;
     // A tool that checks out as it cuts reads the configuration in the new
-    // worktree before cahoots can: what cahoots turns off is what it reads
-    // in the tree the worktree is cut from, the closest it can get. One that
-    // cuts with no checkout runs no filter, so nothing is turned off for it.
+    // worktree before cahoots can, where a conditional include may hold that
+    // does not hold here: so every file an include could reach is read, as
+    // if every condition held, and every filter named anywhere is turned
+    // off. A tool that cuts with no checkout runs no filter, and nothing is
+    // turned off for it: cahoots checks out after it (`check_out`).
     let filters = match tool.checkout() {
         Checkout::Cahoots => BTreeSet::new(),
         Checkout::Tool => {
@@ -162,22 +164,21 @@ pub fn cut(
                      turned off"
                 ))
             })?;
-            if let Some(key) = provider::includes_read_per_worktree(&listing).first() {
-                return Err(Fail::policy(format!(
-                    "cannot cut a worktree: the repository's own git configuration sets {key}, an \
-                     include git reads for each worktree apart — what it names in a new worktree \
-                     cannot be read before {} checks it out, so not every filter could be turned \
-                     off",
-                    tool.binary_name()
-                )));
-            }
-            if hooks && let Some(key) = provider::steering_daft_hooks(&listing).first() {
+            let reached = include_closure(dirs, base, &listing, &roots)?;
+            if hooks
+                && let Some(key) = provider::steering_daft_hooks(&listing)
+                    .into_iter()
+                    .chain(reached.daft_hooks)
+                    .next()
+            {
                 return Err(Fail::policy(format!(
                     "cannot cut a worktree: the repository's own git configuration sets {key} — \
                      with fork.daft.hooks on, it would choose what daft runs"
                 )));
             }
-            provider::filter_drivers(&listing)
+            let mut filters = provider::filter_drivers(&listing);
+            filters.extend(reached.filters);
+            filters
         }
     };
     let before = linked_worktrees(&common)?;
@@ -212,17 +213,34 @@ pub fn cut(
     // A filter named while the tool checked out was not turned off, and may
     // have run: the writer does not start there, whatever the tool made of it.
     if tool.checkout() == Checkout::Tool {
-        let now = config_listing(dirs, base, &roots).map_err(|why| {
-            cut_failed(&format!(
-                "the git configuration could not be read again after the cut ({why}), so a \
-                 filter it gained cannot be ruled out"
-            ))
-        })?;
         let made = chosen
             .as_deref()
             .or(printed.as_deref().map(Path::new))
             .filter(|made| made.is_dir());
-        refuse_gained(&filters, &now, made)?;
+        let left = |fail: Fail| match made {
+            Some(made) => Fail::new(
+                fail.exit,
+                format!(
+                    "{}, and {} is left for a person to remove",
+                    fail.message,
+                    made.display()
+                ),
+            ),
+            None => fail,
+        };
+        let now = config_listing(dirs, base, &roots).map_err(|why| {
+            left(cut_failed(&format!(
+                "the git configuration could not be read again after the cut ({why}), so a \
+                 filter it gained cannot be ruled out"
+            )))
+        })?;
+        let mut named = provider::filter_drivers(&now);
+        named.extend(
+            include_closure(dirs, base, &now, &roots)
+                .map_err(left)?
+                .filters,
+        );
+        refuse_gained(&filters, &named, made)?;
     }
 
     let output = match ran.map_err(|fail| did_not_finish(tool.what(), started, deadline, fail))? {
@@ -340,7 +358,7 @@ fn check_out(
              ({why}), so a filter it gained cannot be ruled out"
         )))
     })?;
-    refuse_gained(&filters, &now, Some(worktree))?;
+    refuse_gained(&filters, &provider::filter_drivers(&now), Some(worktree))?;
     let what = format!("the checkout of {}", worktree.display());
     let output = match ran {
         Ok(spawn::Grouped::Exited(output)) => output,
@@ -360,12 +378,16 @@ fn check_out(
     Ok(())
 }
 
-/// Refuses a cut (33) whose git configuration, read again after it (`now`),
-/// names a filter driver the reading it was cut with (`filters`) did not:
+/// Refuses a cut (33) whose git configuration, read again after it, names a
+/// filter driver (`named`) the reading it was cut with (`filters`) did not:
 /// that one was not turned off, and may have run. What the cut made, if it
 /// made anything (`made`), is named for a person to remove.
-fn refuse_gained(filters: &BTreeSet<Vec<u8>>, now: &[u8], made: Option<&Path>) -> Res<()> {
-    let gained: Vec<String> = provider::filter_drivers(now)
+fn refuse_gained(
+    filters: &BTreeSet<Vec<u8>>,
+    named: &BTreeSet<Vec<u8>>,
+    made: Option<&Path>,
+) -> Res<()> {
+    let gained: Vec<String> = named
         .difference(filters)
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect();
@@ -381,6 +403,104 @@ fn refuse_gained(filters: &BTreeSet<Vec<u8>>, now: &[u8], made: Option<&Path>) -
             made.display()
         ))
     )))
+}
+
+/// git's own limit on includes within includes: past it, git refuses the
+/// configuration.
+const INCLUDE_DEPTH: usize = 10;
+
+/// What [`include_closure`] found.
+#[derive(Debug, Default)]
+struct Reached {
+    /// Every filter driver named in a file an include could reach.
+    filters: BTreeSet<Vec<u8>>,
+    /// The `daft.hooks` keys in the files the repository's own includes
+    /// could reach.
+    daft_hooks: Vec<String>,
+}
+
+/// Every file an include in `listing` could reach — every condition taken
+/// as holding, since a tool that checks a worktree out as it cuts it reads
+/// the configuration there, where a condition may hold that does not hold
+/// in `base` — and what they name: their filter drivers, and the
+/// `daft.hooks` keys of those the repository's own includes reach. Turning
+/// off a filter that would not have applied does nothing, so the more the
+/// better. Each file is read by git (`config --file --list`, includes not
+/// followed: each is read here, once). An include that cannot be resolved as
+/// git would, a file that cannot be read, or a chain past git's own limit
+/// refuses the cut (33): a file not read is a filter that might not be
+/// turned off.
+fn include_closure(dirs: &Dirs, base: &Path, listing: &[u8], roots: &[&Path]) -> Res<Reached> {
+    let home = crate::dirs::passwd_home()?;
+    let mut waiting: Vec<(provider::Include, usize)> = provider::includes(listing, base)
+        .into_iter()
+        .map(|include| (include, 1))
+        .collect();
+    let mut read: BTreeSet<(PathBuf, bool)> = BTreeSet::new();
+    let mut reached = Reached::default();
+    while let Some((include, depth)) = waiting.pop() {
+        let refuse = |why: &str| {
+            Fail::policy(format!(
+                "cannot cut a worktree: {} includes {}, which {why} — daft checks a new worktree \
+                 out before cahoots can see what such an include names there, so every file an \
+                 include could reach is read first",
+                include
+                    .from
+                    .as_ref()
+                    .map_or("the git configuration".to_string(), |from| from
+                        .display()
+                        .to_string()),
+                String::from_utf8_lossy(&include.path)
+            ))
+        };
+        if depth > INCLUDE_DEPTH {
+            return Err(refuse(&format!(
+                "lies past git's own limit of {INCLUDE_DEPTH} includes within includes"
+            )));
+        }
+        let Some(target) = provider::include_target(&include, &home) else {
+            return Err(refuse("is not a path cahoots can resolve as git would"));
+        };
+        if !read.insert((target.clone(), include.repository)) {
+            continue;
+        }
+        let bytes = file_listing(dirs, &target, roots)
+            .map_err(|why| refuse(&format!("cannot be read ({why})")))?;
+        reached.filters.extend(provider::filter_drivers(&bytes));
+        if include.repository {
+            reached
+                .daft_hooks
+                .extend(provider::daft_hook_keys_in_file(&bytes));
+        }
+        waiting.extend(
+            provider::includes_in_file(&bytes, &target, include.repository)
+                .into_iter()
+                .map(|include| (include, depth + 1)),
+        );
+    }
+    Ok(reached)
+}
+
+/// One configuration file as git reads it, its includes not followed
+/// (`config --file <file> --list -z --no-includes`), run from `/`.
+fn file_listing(dirs: &Dirs, file: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
+    let git = spawn::system_tool("git", roots).map_err(|fail| fail.message)?;
+    let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
+    args.extend([OsString::from("config"), "--file".into(), file.into()]);
+    args.extend(["--list", "-z", "--no-includes"].map(OsString::from));
+    let output = spawn::run_helper_with_env(
+        &git,
+        &args,
+        Some(Path::new("/")),
+        Duration::from_secs(10),
+        spawn::helper_path(roots),
+        &[],
+    )
+    .map_err(|fail| fail.message)?;
+    match output.status {
+        Some(0) => Ok(output.bytes),
+        _ => Err(format!("git could not read {}", file.display())),
+    }
 }
 
 /// The checkout cahoots runs in a worktree cut with no checkout: what `git
@@ -1055,6 +1175,116 @@ mod tests {
         // Nothing to turn off: the quiet settings alone.
         let quiet = cut_git_env(&dirs, &BTreeSet::new()).unwrap();
         assert_eq!(quiet[0], ("GIT_CONFIG_COUNT".into(), "2".into()));
+    }
+
+    #[test]
+    fn the_include_closure_reads_every_file_an_include_could_reach() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let dirs = Dirs {
+            home: root.join("home"),
+            config: root.join("config"),
+            state: root.join("state"),
+            overridden: true,
+        };
+        let base = root.join("repo");
+        fs::create_dir_all(base.join(".git/nested")).unwrap();
+        let write = |path: &Path, text: &str| fs::write(path, text).unwrap();
+        // A condition that holds only in a new worktree, a relative path, and
+        // a nested include, relative to the file it is written in.
+        write(
+            &base.join(".git/a.cfg"),
+            "[filter \"wt\"]\n\tsmudge = x\n[include]\n\tpath = nested/b.cfg\n",
+        );
+        write(
+            &base.join(".git/nested/b.cfg"),
+            "[filter \"deep\"]\n\tsmudge = y\n[daft \"hooks\"]\n\tdefaultTrust = allow\n\
+             [include]\n\tpath = b.cfg\n",
+        );
+        // A person's own: its daft.hooks keys are theirs.
+        write(
+            &root.join("person.cfg"),
+            "[filter \"lfs\"]\n\tprocess = git-lfs filter-process\n[daft \"hooks\"]\n\
+             \ttimeout = 9\n",
+        );
+        let listing = |entries: &[(&str, &str, &str)]| -> Vec<u8> {
+            entries
+                .iter()
+                .flat_map(|(scope, key, value)| {
+                    format!("{scope}\0file:.git/config\0{key}\n{value}\0").into_bytes()
+                })
+                .collect()
+        };
+        let reached = include_closure(
+            &dirs,
+            &base,
+            &listing(&[
+                ("local", "includeif.gitdir:**/worktrees/**.path", "a.cfg"),
+                (
+                    "global",
+                    "includeif.gitdir:~/elsewhere/.path",
+                    &root.join("person.cfg").display().to_string(),
+                ),
+                ("local", "core.hookspath", "/h"),
+            ]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            reached.filters.into_iter().collect::<Vec<_>>(),
+            [b"deep".to_vec(), b"lfs".to_vec(), b"wt".to_vec()]
+        );
+        assert_eq!(reached.daft_hooks, ["daft.hooks.defaulttrust"]);
+
+        // Nothing to reach: nothing read.
+        let none = include_closure(&dirs, &base, &listing(&[]), &[]).unwrap();
+        assert!(none.filters.is_empty() && none.daft_hooks.is_empty());
+
+        // A file that cannot be read, or a path that cannot be resolved, is
+        // refused, never skipped.
+        for (path, says) in [
+            ("missing.cfg", "cannot be read"),
+            (
+                "%(prefix)/etc/x.cfg",
+                "is not a path cahoots can resolve as git would",
+            ),
+            (
+                "~other/x.cfg",
+                "is not a path cahoots can resolve as git would",
+            ),
+        ] {
+            let fail = include_closure(
+                &dirs,
+                &base,
+                &listing(&[("local", "include.path", path)]),
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(fail.exit, Exit::Policy, "{path}");
+            assert!(fail.message.contains(says), "{path}: {}", fail.message);
+            assert!(fail.message.contains(path), "{path}: {}", fail.message);
+        }
+
+        // Past git's own limit of includes within includes.
+        for n in 0..=INCLUDE_DEPTH {
+            write(
+                &base.join(format!(".git/chain{n}.cfg")),
+                &format!("[include]\n\tpath = chain{}.cfg\n", n + 1),
+            );
+        }
+        write(
+            &base.join(format!(".git/chain{}.cfg", INCLUDE_DEPTH + 1)),
+            "",
+        );
+        let fail = include_closure(
+            &dirs,
+            &base,
+            &listing(&[("local", "include.path", "chain0.cfg")]),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(fail.exit, Exit::Policy);
+        assert!(fail.message.contains("git's own limit"), "{}", fail.message);
     }
 
     #[test]

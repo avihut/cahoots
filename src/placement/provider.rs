@@ -13,8 +13,9 @@
 //! Adding one is a module and a variant.
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -243,18 +244,39 @@ fn fingerprinted(
     Ok((binary, version))
 }
 
-/// The entries of `git config --list --show-origin --show-scope -z`: each
-/// its scope and its key, as git lists them (the section and the name
-/// lowercased, a subsection as written).
-fn entries(listing: &[u8]) -> Vec<(&[u8], &[u8])> {
+/// One entry of `git config --list --show-origin --show-scope -z`: its
+/// scope, where it came from (`file:<path>`, `command line:`), and its key
+/// as git lists it (the section and the name lowercased, a subsection as
+/// written) and value.
+struct Entry<'a> {
+    scope: &'a [u8],
+    origin: &'a [u8],
+    key: &'a [u8],
+    value: Option<&'a [u8]>,
+}
+
+fn entries(listing: &[u8]) -> Vec<Entry<'_>> {
     let fields: Vec<&[u8]> = listing.split(|byte| *byte == 0).collect();
     fields
         .chunks_exact(3)
         .map(|entry| {
-            let key = entry[2].split(|byte| *byte == b'\n').next().unwrap_or(&[]);
-            (entry[0], key)
+            let (key, value) = key_and_value(entry[2]);
+            Entry {
+                scope: entry[0],
+                origin: entry[1],
+                key,
+                value,
+            }
         })
         .collect()
+}
+
+/// `key\nvalue`, or a key with no value at all (`[section] name`).
+fn key_and_value(field: &[u8]) -> (&[u8], Option<&[u8]>) {
+    match field.iter().position(|byte| *byte == b'\n') {
+        Some(at) => (&field[..at], Some(&field[at + 1..])),
+        None => (field, None),
+    }
 }
 
 /// Every filter driver the configuration defines, in any scope: the `<name>`
@@ -277,26 +299,91 @@ pub fn filter_drivers(listing: &[u8]) -> BTreeSet<Vec<u8>> {
         .collect()
 }
 
-/// Each include in the repository's own configuration that git reads afresh
-/// for every worktree: a conditional one (`includeIf.<condition>.path`) in
-/// the `local` or `worktree` scope, and any include in the `worktree` scope,
-/// whose relative path is the worktree's own. What it names for a worktree
-/// being cut — a filter, a `daft.hooks` key — is read only once the
-/// worktree exists, too late to turn off, so the cut does not happen.
-pub fn includes_read_per_worktree(listing: &[u8]) -> Vec<String> {
+/// An include directive: the path it names, as written, the file it is
+/// written in (`None` when it is not in a file), and whether it is the
+/// repository's own — in its `local` or `worktree` configuration, or in a
+/// file one of those includes reaches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    pub path: Vec<u8>,
+    pub from: Option<PathBuf>,
+    pub repository: bool,
+}
+
+/// `include.path`, or `includeIf.<condition>.path`, whatever the condition.
+fn is_include(key: &[u8]) -> bool {
+    let key = String::from_utf8_lossy(key).to_lowercase();
+    key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
+}
+
+/// Every include directive in a listing of every scope (`--show-origin
+/// --show-scope -z`), whatever its condition, and whether git followed it
+/// here or not. A relative origin is relative to `cwd`, where git ran.
+pub fn includes(listing: &[u8], cwd: &Path) -> Vec<Include> {
     entries(listing)
         .into_iter()
-        .filter_map(|(scope, key)| {
-            let key = String::from_utf8_lossy(key).into_owned();
-            let lower = key.to_lowercase();
-            let conditional = lower.starts_with("includeif.");
-            let per_worktree = match scope {
-                b"local" => conditional,
-                b"worktree" => conditional || lower.starts_with("include."),
-                _ => false,
-            };
-            per_worktree.then_some(key)
+        .filter(|entry| is_include(entry.key))
+        .filter_map(|entry| {
+            Some(Include {
+                path: entry.value?.to_vec(),
+                from: entry
+                    .origin
+                    .strip_prefix(b"file:")
+                    .map(|file| cwd.join(OsStr::from_bytes(file))),
+                repository: matches!(entry.scope, b"local" | b"worktree"),
+            })
         })
+        .collect()
+}
+
+/// Every include directive in the listing of one file (`config --file
+/// <file> --list -z`), written in `file`; the repository's own if the file
+/// was reached from the repository's own configuration.
+pub fn includes_in_file(listing: &[u8], file: &Path, repository: bool) -> Vec<Include> {
+    listing
+        .split(|byte| *byte == 0)
+        .map(key_and_value)
+        .filter(|(key, _)| is_include(key))
+        .filter_map(|(_, value)| {
+            Some(Include {
+                path: value?.to_vec(),
+                from: Some(file.to_path_buf()),
+                repository,
+            })
+        })
+        .collect()
+}
+
+/// Where git looks for the file an include names: `~/` against `home` (the
+/// HOME cahoots gives git), a relative path against the directory of the
+/// file it is written in, an absolute path as it is. `None` where cahoots
+/// cannot say as git would: `~user/`, `%(prefix)/`, an empty path, or a
+/// relative one not written in a file.
+pub fn include_target(include: &Include, home: &Path) -> Option<PathBuf> {
+    let path = &include.path[..];
+    if path.is_empty() || path.starts_with(b"%(") {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix(b"~/") {
+        return Some(home.join(OsStr::from_bytes(rest)));
+    }
+    if path.starts_with(b"~") {
+        return None;
+    }
+    let path = Path::new(OsStr::from_bytes(path));
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    Some(include.from.as_ref()?.parent()?.join(path))
+}
+
+/// The `daft.hooks` keys in the listing of one file (`config --file <file>
+/// --list -z`), as git lists them.
+pub fn daft_hook_keys_in_file(listing: &[u8]) -> Vec<String> {
+    listing
+        .split(|byte| *byte == 0)
+        .map(|field| String::from_utf8_lossy(key_and_value(field).0).into_owned())
+        .filter(|key| key.to_lowercase().starts_with("daft.hooks."))
         .collect()
 }
 
@@ -307,8 +394,8 @@ pub fn includes_read_per_worktree(listing: &[u8]) -> Vec<String> {
 pub fn steering_daft_hooks(listing: &[u8]) -> Vec<String> {
     entries(listing)
         .into_iter()
-        .filter(|(scope, _)| matches!(*scope, b"local" | b"worktree"))
-        .map(|(_, key)| String::from_utf8_lossy(key).into_owned())
+        .filter(|entry| matches!(entry.scope, b"local" | b"worktree"))
+        .map(|entry| String::from_utf8_lossy(entry.key).into_owned())
         .filter(|key| key.to_lowercase().starts_with("daft.hooks."))
         .collect()
 }
@@ -693,27 +780,107 @@ mod tests {
     }
 
     #[test]
-    fn includes_git_reads_for_each_worktree_are_found() {
-        let found = includes_read_per_worktree(&listing(&[
-            ("local", "includeif.gitdir:**/worktrees/**.path", "/x"),
-            ("local", "includeIf.onbranch:main.path", "/x"),
-            ("local", "include.path", "/x"),
-            ("worktree", "include.path", "evil.cfg"),
-            ("worktree", "includeif.gitdir/i:x.path", "/x"),
-            ("global", "includeif.gitdir:~/work/.path", "/mine"),
-            ("system", "includeif.gitdir:/srv/.path", "/x"),
-            ("command", "includeif.gitdir:x.path", "/x"),
-            ("local", "core.hookspath", "/h"),
-        ]));
-        assert_eq!(
-            found,
-            [
+    fn include_directives_are_found_in_every_scope_whatever_the_condition() {
+        let mut listing = listing(&[
+            (
+                "local",
                 "includeif.gitdir:**/worktrees/**.path",
-                "includeIf.onbranch:main.path",
-                "include.path",
-                "includeif.gitdir/i:x.path"
+                "per-worktree.cfg",
+            ),
+            (
+                "global",
+                "includeIf.gitdir:~/Work/.path",
+                "~/.gitconfig-work",
+            ),
+            ("worktree", "include.path", "/abs.cfg"),
+            ("system", "includeif.onbranch:main.path", "/sys.cfg"),
+            ("local", "core.hookspath", "/h"),
+            ("local", "includeif.gitdir:x.notpath", "/x"),
+        ]);
+        // A key with no value names no file.
+        listing.extend_from_slice(b"local\0file:.git/config\0include.path\0");
+        let found = includes(&listing, Path::new("/repo"));
+        assert_eq!(
+            found
+                .iter()
+                .map(|include| (
+                    String::from_utf8_lossy(&include.path).into_owned(),
+                    include.from.clone().unwrap(),
+                    include.repository
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "per-worktree.cfg".into(),
+                    PathBuf::from("/repo/.git/config"),
+                    true
+                ),
+                (
+                    "~/.gitconfig-work".into(),
+                    PathBuf::from("/repo/.git/config"),
+                    false
+                ),
+                ("/abs.cfg".into(), PathBuf::from("/repo/.git/config"), true),
+                ("/sys.cfg".into(), PathBuf::from("/repo/.git/config"), false),
             ]
         );
-        assert!(includes_read_per_worktree(b"").is_empty());
+        let in_file = includes_in_file(
+            b"filter.x.smudge\ncat\0include.path\nnested.cfg\0includeIf.gitdir:y.path\n/y.cfg\0",
+            Path::new("/conf/a.cfg"),
+            true,
+        );
+        assert_eq!(
+            in_file,
+            [
+                Include {
+                    path: b"nested.cfg".to_vec(),
+                    from: Some(PathBuf::from("/conf/a.cfg")),
+                    repository: true
+                },
+                Include {
+                    path: b"/y.cfg".to_vec(),
+                    from: Some(PathBuf::from("/conf/a.cfg")),
+                    repository: true
+                },
+            ]
+        );
+        assert_eq!(
+            daft_hook_keys_in_file(b"daft.hooks.defaulttrust\nallow\0daft.checkout.push\nfalse\0"),
+            ["daft.hooks.defaulttrust"]
+        );
+    }
+
+    #[test]
+    fn include_paths_resolve_as_git_resolves_them() {
+        let home = Path::new("/home/u");
+        let include = |path: &str, from: Option<&str>| Include {
+            path: path.as_bytes().to_vec(),
+            from: from.map(PathBuf::from),
+            repository: false,
+        };
+        let target = |path: &str, from: Option<&str>| include_target(&include(path, from), home);
+        assert_eq!(
+            target("~/.gitconfig-work", Some("/etc/gitconfig")),
+            Some(PathBuf::from("/home/u/.gitconfig-work"))
+        );
+        assert_eq!(
+            target("nested/x.cfg", Some("/repo/.git/config")),
+            Some(PathBuf::from("/repo/.git/nested/x.cfg")),
+            "relative to the file it is written in"
+        );
+        assert_eq!(target("/abs.cfg", None), Some(PathBuf::from("/abs.cfg")));
+        for unresolvable in [
+            ("~other/x", Some("/repo/.git/config")),
+            ("~", Some("/repo/.git/config")),
+            ("%(prefix)/etc/x", Some("/repo/.git/config")),
+            ("", Some("/repo/.git/config")),
+            ("relative.cfg", None),
+        ] {
+            assert_eq!(
+                target(unresolvable.0, unresolvable.1),
+                None,
+                "{unresolvable:?}"
+            );
+        }
     }
 }

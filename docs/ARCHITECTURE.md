@@ -286,8 +286,9 @@ git names for the new worktree, conditional includes (`includeIf`) and all:
 `git worktree add --no-checkout`, then — once cahoots has read the
 configuration through the new worktree's pinned git directory — the
 checkout, by cahoots' own `git reset --hard`. daft checks out as it cuts,
-so a daft cut is refused while the repository's own configuration has an
-include git reads for each worktree apart. The worktree comes up without the repository's setup,
+so for daft every file an include could reach is read first, every
+condition taken as holding, and every filter named in any of them is turned
+off; an include that cannot be read refuses the cut. The worktree comes up without the repository's setup,
 and the caller runs that there. The tool that cuts runs in a process group
 of its own, killed when the cut returns. The path daft prints is checked before
 a writer runs in it (`placement::unfit`), and the worktree's git directory is

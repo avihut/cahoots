@@ -222,6 +222,16 @@ impl World {
             .collect()
     }
 
+    /// Puts the suite's own `git` in `bin`, which is all the PATH a command at
+    /// a terminal of its own gets (`at_terminal`): most machines have one.
+    pub fn git_on_path(&self) {
+        let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file() && !git.starts_with(&self.root))
+            .expect("git on PATH");
+        std::os::unix::fs::symlink(git, self.bin.join("git")).unwrap();
+    }
+
     /// Puts `dir` first on PATH for every later command.
     pub fn prefix_path(&self, dir: &Path) {
         self.path_prefix.borrow_mut().insert(0, dir.to_path_buf());

@@ -600,13 +600,12 @@ fn doctor_suggests_daft_where_the_repository_has_a_daft_yml() {
     );
     assert!(world.daft_versions().is_empty(), "doctor asked daft");
 
-    // With no git at all, nothing is a repository and `--fork` is refused
-    // before any cut: a warning, not a failure.
+    // With no git at all, the provider's binary is missing: a failure.
     let after = world.with_stdin_elsewhere(&["doctor"]).finish();
-    assert_eq!(after.code, 0, "{}", after.text());
+    assert_eq!(after.code, 34, "{}", after.text());
     let json: Value = serde_json::from_str(after.text().trim()).unwrap();
     let check = fork_check(&json);
-    assert_eq!(check["status"], "warn", "{check}");
+    assert_eq!(check["status"], "fail", "{check}");
     assert_eq!(
         check["detail"],
         "no git on PATH — cahoots cannot see a repository without one, so --fork is refused \

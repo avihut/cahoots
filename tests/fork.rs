@@ -1170,23 +1170,100 @@ fn a_git_cut_turns_off_a_filter_only_the_new_worktree_names() {
 }
 
 #[test]
-fn a_daft_cut_is_refused_where_the_repositorys_config_includes_per_worktree() {
-    // daft checks out as it cuts, so the configuration can be read only in
-    // the tree the worktree is cut from, where this include names nothing.
+fn a_daft_cut_turns_off_a_filter_behind_a_condition_that_does_not_match_yet() {
+    // daft checks out as it cuts, so cahoots reads, before it runs, every
+    // file an include could reach, as if every condition held.
     let world = World::new();
     plant_a_filter_for_new_worktrees_alone(&world);
     let f1 = world.root.join("forks/f1");
     world.daft(json!({"make": "worktree", "print": f1}));
     let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    assert_eq!(fs::read_to_string(f1.join("data.txt")).unwrap(), "stored\n");
+    let told = &world.daft_calls()[0]["git_config"];
+    let keys: Vec<&str> = told
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name.starts_with("GIT_CONFIG_KEY_"))
+        .map(|(_, key)| key.as_str().unwrap())
+        .collect();
+    for var in ["smudge", "clean", "process", "required"] {
+        let key = format!("filter.wt.{var}");
+        assert!(keys.contains(&key.as_str()), "{key} in {keys:?}");
+    }
+}
+
+#[test]
+fn a_daft_cut_turns_off_a_filter_behind_a_condition_that_matches() {
+    // A condition that holds here and in the new worktree alike.
+    let world = World::new();
+    let script = filter_script(&world);
+    commit_data(&world);
+    let included = world.root.join("everywhere.gitconfig");
+    fs::write(
+        &included,
+        format!(
+            "[filter \"all\"]\n\tsmudge = {}\n\trequired = true\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    world.git(&["config", "includeIf.gitdir:**.path", path_str(&included)]);
+    attribute_everything(&world, "all");
+    let listed = std::process::Command::new("git")
+        .args(["config", "--list"])
+        .current_dir(&world.work)
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("filter.all.smudge"),
+        "the condition does not hold here: this test shows nothing"
+    );
+    the_route_is_live(&world, "a condition that matches");
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    assert_eq!(fs::read_to_string(f1.join("data.txt")).unwrap(), "stored\n");
+}
+
+#[test]
+fn a_daft_cut_is_refused_where_an_include_cannot_be_read() {
+    // A file not read is a filter that might not be turned off: refused,
+    // never skipped, though git itself would skip a missing one.
+    let world = World::new();
+    let missing = world.root.join("missing.gitconfig");
+    world.git(&["config", "include.path", path_str(&missing)]);
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
+    let answer = fork(&world, &[]);
     assert_eq!(answer.code, 33, "{}", answer.json);
-    assert_eq!(
-        answer.message(),
-        "cannot cut a worktree: the repository's own git configuration sets \
-         includeif.gitdir:**/worktrees/**.path, an include git reads for each worktree apart — \
-         what it names in a new worktree cannot be read before daft checks it out, so not every \
-         filter could be turned off"
+    let message = answer.message();
+    assert!(
+        message.starts_with(&format!(
+            "cannot cut a worktree: {} includes {}, which cannot be read (",
+            world.work.join(".git/config").display(),
+            missing.display()
+        )),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(
+            "— daft checks a new worktree out before cahoots can see what such an include names \
+             there, so every file an include could reach is read first"
+        ),
+        "{message}"
     );
     assert_never_ran(&world, &answer, &f1);
-    assert!(!filter_mark(&world).exists(), "the filter ran");
     assert!(world.daft_calls().is_empty(), "daft ran");
+
+    // git cuts with no checkout and reads the configuration as git does in
+    // the new worktree, where git skips a missing include: it cuts.
+    world.fork("fork.provider = \"git\"");
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
 }

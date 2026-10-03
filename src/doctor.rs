@@ -326,14 +326,14 @@ fn fork_check(registry: &Registry) -> Check {
     };
     match fork.provider {
         ProviderId::Git => {
-            // Without a git, nothing is a repository, and `--fork` is refused
-            // before any cut: there is nothing here a cut could fail on.
+            // The provider's binary is missing: a failure, as for any provider.
+            // Without a git nothing is a repository either, so it is said so.
             if let Err(fail) = spawn::system_tool("git", &roots)
                 && fail.exit != Exit::Policy
             {
                 return check(
                     "fork",
-                    Status::Warn,
+                    Status::Fail,
                     "no git on PATH — cahoots cannot see a repository without one, so --fork is \
                      refused until git is there",
                 );

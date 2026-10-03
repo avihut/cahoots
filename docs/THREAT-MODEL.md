@@ -239,8 +239,9 @@ in daft's directory, outside every workspace. Those hooks are the
 repository's commands, which an agent can commit, and they run outside every
 sandbox on an agent's verb: that is what the setting turns on. With it on, a
 cut is refused when the repository's own git configuration sets any
-`daft.hooks` key, so the repository cannot point daft at other hooks or
-settings of its choosing. The tool that cuts runs in a process group of its
+`daft.hooks` key — in a file any of its includes could reach, too, whatever
+the include's condition — so the repository cannot point daft at other
+hooks or settings of its choosing. The tool that cuts runs in a process group of its
 own, killed when the cut returns, so nothing it or a hook started keeps
 running beside the writer, short of leaving the group. No filter runs while
 the worktree is checked out either: every filter driver that any
@@ -258,13 +259,12 @@ directory. It is read again after the checkout; a filter that appeared in
 between fails the run before the writer starts, though its command may have
 run by then — a race only a process writing the repository's git
 configuration at that moment can run. daft checks out as it cuts, so for
-daft the configuration is read in the tree the worktree is cut from, before
-and after: a daft cut is refused while the repository's own configuration
-has a conditional include, or a worktree's own configuration has any
-include, since what it named for the new worktree alone could not be turned
-off. A conditional include in the person's own configuration that applies
-to a new worktree and not to the tree it is cut from is the one thing a
-daft cut cannot read before daft checks it out. The worktree therefore comes up without the repository's
+daft every file an include could reach — the repository's and the
+person's, every condition taken as holding — is read before daft runs, and
+every filter driver named in any of them is turned off: more than the new
+worktree may need, which does nothing. An include that cannot be read, or
+that names a path cahoots cannot resolve as git would, refuses the cut
+rather than being skipped. All of it is read again after the cut. The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
 repository, not the tree it was cut from or inside it, not inside cahoots'
