@@ -51,6 +51,23 @@ uncommitted work is not in it. `--in-place` (the other agent edits your own
 tree) only works if the user's config allows it; do not ask for it unless the
 user told you to.
 
+### Kinds of task
+
+A person may define kinds of task: a recurring job — say `rust-review` —
+with its own list of agents to ask. Each one is a subagent of yours named
+`cahoots-kind-<name>`, whose description says when it fits; hand such a
+task to it. Or run the kind yourself:
+
+```
+cahoots run --kind <name> --caller <you> --brief /tmp/brief.md
+```
+
+The kind decides the role and who is asked: `--role`, if you add it, must
+agree, and `--to` only narrows its list. An `implement` kind needs `--fork`.
+Only use a kind name you were given, by a subagent's name or by the user —
+an unknown kind is refused (code 2). `cahoots pick --kind <name> --caller
+<you>` tells you who would be asked, without asking.
+
 ## The loop
 
 0. *(If the user has review turned on)* `cahoots notes --role <role> --caller

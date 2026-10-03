@@ -686,7 +686,8 @@ fn install(
     )?;
     let rail_open = asked && close == questions::Close::InWords;
     let stopped = |fail: Fail| Stopped { fail, rail_open };
-    let files = crate::install::files::install(&dirs, harness, dry_run).map_err(stopped)?;
+    let kinds = Registry::effective(&config).kinds;
+    let files = crate::install::files::install(&dirs, &kinds, harness, dry_run).map_err(stopped)?;
     let mut config = config;
     let mut saved = Vec::new();
     if !dry_run {
