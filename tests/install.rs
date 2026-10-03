@@ -600,3 +600,94 @@ fn uninstall_removes_the_subagents_and_a_person_s_own_agents_stay() {
     assert!(mine.is_file() && theirs.is_file());
     assert!(agents.is_dir());
 }
+
+#[test]
+fn a_role_edit_is_stale_until_install_refreshes_it() {
+    let home = home();
+    install(
+        &home.dirs,
+        &kinds(&[kind("rust-review", "Review Rust.", "review", BOTH)]),
+        None,
+        false,
+    )
+    .unwrap();
+    for role in ["advise", "implement"] {
+        let edited = kinds(&[kind("rust-review", "Review Rust.", role, BOTH)]);
+        assert_eq!(
+            stale_in(&home, &edited),
+            [
+                (claude_agent("rust-review"), StaleWhy::Changed),
+                (codex_agent("rust-review"), StaleWhy::Changed),
+            ],
+            "{role}"
+        );
+        let reports = install(&home.dirs, &edited, None, false).unwrap();
+        assert_eq!(
+            *outcome_of(&reports, &claude_agent("rust-review")),
+            Outcome::Refreshed,
+            "{role}"
+        );
+        assert_eq!(stale_in(&home, &edited), [], "{role}");
+    }
+    let claude = fs::read_to_string(home.dirs.home.join(claude_agent("rust-review"))).unwrap();
+    assert!(claude.contains("--fork"));
+}
+
+/// Removal is confined like a write: an agent home that resolves outside
+/// home is never deleted through, by install or by uninstall.
+#[test]
+fn nothing_is_removed_through_an_agent_home_that_points_out_of_home() {
+    let home = home();
+    let kinds = kinds(&[kind("rust-review", "Review Rust.", "review", BOTH)]);
+    install(&home.dirs, &kinds, None, false).unwrap();
+    let agents = home.dirs.home.join(".claude/agents");
+    let outside = home.dirs.home.parent().unwrap().join("elsewhere");
+    fs::rename(&agents, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &agents).unwrap();
+    let survivor = outside.join("cahoots-kind-rust-review.md");
+    let delegate = outside.join("cahoots-delegate.md");
+
+    let reports = install(&home.dirs, &no_kinds(), None, false).unwrap();
+    let Outcome::Skipped { why } = outcome_of(&reports, &claude_agent("rust-review")) else {
+        panic!("removed through a symlink out of home");
+    };
+    assert!(why.contains("outside your home"), "{why}");
+    assert!(survivor.is_file());
+    assert!(
+        manifest(&home).contains(&claude_agent("rust-review")),
+        "a file left alone stays listed"
+    );
+    assert!(!home.dirs.home.join(codex_agent("rust-review")).exists());
+
+    uninstall(&home.dirs, false).unwrap();
+    assert!(survivor.is_file() && delegate.is_file());
+}
+
+/// Only a file that is really gone leaves the manifest. One that cannot be
+/// read stays listed, so a later install or uninstall still finds it.
+#[test]
+fn an_unreadable_file_is_left_and_stays_listed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = home();
+    let kinds = kinds(&[kind("rust-review", "Review Rust.", "review", BOTH)]);
+    install(&home.dirs, &kinds, None, false).unwrap();
+    let unreadable = home.dirs.home.join(codex_agent("rust-review"));
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let reports = install(&home.dirs, &no_kinds(), None, false).unwrap();
+    let Outcome::Skipped { why } = outcome_of(&reports, &codex_agent("rust-review")) else {
+        panic!("an unreadable file was not left alone");
+    };
+    assert!(why.contains("cannot be read"), "{why}");
+    assert!(unreadable.exists());
+    assert!(manifest(&home).contains(&codex_agent("rust-review")));
+
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+    let reports = install(&home.dirs, &no_kinds(), None, false).unwrap();
+    assert_eq!(
+        *outcome_of(&reports, &codex_agent("rust-review")),
+        Outcome::Removed
+    );
+    assert!(!unreadable.exists());
+}

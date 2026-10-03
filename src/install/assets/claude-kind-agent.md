@@ -1,5 +1,6 @@
 ---
 cahoots_version: "{{version}}"
+cahoots_role: "{{role}}"
 name: cahoots-kind-{{kind}}
 description: {{description}}
 tools: Bash, Read, Write, Grep, Glob

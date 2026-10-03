@@ -278,7 +278,8 @@ over by itself. It runs `cahoots run --kind <name>` (with `--fork` for an
 `implement` kind) and nothing else. Its description is the person's own,
 followed by a fixed sentence (`assets/kind-description.txt`), quoted for the
 file's syntax and put in after every placeholder, so nothing in it is read
-as one. It never enters the instructions. A harness gets no subagent for a
+as one. It never enters the instructions. The kind's role is written next
+to the stamp, so any role edit changes the file and `doctor` reports it. A harness gets no subagent for a
 kind whose candidates are all on that harness: `pick` leaves the caller out,
 so it could never be delegated from there. The prefix keeps a kind named
 `delegate` off the fixed definition.
@@ -297,9 +298,12 @@ so it could never be delegated from there. The prefix keeps a kind named
   another harness), by uninstall's rule, only in the homes the run covers
   (`--harness`), and not on a dry run. `files::prune` is the only place it
   removes anything.
-- **Writes are confined to the home directory**, judged by where the path
-  resolves and *before* anything is created — an agent home that is a symlink
-  out of `$HOME` does not even get a directory made through it.
+- **Writes and removals are confined to the home directory**, judged by
+  where the path resolves and *before* anything is created or deleted — an
+  agent home that is a symlink out of `$HOME` does not even get a directory
+  made through it, and nothing in it is removed by `install` or `uninstall`.
+  A file that cannot be read is left alone and stays in the manifest; only
+  one that is gone leaves it.
 - **Permission rules are printed, never applied.** `install` ends by listing
   the rules still missing and the file each belongs in: at a terminal, as
   lines to paste, flush left under that file. `doctor` checks them, and the

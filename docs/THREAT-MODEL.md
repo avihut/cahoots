@@ -258,4 +258,5 @@ No network code. No credential file is ever read. No shell is ever spawned.
 No harness settings or permission file is ever edited — rules are printed for
 a human to add, and `doctor` checks them read-only. `install` and
 `uninstall` remove only files the manifest lists that still carry cahoots'
-name — `install` only the subagents of kinds that are gone.
+name and whose directory resolves inside the home — `install` only the
+subagents of kinds that are gone.

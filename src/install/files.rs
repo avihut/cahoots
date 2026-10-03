@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -78,8 +79,11 @@ fn render_kind(harness: HarnessId, name: &TaskKindName, entry: &KindEntry) -> St
             toml::Value::String(description).to_string(),
         ),
     };
+    // The role is written down even where the instructions don't show it,
+    // so that changing it always changes the file, and doctor sees it.
     render(template)
         .replace("{{kind}}", name.as_str())
+        .replace("{{role}}", entry.role.as_str())
         .replace("{{fork}}", fork)
         .replace("{{description}}", &quoted)
 }
@@ -265,6 +269,19 @@ fn stamp_of(text: &str) -> Option<String> {
 /// a symlink to somewhere else must not even get a directory made through it.
 /// So the nearest ancestor that already exists is resolved first.
 fn confined(home: &Path, dir: &Path) -> Res<()> {
+    match outside_home(home, dir)? {
+        None => Ok(()),
+        Some((existing, resolved)) => Err(Fail::policy(format!(
+            "{} resolves to {}, outside your home — refusing to write there",
+            existing.display(),
+            resolved.display()
+        ))),
+    }
+}
+
+/// Where `dir` — or its nearest ancestor that exists — resolves, when that
+/// is outside the user's home: the existing path, and where it led.
+fn outside_home(home: &Path, dir: &Path) -> Res<Option<(PathBuf, PathBuf)>> {
     let home = fs::canonicalize(home)
         .map_err(|error| Fail::internal(format!("cannot resolve {}: {error}", home.display())))?;
     let existing = dir
@@ -274,15 +291,7 @@ fn confined(home: &Path, dir: &Path) -> Res<()> {
     let resolved = fs::canonicalize(existing).map_err(|error| {
         Fail::internal(format!("cannot resolve {}: {error}", existing.display()))
     })?;
-    if resolved.starts_with(&home) {
-        Ok(())
-    } else {
-        Err(Fail::policy(format!(
-            "{} resolves to {}, outside your home — refusing to write there",
-            existing.display(),
-            resolved.display()
-        )))
-    }
+    Ok((!resolved.starts_with(&home)).then(|| (existing.to_path_buf(), resolved)))
 }
 
 /// Writes what the current kinds want, then removes what they no longer do.
@@ -388,7 +397,7 @@ fn prune(
             kept.push(path);
             continue;
         }
-        let outcome = remove_ours(&path, dry_run)?;
+        let outcome = remove_ours(&dirs.home, &path, dry_run)?;
         if still_listed(&outcome, dry_run) {
             kept.push(path.clone());
         }
@@ -404,12 +413,33 @@ fn is_wanted(wants: &[Want], path: &Path) -> bool {
         .any(|want| want.text.is_ok() && want.path == path)
 }
 
-/// Removes one file the manifest lists, if it still carries the stamp. Then
-/// its `cahoots` skill directory, if that is left empty.
-fn remove_ours(path: &Path, dry_run: bool) -> Res<Outcome> {
+/// Removes one file the manifest lists, if it still carries the stamp and
+/// its directory resolves inside the user's home — the same confinement a
+/// write gets. Then its `cahoots` skill directory, if that is left empty.
+/// Only a file that is not there any more is "already gone"; one that cannot
+/// be read is left, and stays listed.
+fn remove_ours(home: &Path, path: &Path, dry_run: bool) -> Res<Outcome> {
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == ErrorKind::NotFound) {
+        return Ok(Outcome::Skipped {
+            why: GONE.to_string(),
+        });
+    }
+    let parent = path.parent().expect("an installed path has a parent");
+    if let Some((existing, resolved)) = outside_home(home, parent)? {
+        return Ok(Outcome::Skipped {
+            why: format!(
+                "{} resolves to {}, outside your home — left alone",
+                existing.display(),
+                resolved.display()
+            ),
+        });
+    }
     Ok(match fs::read_to_string(path) {
-        Err(_) => Outcome::Skipped {
-            why: "already gone".to_string(),
+        Err(error) if error.kind() == ErrorKind::NotFound => Outcome::Skipped {
+            why: GONE.to_string(),
+        },
+        Err(error) => Outcome::Skipped {
+            why: format!("cannot be read ({error}) — left alone"),
         },
         Ok(text) if stamp_of(&text).is_none() => Outcome::Skipped {
             why: "no longer carries the cahoots_version stamp — someone made it theirs; left alone"
@@ -420,10 +450,9 @@ fn remove_ours(path: &Path, dry_run: bool) -> Res<Outcome> {
                 fs::remove_file(path).map_err(|error| {
                     Fail::internal(format!("cannot remove {}: {error}", path.display()))
                 })?;
-                if let Some(parent) = path.parent()
-                    && parent
-                        .file_name()
-                        .is_some_and(|name| name == "cahoots" || name == "cahoots-review")
+                if parent
+                    .file_name()
+                    .is_some_and(|name| name == "cahoots" || name == "cahoots-review")
                 {
                     let _ = fs::remove_dir(parent); // only succeeds when empty
                 }
@@ -433,9 +462,11 @@ fn remove_ours(path: &Path, dry_run: bool) -> Res<Outcome> {
     })
 }
 
+const GONE: &str = "already gone";
+
 /// Whether the manifest still lists a file after `remove_ours` said this.
 fn still_listed(outcome: &Outcome, dry_run: bool) -> bool {
-    dry_run || matches!(outcome, Outcome::Skipped { why } if why != "already gone")
+    dry_run || matches!(outcome, Outcome::Skipped { why } if why != GONE)
 }
 
 /// Removes what `install` wrote: only files the manifest lists, and only if
@@ -445,7 +476,7 @@ pub fn uninstall(dirs: &Dirs, dry_run: bool) -> Res<Vec<Report>> {
     let mut reports = Vec::new();
     let mut kept = Vec::new();
     for path in std::mem::take(&mut manifest.files) {
-        let outcome = remove_ours(&path, dry_run)?;
+        let outcome = remove_ours(&dirs.home, &path, dry_run)?;
         if still_listed(&outcome, dry_run) {
             kept.push(path.clone());
         }
@@ -700,6 +731,21 @@ mod tests {
                 .join("\n");
             assert!(adopted.contains("cahoots_version"), "{harness}");
             assert_eq!(stamp_of(&adopted), None, "{harness}");
+        }
+    }
+
+    /// A role edit always shows in the file, even between two readers whose
+    /// instructions are the same.
+    #[test]
+    fn every_role_renders_a_different_file() {
+        for harness in HarnessId::ALL {
+            let mut rendered: Vec<String> = Role::ALL
+                .into_iter()
+                .map(|role| render_kind(harness, &name("rust-review"), &kind(role, "Review Rust.")))
+                .collect();
+            rendered.sort();
+            rendered.dedup();
+            assert_eq!(rendered.len(), Role::ALL.len(), "{harness}");
         }
     }
 
