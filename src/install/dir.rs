@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
-use nix::sys::stat::{FileStat, Mode, SFlag, fstat, fstatat, stat};
+use nix::sys::stat::{FileStat, Mode, SFlag, fchmod, fstat, fstatat, stat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
 use crate::exit::{Fail, Res};
@@ -115,10 +115,17 @@ impl Dir {
         Ok(Entry::Regular(String::from_utf8(bytes).unwrap_or_default()))
     }
 
-    /// Writes `text` to a new temp file here and renames it over `name`.
+    /// Writes `text` to a new temp file here and renames it over `name`. A
+    /// regular file it replaces keeps its permission bits (never
+    /// setuid/setgid/sticky): a mode a person chose is not loosened. A new
+    /// file gets the umask's default.
     pub fn replace(&self, name: &str, text: &str) -> Res<()> {
         // Never `.md` or `.toml`: a harness loads every one in `agents/`.
         let temp = format!(".{name}.{}.tmp", std::process::id());
+        let kept = match fstatat(self.fd.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Ok(meta) if is_regular(&meta) => Some(Mode::from_bits_truncate(meta.st_mode & 0o777)),
+            _ => None,
+        };
         let _ = unlinkat(self.fd.as_fd(), temp.as_str(), UnlinkatFlags::NoRemoveDir);
         let written = openat(
             self.fd.as_fd(),
@@ -127,7 +134,12 @@ impl Dir {
             Mode::from_bits_truncate(0o666),
         )
         .map_err(std::io::Error::from)
-        .and_then(|fd| File::from(fd).write_all(text.as_bytes()))
+        .and_then(|fd| {
+            if let Some(mode) = kept {
+                fchmod(&fd, mode)?;
+            }
+            File::from(fd).write_all(text.as_bytes())
+        })
         .and_then(|()| {
             renameat(self.fd.as_fd(), temp.as_str(), self.fd.as_fd(), name)
                 .map_err(std::io::Error::from)
@@ -185,7 +197,7 @@ pub fn outside_home(home: &Path, dir: &Path) -> Res<Option<(PathBuf, PathBuf)>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     struct Place {
         _tmp: tempfile::TempDir,
@@ -263,6 +275,45 @@ mod tests {
             assert!(why.contains("outside your home"), "{why}");
         }
         assert!(fs::read_dir(&place.outside).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_mode_and_a_new_one_gets_the_default() {
+        let place = place();
+        let dir = agents(&place);
+        let mode = |name: &str| {
+            fs::metadata(place.home.join("agents").join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        dir.replace("fresh.md", "new").unwrap();
+        let default = mode("fresh.md");
+        for chosen in [0o600, 0o640, 0o444] {
+            let name = format!("chosen-{chosen:o}.md");
+            let path = place.home.join("agents").join(&name);
+            fs::write(&path, "old").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(chosen)).unwrap();
+
+            dir.replace(&name, "new").unwrap();
+
+            assert_eq!(mode(&name), chosen, "{name}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        }
+        // Special bits are never carried over.
+        let path = place.home.join("agents/special.md");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o1644)).unwrap();
+        dir.replace("special.md", "new").unwrap();
+        assert_eq!(mode("special.md"), 0o644);
+        // A link replaced is a new file: the default, not its target's mode.
+        let target = place.outside.join("target.md");
+        fs::write(&target, "theirs").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, place.home.join("agents/linked.md")).unwrap();
+        dir.replace("linked.md", "new").unwrap();
+        assert_eq!(mode("linked.md"), default);
     }
 
     #[test]
