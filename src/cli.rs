@@ -688,19 +688,23 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
 /// `cahoots evals`: the suite's verbs, and their words for a person.
 fn evals(action: EvalsAction, person: bool, title: String) -> Result<Said, Stopped> {
     let dirs = Dirs::resolve()?;
-    let invoker = client::invoker_roots()?;
-    let invoker = client::borrowed(&invoker);
     let encode = |value: Result<serde_json::Value, serde_json::Error>| {
         value.map_err(|error| Fail::internal(format!("cannot encode a task: {error}")))
     };
+    // The asking process's workspace, which no git started here may come
+    // from, is looked for only by the actions that start git: `remove`
+    // starts none.
     let (data, words) = match action {
         EvalsAction::Add { run } => {
-            let added = crate::evals::add(&dirs, &run, &invoker)?;
+            let invoker = client::invoker_roots()?;
+            let added = crate::evals::add(&dirs, &run, &client::borrowed(&invoker))?;
             let words = person.then(|| endings::evals_added(title, &added, &dirs.home));
             (encode(serde_json::to_value(&added))?, words)
         }
         EvalsAction::List => {
-            let tasks = crate::evals::list(&dirs, &invoker);
+            let invoker = client::invoker_roots();
+            let roots = invoker.as_ref().map(|roots| client::borrowed(roots));
+            let tasks = crate::evals::list(&dirs, roots.as_deref().map_err(|fail| *fail));
             let words = person.then(|| endings::evals_listed(title, &tasks, &dirs.home));
             (
                 serde_json::json!({ "tasks": encode(serde_json::to_value(&tasks))? }),

@@ -607,3 +607,44 @@ fn a_task_that_is_not_what_it_says_is_not_listed_and_remove_still_clears_it() {
     }
     assert!(elsewhere.exists(), "the link's target is not removed");
 }
+
+/// A `git` planted in the asking workspace, first on PATH: finding that
+/// workspace is refused.
+fn planted_git_path(world: &World) -> String {
+    world.script_at(&world.work.join("planted/git"), "#!/bin/sh\nexit 0\n");
+    format!(
+        "{}:{}",
+        world.work.join("planted").display(),
+        world.path_with_git()
+    )
+}
+
+#[test]
+fn a_planted_git_leaves_list_standing_and_remove_needs_no_git() {
+    let world = World::new();
+    world.evals_fixture();
+    let id = world.accepted_writer(B, &[]).run_id();
+    assert_eq!(at(&world, &["evals", "add", &id]).code, 0);
+    let path = planted_git_path(&world);
+    let poisoned = |args: &[&str]| world.at_terminal_with(args, &[("PATH", &path)]).finish();
+
+    // The task is listed, its check unknown, with why; no git ran.
+    let listed = poisoned(&["evals", "list"]);
+    assert_eq!(listed.code, 0, "{}", listed.json);
+    let task = &listed.json["data"]["tasks"][0];
+    assert_eq!(task["task"], id.as_str(), "{}", listed.json);
+    assert_eq!(task["rot"], "unknown", "{task}");
+    assert!(
+        task["rot_error"]
+            .as_str()
+            .is_some_and(|why| why.contains("inside the workspace")),
+        "{task}"
+    );
+    // Adding still refuses: it would start git.
+    let added = poisoned(&["evals", "add", &id]);
+    assert_eq!(added.code, 33, "{}", added.json);
+    // Removing starts no git at all.
+    let removed = poisoned(&["evals", "remove", &id]);
+    assert_eq!(removed.code, 0, "{}", removed.json);
+    assert!(!task_dir(&world, &id).exists());
+}

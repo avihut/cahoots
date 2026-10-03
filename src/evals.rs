@@ -280,8 +280,11 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
 
 /// `evals list`: every task, oldest first, each with its rot check. What is
 /// not a task — a name `list` skips, a link, a task file that does not load —
-/// is left out, and one task that cannot be checked fails nothing.
-pub fn list(dirs: &Dirs, invoker: &[&Path]) -> Vec<Listed> {
+/// is left out, and one task that cannot be checked fails nothing. `invoker`
+/// is the asking process's workspace, or why it could not be found: then no
+/// git is run, since none would be held to it, and every task is `Unknown`
+/// with that reason.
+pub fn list(dirs: &Dirs, invoker: Result<&[&Path], &Fail>) -> Vec<Listed> {
     let tasks = dirs.evals_tasks();
     let Ok(entries) = fs::read_dir(&tasks) else {
         return Vec::new();
@@ -297,7 +300,10 @@ pub fn list(dirs: &Dirs, invoker: &[&Path]) -> Vec<Listed> {
         .filter_map(|name| {
             let path = tasks.join(&name);
             let task = load(&path, &name)?;
-            let (rot, rot_error) = rot(dirs, &task, invoker);
+            let (rot, rot_error) = match invoker {
+                Ok(invoker) => rot(dirs, &task, invoker),
+                Err(fail) => (Rot::Unknown, Some(fail.message.clone())),
+            };
             Some(Listed {
                 task,
                 path,
