@@ -766,8 +766,8 @@ fn the_page_edits_role_and_kind_exploration_shares() {
     let terminal = world.at_terminal(&["settings"]);
     terminal.wait_for("❯ Enabled");
     terminal.resize(40, 180);
-    // Claude, Codex, meter, runs, review: then the roles.
-    for _ in 0..5 {
+    // Claude, Codex, meter, runs, worktrees, review: then the roles.
+    for _ in 0..6 {
         terminal.press(TAB);
     }
     terminal.wait_for("❯ Advise");

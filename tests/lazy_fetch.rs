@@ -92,19 +92,72 @@ fn a_git_cut_never_fetches_a_missing_blob() {
     let (world, head) = promisor_world();
     world.lose(&git_out(&world.work, &["rev-parse", "HEAD:a.txt"]));
     let answer = fork(&world, "FAKE: write=x.txt");
-    assert_ne!(answer.code, 0, "{}", answer.json);
+    assert_eq!(answer.code, 40, "{}", answer.json);
     assert!(!world.fetch_tried(), "the cut fetched the missing blob");
-    assert!(
-        answer.message().contains("`git worktree add` refused"),
-        "{}",
-        answer.json
+    // git cuts with no checkout, which reads no blob, then cahoots checks the
+    // worktree out with its own `reset --hard`: the step that needs it, and
+    // fails without it. The worktree is named, for a person to remove.
+    let left = world.state.join("worktrees").join(answer.run_id());
+    assert_eq!(
+        answer.message(),
+        format!(
+            "cannot cut a worktree: the checkout of {} failed, and {} is left there for a \
+             person to remove",
+            left.display(),
+            left.display()
+        )
     );
     assert!(world.record(&answer.run_id())["callee_pid"].is_null());
+    // The control: each step as cahoots runs it, without the variable. The
+    // first reads no blob; the checkout fetches it.
     let elsewhere = world.root.join("replay");
-    assert!(world.fetches_without_the_variable(
+    assert!(!world.fetches_without_the_variable(
         &world.work,
-        &["worktree", "add", "--detach", path_str(&elsewhere), &head]
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            path_str(&elsewhere),
+            &head
+        ]
     ));
+    assert!(world.fetches_without_the_variable(
+        &elsewhere,
+        &["reset", "-q", "--hard", "--no-recurse-submodules"]
+    ));
+}
+
+#[test]
+fn doctor_names_a_git_below_the_floor_rather_than_a_missing_one() {
+    let world = World::new();
+    let ran = world.root.join("old-git-ran");
+    let old = world.root.join("old-git/git");
+    world.script_at(
+        &old,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version 2.45.0'; exit 0; fi\n\
+             echo \"$@\" >> '{}'\nexit 1\n",
+            ran.display()
+        ),
+    );
+    world.prefix_path(old.parent().unwrap());
+    let doctor = world.ask(&["doctor"]);
+    assert_eq!(doctor.code, 34, "{}", doctor.json);
+    let fork = doctor.data()["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "fork")
+        .unwrap()
+        .clone();
+    assert_eq!(fork["status"], "fail", "{fork}");
+    let detail = fork["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("found `git version 2.45.0`") && !detail.contains("no git on PATH"),
+        "{detail}"
+    );
+    assert!(!ran.exists(), "the old git ran for more than its version");
 }
 
 #[test]

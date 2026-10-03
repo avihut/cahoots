@@ -328,9 +328,9 @@ fn fork_check(registry: &Registry) -> Check {
         ProviderId::Git => {
             // The provider's binary is missing: a failure, as for any provider.
             // Without a git nothing is a repository either, so it is said so.
-            if let Err(fail) = spawn::system_tool("git", &roots)
-                && fail.exit != Exit::Policy
-            {
+            // A git that is there but refused — by the binary policy, or as
+            // too old to be held to never fetching lazily — says why itself.
+            if spawn::find_on_path("git", env::path_var().as_deref()).is_none() {
                 return check(
                     "fork",
                     Status::Fail,
