@@ -31,12 +31,31 @@ directory permissions are already broken.
 
 ## The boundary
 
-**Two tiers of verbs.** Agent verbs — `pick run resume wait status result
+**Tiers of verbs.** Agent verbs — `pick run resume wait status result
 cancel outcome notes review` — are the only ones the printed rules name. Human verbs
 (`install`, `uninstall`, `settings`, `enable`, `learn`, `registry`, `evals`) change what
 cahoots may do, and refuse to run without a terminal on stdin. A test pins the agent tier
 by name: growing it is a change to this document. `outcome` starts `git` too:
 for a fork writer, it measures how much of its diff survived (Writers).
+
+**`refresh` keeps what `install` wrote current, without a terminal**, so the
+session that rebuilds cahoots can bring the skill and agent texts up to date.
+It is not an agent verb: no rule names it, so a harness asks its person
+first. It changes no authority because it does a subset of what `install`,
+from a terminal, would do to the files with the same config.toml. Nothing it
+does comes from its caller: it takes no flags, reads no environment, PATH or
+stdin, and reads the working directory only to refuse when cahoots' own
+directories are inside it. It rewrites only files the manifest lists that
+still carry the stamp, from the text in this binary. It adds a kind's
+subagent only in a harness home `install` has already written into, and only
+where no file is. It removes one only by install's own rule. No path it
+touches comes from config.toml: a kind's name is held to one file name. It
+never looks for, asks about or records a meter, never writes `meter.json` or
+`config.toml`, and never prints or applies a rule. Every file it, or
+`install`, writes is checked and replaced through its directory, held open:
+a link where an installed file was is left alone, and a new file is renamed
+into place, so a link swapped in after the check is replaced, never written
+through. The first install, and every meter flag, still need a terminal.
 
 **No flag widens authority.** There is no `--ungated`; the gate is bypassed
 only by configuration, which is a human's file. cahoots writes it only through
@@ -523,7 +542,7 @@ merge.
 
 No network code. No credential file is ever read. No shell is ever spawned.
 No harness settings or permission file is ever edited — rules are printed for
-a human to add, and `doctor` checks them read-only. `install` and
+a human to add, and `doctor` checks them read-only. `install`, `refresh` and
 `uninstall` remove only files the manifest lists that still carry cahoots'
-name and whose directory resolves inside the home — `install` only the
-subagents of kinds that are gone.
+name and whose directory resolves inside the home — `install` and `refresh`
+only the subagents of kinds that are gone.

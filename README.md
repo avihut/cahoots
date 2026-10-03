@@ -81,6 +81,10 @@ before you enable one. `install`, `enable`, `settings` and the other commands
 that change what cahoots may do run only from a terminal, so an agent can't
 run them for you.
 
+After you upgrade cahoots, `cahoots refresh` brings the skills and agents
+`install` wrote up to date. It changes nothing else, so it runs without a
+terminal: the session that upgraded cahoots can run it.
+
 ## Use it
 
 From your agent, just ask: *"get a second opinion from another agent on this
@@ -237,8 +241,8 @@ exact duplicate harness/model/effort triples. Unknown fields are refused.
 
 Each kind also becomes a subagent in Claude Code and Codex,
 `cahoots-kind-<name>`, described in your words, so your agent hands a
-matching task over by itself. `cahoots install` writes them: run it again
-after you add, change or remove a kind, and `cahoots doctor` tells you when
+matching task over by itself. `cahoots install` writes them: run it again,
+or `cahoots refresh`, after you add, change or remove a kind, and `cahoots doctor` tells you when
 it is due. A harness gets no subagent for a kind whose candidates are all on
 that harness, since an agent never delegates to itself.
 

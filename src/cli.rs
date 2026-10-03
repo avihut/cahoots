@@ -6,6 +6,8 @@
 //! allow-rules name. Human verbs change what cahoots may do, and refuse to run
 //! without a terminal on stdin. Inspect verbs read and report; `report` also
 //! files in the history the survival it measured.
+//! `refresh` keeps what `install` wrote current: it needs no terminal, and no
+//! rule names it.
 //!
 //! This is the command layer, the one place the logic and the interface meet
 //! (hard rule 11). It calls the logic, puts the logic's questions to a person
@@ -176,6 +178,9 @@ pub enum Verb {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Bring the files `install` wrote up to date with this version and your kinds — no terminal
+    /// needed; nothing else changes
+    Refresh,
     /// Print the skill this version installs
     Skill,
     /// See and change every setting: a page at the terminal, or one at a time
@@ -281,6 +286,9 @@ pub enum Tier {
     /// Reads and reports. No rule is printed for it, and none is needed.
     /// `report` also files the survival it measured in the history.
     Inspect,
+    /// Keeps what a person installed current, by install's own rules, and
+    /// changes no authority. No terminal needed; no rule is printed for it.
+    Upkeep,
     /// cahoots calling itself.
     Internal,
 }
@@ -295,6 +303,7 @@ pub fn tier_of(name: &str) -> Option<Tier> {
             Tier::Human
         }
         "doctor" | "report" | "exit-codes" | "skill" | "__dirs" => Tier::Inspect,
+        "refresh" => Tier::Upkeep,
         "__supervise" => Tier::Internal,
         _ => return None,
     })
@@ -315,6 +324,7 @@ impl Verb {
             Verb::Review { .. } => "review",
             Verb::Install { .. } => "install",
             Verb::Uninstall { .. } => "uninstall",
+            Verb::Refresh => "refresh",
             Verb::Skill => "skill",
             Verb::Settings { .. } => "settings",
             Verb::Enable { .. } => "enable",
@@ -660,6 +670,7 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
                 words,
             })
         }
+        Verb::Refresh => Ok(refresh()?.into()),
         Verb::Resume {
             run,
             brief,
@@ -721,6 +732,27 @@ fn evals(action: EvalsAction, person: bool, title: String) -> Result<Said, Stopp
         envelope: Envelope::new(Exit::Ok, None).with_data(data),
         words,
     })
+}
+
+/// `cahoots refresh`: install's file work, and nothing else. Never the meter,
+/// config.toml or the rules — so nothing of `install`'s is reused here but the
+/// two lines that read the kinds.
+fn refresh() -> Result<Envelope, Fail> {
+    let dirs = Dirs::resolve()?;
+    let cwd = std::env::current_dir()
+        .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
+    dirs.refuse_inside(&[&cwd])?;
+    let config = crate::config::UserConfig::load(&dirs.config_file())?;
+    let kinds = Registry::effective(&config).kinds;
+    let done = crate::install::files::refresh(&dirs, &kinds)?;
+    let envelope = match done.failed {
+        0 => Envelope::new(Exit::Ok, None),
+        failed => Envelope::new(
+            Exit::Internal,
+            format!("{failed} of the files could not be changed: see data.files"),
+        ),
+    };
+    Ok(envelope.with_data(serde_json::json!({ "files": done.files })))
 }
 
 /// `cahoots install`: the meter decided (and asked, when it comes to that)
@@ -1010,6 +1042,35 @@ mod tests {
         );
     }
 
+    /// `refresh` runs without a terminal; `install`, and every meter flag it
+    /// takes, still does not.
+    #[test]
+    fn refresh_needs_no_terminal_and_install_still_does() {
+        for argv in [
+            vec!["cahoots", "install"],
+            vec!["cahoots", "install", "--dry-run"],
+            vec!["cahoots", "install", "--harness", "codex"],
+            vec!["cahoots", "install", "--meter", "none"],
+            vec![
+                "cahoots",
+                "install",
+                "--meter",
+                "agent-usage",
+                "--meter-binary",
+                "/x",
+            ],
+        ] {
+            let verb = Cli::try_parse_from(&argv).unwrap().verb;
+            let fail = refusal(&verb, false).unwrap_or_else(|| panic!("{argv:?} ran"));
+            assert_eq!(fail.exit, Exit::Policy, "{argv:?}");
+            assert!(refusal(&verb, true).is_none(), "{argv:?}");
+        }
+        let refresh = Cli::try_parse_from(["cahoots", "refresh"]).unwrap().verb;
+        assert_eq!(refresh.tier(), Tier::Upkeep);
+        assert!(refusal(&refresh, false).is_none());
+        assert!(refusal(&refresh, true).is_none());
+    }
+
     /// Who reads is decided, never found out by running a verb: `reader`,
     /// like `refusal`, is tested without `dispatch`.
     #[test]
@@ -1028,7 +1089,9 @@ mod tests {
                 Tier::Inspect if ["doctor", "report"].contains(&name) => {
                     (Reader::Person, Reader::Program)
                 }
-                Tier::Agent | Tier::Inspect | Tier::Internal => (Reader::Program, Reader::Program),
+                Tier::Agent | Tier::Inspect | Tier::Upkeep | Tier::Internal => {
+                    (Reader::Program, Reader::Program)
+                }
             };
             assert_eq!(reader(name, true, true), both, "{name}");
             assert_eq!(
