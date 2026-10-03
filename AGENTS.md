@@ -104,9 +104,13 @@ verb, like a bare `cahoots`, is a person's at a terminal.
   checkout` / `git switch` / `git worktree add`.
 - Changes arrive as PRs. **The PR title is the commit** (squash merge) and
   must be a conventional commit with the area as scope: `fix(gate): …`.
-- Never touch the version on a branch. No `release:` commit, no tag.
-- Commit only when the person you are working for asks. Commits and tags are
-  signed; if signing fails, stop and say so — never disable it.
+- Never touch the version, and never make a `release:` commit or a `v*` tag.
+  The release workflow (`release-flow.yml`) alone does, and a release is the
+  merge of its PR (`RELEASING.md`).
+- Commit only when the person you are working for asks. Your commits are
+  signed; if signing fails, stop and say so — never disable it. The release
+  workflow's commit and tag are not signed; `RELEASING.md` says what stands in
+  for the signature.
 - Warnings are errors, everywhere (`scripts/no-warnings.sh`).
 - A gate nobody has seen fail is a gate nobody knows works: a new check in a
   script gets a pass case **and** a refusal case in `scripts/test-hooks.sh`.

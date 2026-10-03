@@ -44,4 +44,8 @@ shell, and the behaviour of the harness CLIs themselves.
 
 ## Supported versions
 
-Only the newest tagged version.
+Only the newest tagged version. To check that a release archive was built by
+this repository's release workflow from the tag `vX.Y.Z` and the commit it
+names: `gh attestation verify <archive> -R avihut/cahoots --signer-workflow
+avihut/cahoots/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z
+--source-digest <that commit's sha>` (RELEASING.md shows how to get the sha).

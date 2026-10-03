@@ -113,11 +113,11 @@ description = "Formatting, check only — nothing is rewritten"
 run = "cargo fmt --check"
 
 [tasks.guard]
-description = "Hard-rule tripwires: tokens, network, spawns, agent homes, dependencies, action pins, check names, script↔task pairing (arg: --staged for the index)"
+description = "Hard-rule tripwires: tokens, network, spawns, agent homes, dependencies, action pins, check names, script↔task pairing, layers, workflow triggers, the release app's secrets (arg: --staged for the index)"
 run = "scripts/guard.sh"
 
 [tasks.commit-msg]
-description = "Verify a commit message file: conventional subject, release subject ↔ Cargo.toml version (arg: path)"
+description = "Verify a commit message file: conventional subject, and no release commit or version move by hand (arg: path)"
 run = "scripts/commit-msg.sh"
 
 [tasks.landed-check]
@@ -125,19 +125,27 @@ description = "post-merge tripwire: the landed tree is the tree the merge gate t
 run = "scripts/landed-check.sh"
 
 [tasks.release]
-description = "Cut the release main has earned — bump, 'release: vX.Y.Z' commit, signed annotated tag. Never pushes (--dry-run for the verdict)"
+description = "The release workflow's steps (plan | commit | pr-body | pending-tag | tag <sha> | bot) — `plan` is the safe one by hand"
 run = "scripts/release.sh"
+
+[tasks.pr-title]
+description = "Check a PR's title and, for the release PR, its diff (env: PR_TITLE, PR_HEAD_REF, PR_HEAD_REPO, PR_BASE_REPO, PR_AUTHOR; HEAD = the merge ref)"
+run = "scripts/pr-title.sh"
+
+[tasks.release-rulesets-audit]
+description = "The driver's audit, with the maintainer's gh credentials: both release rulesets are active, cover their refs, and let only the release app bypass them (args: coverage|exclusive <tag|release-pr> <ruleset.json> for the pure check)"
+run = "scripts/release-rulesets-audit.sh"
 
 [tasks.formula]
 description = "Render the Homebrew formula dist would publish into target/distrib and check it against Cargo.toml (needs dist; checksums are placeholders; publishes nothing)"
 run = "scripts/formula.sh"
 
 [tasks.release-check]
-description = "pre-push: every release commit/tag on stdin is whole — version, annotated tag, tag on the commit"
+description = "pre-push: nothing release-shaped is pushed by hand — no v* tag, no release-pr, no release commit, no version move"
 run = "scripts/release-check.sh"
 
 [tasks.release-reminder]
-description = "List unreleased feat/fix commits on main and the steps to release them"
+description = "List the unreleased feat/fix commits on main, which the release PR holds (never fails)"
 run = "scripts/release-reminder.sh"
 
 [tasks.pin-actions]

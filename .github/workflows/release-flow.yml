@@ -1,0 +1,263 @@
+# The release flow (RELEASING.md). On every push to main, two jobs, one after
+# the other:
+#
+#   1. tag-merged-release — if main holds a `release: vX.Y.Z` commit whose tag
+#      does not exist yet (the release PR was just merged), check where it
+#      came from and tag it: an annotated, unsigned `vX.Y.Z` whose annotation
+#      is the CHANGELOG section. The pushed tag starts release.yml (dist).
+#   2. maintain-release-pr — if main has earned a release since the last tag,
+#      rebuild the `release-pr` branch as main plus ONE release commit
+#      (scripts/release.sh commit) and open or update its PR; if it has not,
+#      close that PR and delete the branch. Merging the PR is the release.
+#
+# Why the Wheatley app's token, not GITHUB_TOKEN: a tag or branch pushed with
+# GITHUB_TOKEN starts no workflow, so neither release.yml (on the tag) nor CI
+# and pr-title (on the release PR) would run.
+#
+# Why the `release` environment: the app's key is an environment secret there,
+# and the environment deploys only from main. A workflow added on an agent's
+# branch can't reach it, and neither can a `pull_request` run — no workflow
+# here runs on pull_request_target or workflow_run (scripts/guard.sh rules 12
+# and 13; docs/THREAT-MODEL.md → Releases).
+#
+# Why the tag job looks for the release commit instead of tagging HEAD: runs
+# are serialised and a newer queued run replaces a pending one, so by the
+# time a run starts, the merge of the release PR may lie under newer commits.
+# `release.sh plan` and `commit` refuse while such a commit is untagged, and
+# maintain-release-pr needs this job, so nothing bumps past it.
+#
+# How it differs from daft's release-flow.yml: the app's secrets live in an
+# environment rather than the repository; each job refuses to push unless an
+# active ruleset covers its ref with the rules that reserve it (the app's
+# token can't see bypass lists, so that they name the app alone is checked by
+# the driver's audit, scripts/release-rulesets-audit.sh); the tag job reads the
+# merged PR's head, fork status and author from GitHub's API, never from the
+# PR's text; no workflow_dispatch and no version override (the bump rules
+# decide); no label, no assignee, no toolchain — git, bash, awk, jq and the
+# runner's gh are enough.
+name: Release flow
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-flow
+  cancel-in-progress: false
+
+jobs:
+  tag-merged-release:
+    name: tag-merged-release
+    if: github.repository == 'avihut/cahoots' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Mint the release app's token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.WHEATLEY_BOT_APP_ID }}
+          private-key: ${{ secrets.WHEATLEY_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true # the tag is pushed with it
+          ref: ${{ github.sha }}
+
+      # Fail closed: the app may create a v* tag only because a ruleset lets
+      # nobody else do so. Without an active ruleset that covers every v* tag
+      # with a creation rule, don't tag. This token can't see a ruleset's
+      # bypass actors, so it can't tell who else may bypass it: that is the
+      # driver's audit (`mise run release-rulesets-audit`, RELEASING.md).
+      - name: Require an active ruleset that restricts v* tag creation
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=tag" >"$RUNNER_TEMP/rulesets.json"
+          restricted=false
+          for id in $(jq -r '.[] | select(.enforcement == "active") | .id' "$RUNNER_TEMP/rulesets.json"); do
+            gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" >"$RUNNER_TEMP/ruleset-$id.json"
+            if scripts/release-rulesets-audit.sh coverage tag "$RUNNER_TEMP/ruleset-$id.json"; then
+              restricted=true
+            fi
+          done
+          if [ "$restricted" != true ]; then
+            echo "::error::v* tag creation is not restricted to the release app; refusing to tag. Apply .github/rulesets/release-tags-by-workflow.json."
+            exit 1
+          fi
+          echo "an active ruleset restricts v* tag creation (who bypasses it is the driver's audit)"
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Find a release commit on main that has no tag yet
+        id: pending
+        run: scripts/release.sh pending-tag >>"$GITHUB_OUTPUT"
+
+      # Where the release commit came from, as GitHub records it: no PR's
+      # title, body or files can change these. The association can lag the
+      # push, so ask again a few times; if it never appears, the variables
+      # stay unset and `release.sh tag` refuses.
+      - name: The pull request that merged it
+        if: steps.pending.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SHA: ${{ steps.pending.outputs.sha }}
+        run: |
+          set -euo pipefail
+          pr="$RUNNER_TEMP/merged-pr.json"
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" >"$RUNNER_TEMP/pulls.json"
+            jq --arg sha "$SHA" \
+              'first(.[] | select(.merge_commit_sha == $sha and .merged_at != null)) // empty' \
+              "$RUNNER_TEMP/pulls.json" >"$pr"
+            [ -s "$pr" ] && break
+            echo "no merged pull request for $SHA yet (attempt $attempt)"
+            [ "$attempt" = 5 ] || sleep 10
+          done
+          if [ ! -s "$pr" ]; then
+            echo "::warning::no merged pull request found for $SHA; the tag step will refuse"
+            exit 0
+          fi
+          {
+            printf 'MERGED_PR_NUMBER=%s\n' "$(jq -r '.number' "$pr")"
+            printf 'MERGED_PR_HEAD_REF=%s\n' "$(jq -r '.head.ref' "$pr")"
+            printf 'MERGED_PR_CROSS_REPO=%s\n' "$(jq -r 'if .head.repo == null or .head.repo.full_name != .base.repo.full_name then "true" else "false" end' "$pr")"
+            printf 'MERGED_PR_AUTHOR=%s\n' "$(jq -r '.user.login' "$pr")"
+          } >>"$GITHUB_ENV"
+
+      - name: Tag the release, and push the tag
+        if: steps.pending.outputs.sha != ''
+        env:
+          SHA: ${{ steps.pending.outputs.sha }}
+          VERSION: ${{ steps.pending.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release.sh tag "$SHA"
+          git push origin "refs/tags/v$VERSION"
+
+  maintain-release-pr:
+    name: maintain-release-pr
+    # Skipped when tagging fails: otherwise it would bump again on top of an
+    # untagged release (and `release.sh plan` refuses that anyway).
+    needs: tag-merged-release
+    if: github.repository == 'avihut/cahoots' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Mint the release app's token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.WHEATLEY_BOT_APP_ID }}
+          private-key: ${{ secrets.WHEATLEY_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true # release-pr is pushed with it
+          ref: ${{ github.sha }}
+
+      # Fail closed: the app may force-push release-pr only because a ruleset
+      # lets nobody else write it. Without an active ruleset that covers
+      # release-pr with creation, update, deletion and non-fast-forward
+      # rules, don't push. As above, who bypasses it is the driver's audit.
+      - name: Require an active ruleset that restricts release-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=branch" >"$RUNNER_TEMP/rulesets.json"
+          restricted=false
+          for id in $(jq -r '.[] | select(.enforcement == "active") | .id' "$RUNNER_TEMP/rulesets.json"); do
+            gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" >"$RUNNER_TEMP/ruleset-$id.json"
+            if scripts/release-rulesets-audit.sh coverage release-pr "$RUNNER_TEMP/ruleset-$id.json"; then
+              restricted=true
+            fi
+          done
+          if [ "$restricted" != true ]; then
+            echo "::error::release-pr is not restricted to the release app; refusing to push. Apply .github/rulesets/release-pr-by-workflow.json."
+            exit 1
+          fi
+          echo "an active ruleset restricts release-pr (who bypasses it is the driver's audit)"
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: The next version
+        id: plan
+        run: |
+          set -euo pipefail
+          next=$(scripts/release.sh plan)
+          echo "next=$next" >>"$GITHUB_OUTPUT"
+
+      # The open release PR: from this repository's release-pr, opened by the
+      # bot — a fork's branch of the same name is someone else's PR. REST, so
+      # the bot's login has one spelling (release.sh bot).
+      - name: Find the open release PR
+        id: open
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/pulls?head=$GITHUB_REPOSITORY_OWNER:release-pr&state=open" >"$RUNNER_TEMP/open.json"
+          jq -r --arg bot "$(scripts/release.sh bot)" --arg repo "$GITHUB_REPOSITORY" \
+            '[.[] | select(.user.login == $bot and .head.repo.full_name == $repo) | .number] | map(tostring) | join(" ")' \
+            "$RUNNER_TEMP/open.json" >"$RUNNER_TEMP/numbers"
+          echo "numbers=$(cat "$RUNNER_TEMP/numbers")" >>"$GITHUB_OUTPUT"
+
+      - name: Nothing releasable — close the release PR
+        if: steps.plan.outputs.next == ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUMBERS: ${{ steps.open.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          for number in $NUMBERS; do
+            gh pr close "$number" --comment "Nothing releasable remains since the last release; closing. The release flow opens a new one when a feat or fix lands."
+          done
+          git ls-remote --heads origin release-pr >"$RUNNER_TEMP/branch"
+          if [ -s "$RUNNER_TEMP/branch" ]; then
+            git push origin --delete release-pr
+          fi
+
+      - name: Rebuild release-pr, and open or update its PR
+        if: steps.plan.outputs.next != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEXT: ${{ steps.plan.outputs.next }}
+          NUMBERS: ${{ steps.open.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          git switch -C release-pr
+          scripts/release.sh commit
+          scripts/release.sh pr-body >"$RUNNER_TEMP/body.md"
+          git push --force origin release-pr
+          set -- $NUMBERS
+          if [ $# -gt 0 ]; then
+            gh pr edit "$1" --title "release: v$NEXT" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head release-pr --title "release: v$NEXT" --body-file "$RUNNER_TEMP/body.md"
+          fi

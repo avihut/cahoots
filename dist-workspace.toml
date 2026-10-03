@@ -27,6 +27,9 @@ allow-dirty = ["ci"]
 install-path = "CARGO_HOME"
 # No self-updater: cahoots has no network code, and that includes its installer's
 install-updater = false
+# Build provenance for every archive: `gh attestation verify <archive>
+# -R avihut/cahoots` ties it to this repository, the commit and the workflow.
+github-attestations = true
 
 # Current runners; a native ARM runner for Linux aarch64 (no cross-compiling)
 [dist.github-custom-runners]

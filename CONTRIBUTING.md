@@ -64,12 +64,12 @@ reasonable thing to allow, and a PR that bends one needs to say so up front
 ## Pull requests
 
 - **The PR title is the commit.** PRs are squash-merged and the title becomes
-  the subject on `main`, which the release cut reads to choose the next
+  the subject on `main`, which the release workflow reads to choose the next
   version. Make it a conventional commit with the area as the scope —
   `fix(gate): …`, `feat(codex): …` (never `codex: …`). CI checks it.
   Commits inside the PR are yours to shape; they're squashed away.
 - **Don't touch the version.** No bump in `Cargo.toml`, no `release:` commit,
-  no tag — the release is cut on `main` after the merge (`RELEASING.md`).
+  no tag — the release workflow cuts the release (`RELEASING.md`).
 - Optional but appreciated: describe a user-visible change in
   `.release-notes/next.md` (prose; it becomes the release notes).
 - Commits must be signed (the ruleset requires it).

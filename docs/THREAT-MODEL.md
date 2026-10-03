@@ -425,6 +425,51 @@ the data directory, and a worktree cut at the base commit shares its
 repository's objects, which may already hold the accepted change. A replay
 (#39) must not be taken as blind to its tests.
 
+## Releases
+
+The binary a person installs is built from a `v*` tag, so whoever can create
+a tag, or decide what a release commit holds, can ship code to everyone who
+installs cahoots. The agents that work on this repository act with the
+maintainer's credentials; the pipeline is built so that they still can't.
+
+**What the pipeline can do.** `release-flow.yml` can push one branch,
+`release-pr`, and create one kind of ref, a `v*` tag. Both happen only with
+the Wheatley app's token, which is minted only in the `release` environment,
+and that environment deploys only from `main`.
+
+- A workflow added on an agent's branch can't reach the key: it isn't a
+  repository secret, and the environment refuses any ref but `main`.
+- A `pull_request` run never has it. No workflow runs on
+  `pull_request_target` or `workflow_run` (`guard` rule 12).
+- The secrets are named only in `release-flow.yml` (`guard` rule 13).
+- Actions' default workflow permissions are read (checked 2026-10-03), so
+  `GITHUB_TOKEN` can't push a tag either.
+
+**Who decides a release.** Whoever merges the release PR, at a pinned head.
+On the desk that is the maintainer's click, and the driver performs the
+merge.
+
+| Way in | What holds it |
+|---|---|
+| a PR from another branch titled `release:` | `pr-title` refuses it. A PR can edit its own `pr-title` (`pull_request` runs its copy), so the tag job refuses it too: it reads the merged PR's head ref, fork status and author from GitHub's API, which no PR's content can change. |
+| a push to `release-pr` by anyone else | the `release-pr is the release workflow's` ruleset, whose only bypass is the app. The maintain job refuses to push unless an active ruleset covers `release-pr`; its token can't see bypass lists, so that the app alone bypasses it is the driver's audit (`release-rulesets-audit`), run with the maintainer's credentials when the rulesets are applied and before every release merge. |
+| a `v*` tag created by anyone else, an agent using the maintainer's credentials included | the `release tags are made by the release workflow` ruleset, whose only bypass is the app; the tag job refuses to tag unless an active ruleset covers every `v*` tag (coverage only, as above; the driver's audit checks the bypass list); `release-check` (pre-push) says so first. |
+| the tag job on a commit that isn't the release commit | `release.sh tag` checks the subject, the version there and before, ancestry, the merged PR's head ref, repository, author and number, an existing tag, and the CHANGELOG section — and refuses on the first that fails. |
+| a moved or re-made tag | `release tags are immutable`: no bypass, the app included. |
+| a fork PR | no secrets, and never a release PR: that is this repository's `release-pr` by definition. |
+| an unpinned action | `guard` rule 7. |
+| a version smuggled into an ordinary PR | `pr-title` (an ordinary PR may not move the version), `commit-msg` and `release-check`. |
+
+**Residuals.**
+
+- A change to `release-flow.yml` or `release.sh` that lands on `main` runs
+  with the key. The review gate holds that; the driver treats any change to
+  them, to `pr-title.sh` or to the rulesets as the maintainer's to merge.
+- The repository admin can edit the rulesets.
+- `HOMEBREW_TAP_TOKEN` is still a repository secret, older than this
+  pipeline; moving it into an environment limited to `v*` tags is a
+  follow-up.
+
 ## What cahoots never does
 
 No network code. No credential file is ever read. No shell is ever spawned.

@@ -1,7 +1,16 @@
-# A PR lands as ONE squash commit whose subject is the PR title, and
-# the release cut reads those subjects to choose the next version — so the
-# title is held to the same grammar the commit-msg hook holds a commit to.
+# A PR lands as ONE squash commit whose subject is the PR title, and the
+# release workflow reads those subjects to choose the next version — so the
+# title is held to the same grammar the commit-msg hook holds a commit to. A
+# `release:` title belongs to the release workflow's own PR, and that PR's
+# diff is held to the version, the changelog and the notes fragment
+# (scripts/pr-title.sh says how).
 # Its own workflow so that editing a title re-runs this, not the build matrix.
+#
+# `pull_request` runs the PR's OWN copy of this file and of the script, so a
+# PR can edit its own `pr-title` check. What holds after that is the tag job
+# in release-flow.yml: it tags only a release merged from the bot's
+# same-repository `release-pr`, as GitHub's API reports the merged PR — which
+# no PR's content can change (docs/THREAT-MODEL.md → Releases).
 name: PR title
 
 on:
@@ -21,27 +30,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # The merge ref and its parents: HEAD^1 is the base the PR is read
+      # against.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2
           persist-credentials: false
 
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: cocogitto
 
-      # The title arrives through the environment, never interpolated into
-      # the script: a title is attacker-controlled text.
-      - name: Conventional commit subject
+      # Everything from the event arrives through the environment, never
+      # interpolated into the script: a title is attacker-controlled text.
+      - name: Title, and the release PR's diff
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          # Only cocogitto is installed; the task must not fetch the rest.
+          MISE_TASK_RUN_AUTO_INSTALL: "false"
         run: |
           # cog opens the repository and reads its identity even to verify a
           # bare string; a runner has none.
           git config user.name "ci" && git config user.email "ci@users.noreply.github.com"
-          case "$PR_TITLE" in
-          release:* | release\(*)
-              echo "A PR is never a release — the release commit is cut on main by the maintainer." >&2
-              exit 1
-              ;;
-          esac
-          cog verify "$PR_TITLE"
+          mise run pr-title

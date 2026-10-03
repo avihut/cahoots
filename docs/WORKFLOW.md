@@ -9,7 +9,7 @@ the whole set by hand:
 
 | Task | What it holds |
 |---|---|
-| `guard` | the hard rules a grep can hold (`scripts/guard.sh`, nine of them) |
+| `guard` | the hard rules a grep can hold (`scripts/guard.sh`, thirteen of them) |
 | `lint-shell` | shellcheck over `scripts/*.sh` |
 | `fmt-check` | `cargo fmt --check` |
 | `check-config` | `lefthook.yml`, `daft.yml`, `mise.toml` parse |
@@ -33,15 +33,18 @@ looks fenced is not evidence that it is (docs/SPIKE.md S7).
 - **pre-commit** — staged files: format, whitespace, shell lint, config,
   `guard --staged`.
 - **commit-msg** — a conventional subject (`cog`, with `release` declared in
-  `cog.toml`); a commit that moves `Cargo.toml`'s version must *be*
-  `release: vX.Y.Z`.
+  `cog.toml` because `main` holds release subjects); no `release:` commit and
+  no commit that moves `Cargo.toml`'s version — those are the release
+  workflow's.
 - **pre-push** — clippy, the suite, deny, test-hooks, config, and
-  `release-check`: a release commit being pushed is whole.
+  `release-check`: nothing release-shaped is pushed by hand — no `v*` tag, no
+  `release-pr`, no release commit, no version move.
 - **daft pre-merge** — all of the above plus `source-up-to-date` and
   `incoming-commits`, in the source worktree, before `main` moves.
   `daft merge --skip-tag deep` drops only the release build.
 - **daft post-merge** — `landed-check`: the landed tree is the gated tree;
-  `release-reminder`: unreleased `feat`/`fix` on `main` means a release is owed.
+  `release-reminder`: the unreleased `feat`/`fix` on `main`, which the release
+  PR holds (it never fails).
 - **CI** — `mise run check-all` on Ubuntu and macOS, aggregated into one
   check named `gate`, plus `pr-title`.
 
@@ -68,14 +71,28 @@ title is held to the commit grammar by the `pr-title` check.
   PRs that break it together. The repository admin bypasses it so the
   maintainer's local flow keeps working.
 - **release tags are immutable** — a pushed `v*` tag never moves.
+- **release tags are made by the release workflow** — only the Wheatley app
+  creates a `v*` tag. No admin bypass.
+- **release-pr is the release workflow's** — only the Wheatley app writes the
+  `release-pr` branch. No admin bypass.
+
+`mise run release-rulesets-audit`, with the maintainer's credentials, checks
+that the two release rulesets are live and that only the app bypasses them;
+the release workflow can check only their coverage.
+
+The **`release` environment** deploys from `main` only and holds the app's
+key, `WHEATLEY_BOT_APP_ID` and `WHEATLEY_BOT_PRIVATE_KEY`. Only
+`release-flow.yml` names them, and no workflow runs on `pull_request_target`
+or `workflow_run` (`guard` rules 12 and 13): a PR's code never meets a secret.
 
 `gate` and `pr-title` are spelled in four places; `guard` rule 8 holds them
 together. The `gate` job is an aggregate with `if: always()` and an explicit
 verdict, because a required check that is *skipped* counts as green.
 
 Repository settings that are not files: squash merges only, auto-merge on,
-branches deleted on merge, Actions restricted to full-SHA pins, fork PR
-workflows need approval, private vulnerability reporting on.
+branches deleted on merge, Actions restricted to full-SHA pins, Actions'
+default workflow permissions read, fork PR workflows need approval, private
+vulnerability reporting on.
 
 ## Dependencies
 
@@ -86,10 +103,11 @@ fails closed if `gate` is ever not a required check.
 
 ## Releases
 
-Cut on `main`, by the maintainer, never on a branch and never by a PR:
-`mise run release` makes a `release: vX.Y.Z` commit that carries the version
-bump, and a signed annotated tag whose annotation is the release notes. It
-never pushes — `git push origin main vX.Y.Z` is a person's step, because a
-pushed `v*` tag can never move and it is what starts the release workflow
-(cargo-dist: binaries, the GitHub release, the Homebrew formula).
-`RELEASING.md` is the whole ritual.
+A release is the merge of the release PR. On every push to `main`,
+`release-flow.yml` keeps one PR, `release: vX.Y.Z`, from the `release-pr`
+branch: `main` plus one commit that moves the version and writes the
+`CHANGELOG.md` section. Merging it at its head is the release; the workflow
+then tags the merge with an annotated tag whose annotation is that section,
+and the tag starts `release.yml` (cargo-dist: binaries, attestations, the
+GitHub release, the Homebrew formula). Nothing release-shaped is made by
+hand. `RELEASING.md` is the whole of it.

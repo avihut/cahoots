@@ -1,4 +1,4 @@
-<!-- The PR TITLE becomes the squash commit's subject, and the release script
+<!-- The PR TITLE becomes the squash commit's subject, and the release workflow
      reads it: make it a conventional commit with the area as the scope —
      `fix(gate): …`, `feat(codex): …`. CI checks it. -->
 

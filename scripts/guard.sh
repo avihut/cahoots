@@ -2,7 +2,8 @@
 # Hard-rule tripwires: the rules of AGENTS.md that a grep can hold. Each is a
 # tripwire, not a proof — it catches the careless regression, and its failure
 # message names the rule so a deliberate change is made as one (amend the
-# rule, then the list below, in the same commit).
+# rule, then the list below, in the same commit). Thirteen rules, numbered
+# below.
 #
 #   scripts/guard.sh            the working tree (tracked files)
 #   scripts/guard.sh --staged   the index — what a commit is about to record
@@ -155,6 +156,20 @@ if ! grep -q 'NO_LAZY_FETCH' <<<"$last_env"; then
 fi
 if hits=$("${grep_tree[@]}" -n 'GIT_NO_LAZY_FETCH' -- src ':!src/spawn.rs'); then
     fail "GIT_NO_LAZY_FETCH is named outside src/spawn (no lazy fetch: only the builder sets it)" "$(where "$hits")"
+fi
+
+# 12. A PR's code never meets a secret: no workflow runs on
+#     `pull_request_target` or `workflow_run`, the two triggers that run with
+#     the base's secrets after a PR's code. Comment lines may name them.
+if hits=$("${grep_tree[@]}" -nE '^[^#]*(pull_request_target|workflow_run)' -- .github/workflows); then
+    fail "a workflow runs on pull_request_target or workflow_run (docs/WORKFLOW.md: a PR's code never meets a secret)" "$(where "$hits")"
+fi
+
+# 13. The release app's key is reachable from one workflow only: its secrets
+#     and the `release` environment that holds them are named nowhere else
+#     under .github (the docs name them for the person who sets them up).
+if hits=$("${grep_tree[@]}" -nE 'WHEATLEY_BOT_|environment:[[:space:]]*release' -- .github ':!.github/workflows/release-flow.yml'); then
+    fail "the release app's secrets are named outside release-flow.yml (docs/THREAT-MODEL.md → Releases)" "$(where "$hits")"
 fi
 
 if [ "$failures" -gt 0 ]; then

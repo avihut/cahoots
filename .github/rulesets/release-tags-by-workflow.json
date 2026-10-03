@@ -1,0 +1,12 @@
+{
+  "name": "release tags are made by the release workflow",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [
+    { "actor_id": 2607344, "actor_type": "Integration", "bypass_mode": "always" }
+  ],
+  "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
+  "rules": [
+    { "type": "creation" }
+  ]
+}

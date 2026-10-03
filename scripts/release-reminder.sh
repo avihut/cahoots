@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # post-merge reminder (daft.yml), and `mise run release-reminder` by hand:
-# a shipped feature or fix is not done until it is released. Exits non-zero
-# while main holds unreleased feat/fix commits, so daft shows it as a warning
-# row; post-merge never rolls back.
+# lists the feat/fix commits on main since the last release. Always exits 0:
+# the release PR already holds them, and the release button on the desk is
+# the reminder — a warning row after every merge would be noise.
 set -euo pipefail
 
 # git exports these to hooks; the cwd (the target worktree) is authoritative.
@@ -16,20 +16,17 @@ fi
 
 last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 range=${last:+$last..}HEAD
-unreleased=$(git log --format='%h %s' "$range" | grep -E '^[0-9a-f]+ (feat|fix)(\([^)]*\))?!?: ' || true)
+# Read whole before grep sees it (#68: no reader leaves its writer mid-write).
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+git log --format='%h %s' "$range" >"$log"
+unreleased=$(grep -E '^[0-9a-f]+ (feat|fix)(\([^)]*\))?!?: ' "$log" || true)
 
 if [ -z "$unreleased" ]; then
     echo "release-reminder: nothing unreleased on main since ${last:-the first commit}"
     exit 0
 fi
 
-{
-    echo "main holds unreleased work since ${last:-the first commit}:"
-    printf '%s\n' "$unreleased" | sed 's/^/  /'
-    echo
-    echo "To release it (RELEASING.md):"
-    echo "  1. mise run release             # the bump, the 'release: vX.Y.Z' commit, the signed tag"
-    echo "  2. git show vX.Y.Z              # read what is about to become permanent"
-    echo "  3. git push origin main vX.Y.Z  # the tag starts the release workflow"
-} >&2
-exit 1
+echo "main holds unreleased work since ${last:-the first commit}:"
+printf '%s\n' "$unreleased" | sed 's/^/  /'
+echo "The release PR holds them — merging it is the release (RELEASING.md)."
