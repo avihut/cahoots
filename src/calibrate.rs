@@ -157,6 +157,7 @@ mod tests {
                 caller: None,
                 target: target.clone(),
                 blind: false,
+                exploration: false,
                 dir: PathBuf::from("/w"),
                 state: *state,
                 exit: 0,
@@ -285,5 +286,34 @@ mod tests {
         assert_eq!(evidence(&tagged, Role::Review, &first, 0).n, 8);
         assert_eq!(evidence(&tagged, Role::Review, &second, 0).accepted, 8);
         assert_eq!(suggest(&tagged, Role::Review, &[first, second], 0), Some(0));
+    }
+
+    #[test]
+    fn exploration_evidence_is_counted_without_crossing_kind_scopes() {
+        let first = candidate(HarnessId::Codex, "m");
+        let mut second = first.clone();
+        second.effort = Effort::Medium;
+        // Role-only runs the second candidate earned through exploration count
+        // like any other role evidence, whatever label they carry.
+        let mut explored = stories(&second, &all(Outcome::Accepted, 8));
+        for story in &mut explored {
+            story.exploration = true;
+        }
+        let mut told = stories(&first, &all(Outcome::Discarded, 8));
+        told.extend(explored.clone());
+        assert_eq!(evidence(&told, Role::Review, &second, 0).n, 8);
+        assert_eq!(
+            suggest(&told, Role::Review, &[first.clone(), second.clone()], 0),
+            Some(0)
+        );
+        // The same runs inside a task kind stay out of the role's evidence.
+        for story in &mut explored {
+            story.kind =
+                Some(crate::model::TaskKindName::try_from("rust-review".to_string()).unwrap());
+        }
+        let mut kinded = stories(&first, &all(Outcome::Discarded, 8));
+        kinded.extend(explored);
+        assert_eq!(evidence(&kinded, Role::Review, &second, 0).n, 0);
+        assert_eq!(suggest(&kinded, Role::Review, &[first, second], 0), None);
     }
 }

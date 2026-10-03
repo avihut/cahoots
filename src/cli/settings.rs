@@ -497,6 +497,13 @@ fn words(key: &Key) -> (String, String) {
         Key::KindDescription(name) => ("Description", format!("When to use this task kind, in your words. Change it with settings set kinds.{name}.description or in config.toml.")),
         Key::KindRole(_) => ("Role", "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own.".into()),
         Key::KindCandidates(_) => ("Candidates", "Who takes this kind of task, first choice first. Only this list is tried; the role's list is not used.".into()),
+        Key::ExploreShare(role) => {
+            return (
+                format!("Exploration share: {}", role.as_str()),
+                EXPLORATION_HELP.to_string(),
+            );
+        }
+        Key::KindExploreShare(_) => ("Exploration share", EXPLORATION_HELP.to_string()),
         Key::Calibrate(role) => {
             return (
                 format!("{} learns", role_label(*role)),
@@ -507,6 +514,9 @@ fn words(key: &Key) -> (String, String) {
     };
     (label.to_string(), help)
 }
+
+/// What every exploration-share row says (`docs/ARCHITECTURE.md`, Exploration).
+const EXPLORATION_HELP: &str = "The share of new runs that try the next listed candidate first. Every candidate passes the usual checks. Does not apply with --to or resume.";
 
 fn role_label(role: Role) -> &'static str {
     match role {
@@ -572,6 +582,9 @@ fn note(setting: &Setting) -> String {
         Key::KindDescription(_) | Key::KindRole(_) | Key::KindCandidates(_)
     ) {
         return "Set in config.toml. This kind has no default; create, rename or remove its table in config.toml.".into();
+    }
+    if matches!(&setting.key, Key::KindExploreShare(_)) && setting.origin == Origin::Default {
+        return "Inherited from this kind’s role. Set a share to override it; reset to inherit again.".into();
     }
     if setting.locked {
         return "Runs stop at 100% while the usage cap is 100%: lower the cap to set this."
@@ -998,7 +1011,7 @@ candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "
             .iter()
             .filter(|r| r.section == "Kind · rust-review")
             .collect();
-        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds.len(), 4);
         assert_eq!(kinds[0].label, "Description");
         assert_eq!(
             kinds[0].help,
@@ -1033,7 +1046,28 @@ candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "
         );
         assert!(matches!(kinds[2].edit, Edit::Order { .. }));
         assert_eq!(kinds[2].value, "codex m high, then codex m medium");
-        for row in kinds {
+        // The one optional field: its words, its inherited note and its stepper.
+        assert_eq!(kinds[3].label, "Exploration share");
+        assert_eq!(
+            kinds[3].help,
+            "The share of new runs that try the next listed candidate first. Every candidate passes the usual checks. Does not apply with --to or resume."
+        );
+        assert_eq!(
+            kinds[3].note,
+            "Inherited from this kind’s role. Set a share to override it; reset to inherit again."
+        );
+        assert_eq!(kinds[3].value, "0%");
+        assert!(matches!(
+            kinds[3].edit,
+            Edit::Step {
+                value: Some(0),
+                min: 0,
+                max: 100,
+                default: Some(0),
+                ..
+            }
+        ));
+        for row in &kinds[..3] {
             assert_eq!(
                 row.note,
                 "Set in config.toml. This kind has no default; create, rename or remove its table in config.toml."
@@ -1081,5 +1115,103 @@ candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "
             json["data"]["changed"][0]["value"],
             "codex:m:medium,codex:m:high"
         );
+    }
+
+    #[test]
+    fn exploration_settings_have_the_approved_words() {
+        let now = settings::current(&UserConfig::default(), None, None);
+        let rows = rows(&now, Path::new("/tmp"));
+        let help = "The share of new runs that try the next listed candidate first. Every candidate passes the usual checks. Does not apply with --to or resume.";
+        for (key, label) in [
+            ("explore.share.advise", "Exploration share: advise"),
+            ("explore.share.review", "Exploration share: review"),
+            ("explore.share.explore", "Exploration share: explore"),
+            ("explore.share.implement", "Exploration share: implement"),
+        ] {
+            let row = rows
+                .iter()
+                .find(|row| row.id == key)
+                .unwrap_or_else(|| panic!("{key}"));
+            assert_eq!((row.label.as_str(), row.help.as_str()), (label, help));
+            assert_eq!(row.section, "Roles");
+            assert_eq!(row.value, "0%");
+            assert_eq!(
+                row.note,
+                "The default. Change it, and the change is saved to config.toml."
+            );
+            assert!(matches!(
+                row.edit,
+                Edit::Step {
+                    value: Some(0),
+                    min: 0,
+                    max: 100,
+                    default: Some(0),
+                    ..
+                }
+            ));
+        }
+        // A role's row follows that role's own rows.
+        let order: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        let at = |id: &str| order.iter().position(|row| *row == id).unwrap();
+        assert!(at("roles.advise.candidates") < at("explore.share.advise"));
+        assert!(at("explore.share.advise") < at("roles.review.candidates"));
+        // A kind row with a share of its own says what that does to it.
+        let own = settings::current(
+            &UserConfig::parse(
+                "schema = 1\n[explore.share]\nreview = 0.5\n[kinds.rust-review]\ndescription = \"Review Rust.\"\nrole = \"review\"\ncandidates = [{ harness = \"codex\", model = \"m\", effort = \"high\" }]\n[kinds.rust-review.explore]\nshare = 0.2\n",
+            )
+            .unwrap(),
+            None,
+            None,
+        );
+        let rows = rows_of(&own);
+        let row = rows
+            .iter()
+            .find(|row| row.id == "kinds.rust-review.explore.share")
+            .unwrap();
+        assert_eq!(
+            (row.label.as_str(), row.help.as_str()),
+            ("Exploration share", help)
+        );
+        assert_eq!(row.value, "20%");
+        assert_eq!(row.note, "Set in config.toml. The default is 50%.");
+        assert!(matches!(
+            row.edit,
+            Edit::Step {
+                value: Some(20),
+                default: Some(50),
+                ..
+            }
+        ));
+    }
+
+    fn rows_of(settings: &[Setting]) -> Vec<Row> {
+        rows(settings, Path::new("/tmp"))
+    }
+
+    #[test]
+    fn a_kind_share_equal_to_its_inheritance_takes_the_override_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("config.toml");
+        std::fs::write(
+            &file,
+            "schema = 1\n[explore.share]\nreview = 0.5\n[kinds.rust-review]\ndescription = \"Review Rust.\"\nrole = \"review\"\ncandidates = [{ harness = \"codex\", model = \"m\", effort = \"high\" }]\n",
+        )
+        .unwrap();
+        let now = settings::current(&UserConfig::load(&file).unwrap(), None, None);
+        let row = settings::find(&now, "kinds.rust-review.explore.share").unwrap();
+        assert_eq!(
+            carry_out(&file, row, Answer::Number(Some(20))).unwrap(),
+            "Saved to config.toml: [kinds.rust-review.explore] share = 0.2"
+        );
+        let now = settings::current(&UserConfig::load(&file).unwrap(), None, None);
+        let row = settings::find(&now, "kinds.rust-review.explore.share").unwrap();
+        assert_eq!(
+            carry_out(&file, row, Answer::Number(Some(50))).unwrap(),
+            "Took [kinds.rust-review.explore] share out of config.toml: back to 50%"
+        );
+        let config = UserConfig::load(&file).unwrap();
+        assert_eq!(config.kinds.values().next().unwrap().explore.share, None);
+        assert_eq!(config.kinds.values().next().unwrap().candidates.len(), 1);
     }
 }

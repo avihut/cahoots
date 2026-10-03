@@ -55,12 +55,27 @@ pub struct KindEntry {
     pub description: String,
     pub role: Role,
     pub candidates: Vec<Candidate>,
+    pub explore: KindExplore,
+}
+
+/// A kind's own exploration share; none inherits its role's.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct KindExplore {
+    pub share: Option<f64>,
+}
+
+/// Every role's share of new runs that try the next candidate first.
+#[derive(Debug, Clone, Serialize)]
+pub struct Explore {
+    pub share: BTreeMap<Role, f64>,
 }
 
 pub struct Routing<'a> {
     pub role: Role,
     pub kind: Option<&'a TaskKindName>,
     pub candidates: &'a [Candidate],
+    /// The share in effect for this list: a kind's own, else its role's.
+    pub exploration_share: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +116,7 @@ pub struct Registry {
     pub limits: Limits,
     pub meters: Meters,
     pub review: Review,
+    pub explore: Explore,
 }
 
 pub const DEFAULT_CAP: u8 = 75;
@@ -198,6 +214,10 @@ impl Registry {
                 role: entry.role,
                 kind: Some(name),
                 candidates: &entry.candidates,
+                exploration_share: entry
+                    .explore
+                    .share
+                    .unwrap_or(self.explore.share[&entry.role]),
             })
         } else {
             let role =
@@ -206,6 +226,7 @@ impl Registry {
                 role,
                 kind: None,
                 candidates: &self.roles[&role].candidates,
+                exploration_share: self.explore.share[&role],
             })
         }
     }
@@ -334,6 +355,9 @@ impl Registry {
                             description: entry.description.clone(),
                             role: entry.role,
                             candidates: entry.candidates.clone(),
+                            explore: KindExplore {
+                                share: entry.explore.share,
+                            },
                         },
                     )
                 })
@@ -353,6 +377,17 @@ impl Registry {
                 enabled: config.review.enabled.unwrap_or(false),
                 sample_rate: config.review.sample_rate.unwrap_or(0.2),
                 apply_routing: config.review.apply_routing.unwrap_or(false),
+            },
+            explore: Explore {
+                share: Role::ALL
+                    .into_iter()
+                    .map(|role| {
+                        (
+                            role,
+                            config.explore.share.get(&role).copied().unwrap_or(0.0),
+                        )
+                    })
+                    .collect(),
             },
             meters: Meters {
                 usage_chosen_by: usage.as_ref().map(|(_, by)| *by),
@@ -533,5 +568,57 @@ mod tests {
             registry.routing(None, None).err().unwrap().exit,
             Exit::Usage
         );
+    }
+
+    #[test]
+    fn exploration_shares_default_to_zero_and_a_kind_inherits_its_role() {
+        let registry = Registry::effective(&UserConfig::default());
+        for role in Role::ALL {
+            assert_eq!(registry.explore.share[&role], 0.0, "{role}");
+            assert_eq!(
+                registry
+                    .routing(Some(role), None)
+                    .unwrap()
+                    .exploration_share,
+                0.0
+            );
+        }
+        let kind = |name: &str, role: &str, share: &str| {
+            format!(
+                "[kinds.{name}]\ndescription = \"x\"\nrole = \"{role}\"\ncandidates = [{{ harness = \"codex\", model = \"m\", effort = \"high\" }}]\n{share}"
+            )
+        };
+        let config = UserConfig::parse(&format!(
+            "schema = 1\n[explore.share]\nreview = 0.4\n{}{}{}",
+            kind("inherits", "review", ""),
+            kind("zero", "review", "[kinds.zero.explore]\nshare = 0.0\n"),
+            kind("own", "advise", "[kinds.own.explore]\nshare = 0.9\n"),
+        ))
+        .unwrap();
+        let registry = Registry::effective(&config);
+        let share = |kind: &str| {
+            registry
+                .routing(None, Some(kind))
+                .unwrap()
+                .exploration_share
+        };
+        assert_eq!(share("inherits"), 0.4);
+        assert_eq!(share("zero"), 0.0, "an explicit zero beats a nonzero role");
+        assert_eq!(share("own"), 0.9, "over a role at zero");
+        assert_eq!(
+            registry
+                .routing(Some(Role::Review), None)
+                .unwrap()
+                .exploration_share,
+            0.4
+        );
+        // The registry shows the approved paths; an absent override is null.
+        let json = serde_json::to_value(&registry).unwrap();
+        assert_eq!(json["explore"]["share"]["review"], 0.4);
+        assert_eq!(json["explore"]["share"]["implement"], 0.0);
+        assert!(json["kinds"]["inherits"]["explore"]["share"].is_null());
+        assert_eq!(json["kinds"]["zero"]["explore"]["share"], 0.0);
+        // Learned adjustments reorder a list; they have nowhere to put a share.
+        assert_eq!(registry.explore.share.len(), Role::ALL.len());
     }
 }

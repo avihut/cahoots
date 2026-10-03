@@ -1,7 +1,10 @@
 //! Choosing who to ask. The role's candidates are walked in order; the first
 //! one that is enabled, is not the caller, has a free slot, has a real
 //! harness binary behind it and passes the gate is the target. `pick` and
-//! `run` share this function, so what `pick` says is what `run` does.
+//! `run` share this function and its admission, so what `pick` says is what
+//! `run` does — with one difference: `run` alone may, on a configured share of
+//! new runs, swap the first two entries BEFORE that walk (`explore.rs`). Every
+//! candidate then passes the same checks, in the order that swap leaves.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,6 +13,7 @@ use serde::Serialize;
 
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
+use crate::explore;
 use crate::gate::{self, Admission};
 use crate::harness::{self, Version};
 use crate::model::{Candidate, HarnessId, Role};
@@ -32,6 +36,22 @@ pub struct Choice {
     pub version: Version,
     pub admission: Admission,
     pub skipped: Vec<Skip>,
+    /// The share in effect for THIS selection: the list's own, or zero where
+    /// exploration cannot apply (`--to`, fewer than two candidates left, an
+    /// identical second entry).
+    pub exploration_share: f64,
+    /// The draw promoted the second entry, and it is the one chosen. A
+    /// fallback to any other entry is not exploration.
+    pub exploration: bool,
+}
+
+/// Whether this selection may try the next candidate first. Only `run` draws,
+/// from the id it is about to record; `pick` is a preview of ordinary routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    Ordinary,
+    /// The result of the draw for the run's own id.
+    Drawn(bool),
 }
 
 /// Enabled candidates for the role, without the caller. `--to` narrows the
@@ -156,32 +176,76 @@ pub fn choose(
     routing: &Routing<'_>,
     caller: Option<HarnessId>,
     to: Option<HarnessId>,
+    selection: Selection,
     workspace: &[&Path],
 ) -> Res<Choice> {
-    let mut skipped: Vec<(Candidate, Fail)> = Vec::new();
-    for candidate in candidates(registry, routing, caller, to)? {
-        let attempt = eligible(dirs, registry, &candidate, routing.role, workspace);
-        match attempt {
-            Ok((binary, version, admission)) => {
-                return Ok(Choice {
-                    target: candidate,
-                    binary,
-                    version,
-                    admission,
-                    skipped: skipped.into_iter().map(skip).collect(),
+    let list = candidates(registry, routing, caller, to)?;
+    let share = if to.is_none() && explore::can_explore(&list) {
+        routing.exploration_share
+    } else {
+        0.0
+    };
+    let promote = share > 0.0 && selection == Selection::Drawn(true);
+    let walked = walk(list, promote, |candidate| {
+        eligible(dirs, registry, candidate, routing.role, workspace)
+    })?;
+    let (binary, version, admission) = walked.admitted;
+    Ok(Choice {
+        target: walked.target,
+        binary,
+        version,
+        admission,
+        skipped: walked.skipped,
+        exploration_share: share,
+        exploration: promote && walked.at == 1,
+    })
+}
+
+struct Walked<T> {
+    target: Candidate,
+    /// Where the target stood in the list before any swap.
+    at: usize,
+    admitted: T,
+    /// What was refused on the way, in the order it was tried.
+    skipped: Vec<Skip>,
+}
+
+/// Tries `list` in order — or with its first two swapped — until `attempt`
+/// admits one. Nothing is bypassed: a promoted candidate that is refused is
+/// skipped like any other, and the walk goes on.
+fn walk<T>(
+    list: Vec<Candidate>,
+    promote: bool,
+    mut attempt: impl FnMut(&Candidate) -> Res<T>,
+) -> Res<Walked<T>> {
+    let mut skipped: Vec<(usize, Candidate, Fail)> = Vec::new();
+    for at in explore::order(list.len(), promote) {
+        let candidate = &list[at];
+        match attempt(candidate) {
+            Ok(admitted) => {
+                return Ok(Walked {
+                    target: candidate.clone(),
+                    at,
+                    admitted,
+                    skipped: skipped
+                        .into_iter()
+                        .map(|(_, candidate, fail)| skip((candidate, fail)))
+                        .collect(),
                 });
             }
-            Err(fail) => skipped.push((candidate, fail)),
+            Err(fail) => skipped.push((at, candidate.clone(), fail)),
         }
     }
     // One candidate: its own refusal is the most useful answer. Several: none
-    // was eligible, and the message says why each was not.
+    // was eligible, and the message says why each was not — in the order the
+    // list names them, whatever order they were tried in.
     if skipped.len() == 1 {
-        return Err(skipped.remove(0).1);
+        return Err(skipped.remove(0).2);
     }
+    skipped.sort_by_key(|(at, ..)| *at);
     let reasons: Vec<String> = skipped
         .iter()
-        .map(|(c, fail)| {
+        .map(|(_, c, fail)| {
             format!(
                 "{} ({}, {}): {}",
                 c.harness,
@@ -318,5 +382,93 @@ candidates = [
             .exit,
             Exit::NoEligibleTarget
         );
+    }
+
+    fn three() -> Vec<Candidate> {
+        let routing_list = |harness, model: &str, effort| Candidate {
+            harness,
+            model: crate::model::ModelName::try_from(model.to_string()).unwrap(),
+            effort,
+        };
+        vec![
+            routing_list(HarnessId::Codex, "m", crate::model::Effort::High),
+            routing_list(HarnessId::Codex, "m", crate::model::Effort::Medium),
+            routing_list(HarnessId::Claude, "n", crate::model::Effort::Low),
+        ]
+    }
+
+    /// `refused` are the entries (by original index) that cannot take a run.
+    fn walked(promote: bool, refused: &[usize]) -> Res<Walked<usize>> {
+        let list = three();
+        walk(list.clone(), promote, |candidate| {
+            let at = list.iter().position(|c| c == candidate).unwrap();
+            if refused.contains(&at) {
+                Err(Fail::new(
+                    if at == 1 {
+                        Exit::Busy
+                    } else {
+                        Exit::TargetUnavailable
+                    },
+                    format!("refused {at}"),
+                ))
+            } else {
+                Ok(at)
+            }
+        })
+    }
+
+    fn skipped_reasons(walked: &Walked<usize>) -> Vec<String> {
+        walked.skipped.iter().map(|s| s.reason.clone()).collect()
+    }
+
+    #[test]
+    fn exploration_is_at_most_one_adjacent_swap() {
+        let list = three();
+        // Ordinary: the first admissible, in the list's own order.
+        let ordinary = walked(false, &[]).unwrap();
+        assert_eq!((ordinary.at, ordinary.target.clone()), (0, list[0].clone()));
+        // Promoted: the second entry is tried first, and taken when admitted.
+        let promoted = walked(true, &[]).unwrap();
+        assert_eq!((promoted.at, promoted.target.clone()), (1, list[1].clone()));
+        assert!(promoted.skipped.is_empty());
+        // Promoted but refused: it is not bypassed. The first is then tried,
+        // and no refusal is invented for it.
+        let fallback = walked(true, &[1]).unwrap();
+        assert_eq!(fallback.at, 0);
+        assert_eq!(skipped_reasons(&fallback), ["refused 1"]);
+        assert_eq!(fallback.skipped[0].code, Exit::Busy.code());
+        assert_eq!(fallback.skipped[0].candidate, list[1]);
+        // Both leading entries refused: the tail is untouched and is reached.
+        let tail = walked(true, &[0, 1]).unwrap();
+        assert_eq!(tail.at, 2);
+        assert_eq!(
+            skipped_reasons(&tail),
+            ["refused 1", "refused 0"],
+            "attempt order"
+        );
+        // Ordinary routing is unchanged by the same refusals.
+        let ordinary_tail = walked(false, &[0, 1]).unwrap();
+        assert_eq!(skipped_reasons(&ordinary_tail), ["refused 0", "refused 1"]);
+    }
+
+    #[test]
+    fn an_exhausted_list_says_why_in_the_lists_own_order() {
+        for promote in [false, true] {
+            let fail = walked(promote, &[0, 1, 2]).err().unwrap();
+            assert_eq!(fail.exit, Exit::NoEligibleTarget);
+            assert_eq!(
+                fail.message,
+                "codex (m, high): refused 0; codex (m, medium): refused 1; claude (n, low): refused 2",
+                "promote = {promote}"
+            );
+        }
+        // One candidate: its own refusal, with its own code.
+        let one = walk(three()[..1].to_vec(), false, |_| {
+            Err::<(), _>(Fail::new(Exit::Busy, "held"))
+        });
+        assert_eq!(one.err().unwrap().exit, Exit::Busy);
+        // One candidate cannot be swapped with anything.
+        let alone = walk(three()[..1].to_vec(), true, |_| Ok(())).unwrap();
+        assert_eq!(alone.at, 0);
     }
 }

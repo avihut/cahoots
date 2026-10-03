@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
+use crate::explore;
 use crate::harness::Progress;
 use crate::model::{HarnessId, Role, TaskKindName};
 use crate::patch::{self, Commit};
@@ -95,7 +96,17 @@ pub fn pick_target(
     let cwd = std::env::current_dir()
         .map_err(|error| Fail::internal(format!("no working directory: {error}")))?;
     let workspace = Workspace::around(&cwd)?;
-    let choice = pick::choose(&dirs, &registry, &routing, caller, to, &workspace.roots())?;
+    // A preview of ordinary routing: no draw, no id. A run that follows may
+    // try the next candidate, if exploration is configured.
+    let choice = pick::choose(
+        &dirs,
+        &registry,
+        &routing,
+        caller,
+        to,
+        pick::Selection::Ordinary,
+        &workspace.roots(),
+    )?;
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({
         "role": routing.role,
         "kind": routing.kind,
@@ -103,6 +114,7 @@ pub fn pick_target(
         "harness_version": choice.version.to_string(),
         "gate_notes": choice.admission.notes,
         "skipped": choice.skipped,
+        "exploration_share": choice.exploration_share,
     })))
 }
 
@@ -148,7 +160,14 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         ));
     }
 
-    let choice = pick::choose(&dirs, &registry, &routing, caller, args.to, &roots)?;
+    // The run's id, before any candidate is looked at: it is what the draw is
+    // made from, and it is the id the run is recorded under. Nobody supplies
+    // it and nothing is drawn again after a target is chosen.
+    let id = record::new_id();
+    let selection = pick::Selection::Drawn(explore::drawn(&id, routing.exploration_share));
+    let choice = pick::choose(
+        &dirs, &registry, &routing, caller, args.to, selection, &roots,
+    )?;
     let target = choice.target;
     // The commit the run starts from: for a fork, the one it will be cut at;
     // in place, the caller's tree as it is before the writer exists.
@@ -159,6 +178,8 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
         &dirs,
         &registry,
         Launch {
+            id,
+            exploration: choice.exploration,
             role: routing.role,
             kind: routing.kind.cloned(),
             caller,
@@ -186,6 +207,9 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
 /// supervisor. Shared by `run` and `resume`, so a resumed run is recorded,
 /// supervised, stopped and reported exactly like any other.
 struct Launch {
+    id: String,
+    /// The private label (`RunRecord::exploration`).
+    exploration: bool,
     role: Role,
     kind: Option<TaskKindName>,
     caller: Option<HarnessId>,
@@ -217,7 +241,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
     let limit = registry.limits.timeout_secs;
     let record = RunRecord {
         v: 1,
-        id: record::new_id(),
+        id: launch.id,
         state: State::Starting,
         exit_code: None,
         message: None,
@@ -226,6 +250,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         caller: launch.caller,
         target: launch.target,
         blind: registry.review.blind,
+        exploration: launch.exploration,
         base: launch.base,
         gitdir: launch.gitdir,
         roots: launch.roots,
@@ -391,6 +416,10 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
         &dirs,
         &registry,
         Launch {
+            // A resume draws nothing: the session's harness and model are
+            // fixed, and its label is false whatever its parent's was.
+            id: record::new_id(),
+            exploration: false,
             role: old.role,
             kind: old.kind,
             caller,
@@ -557,6 +586,9 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
     });
     if !identity.blind {
         data["model_reported"] = json!(record.progress.model_reported);
+        // Until an outcome, a known list order and this label would say which
+        // candidate ran: the key is absent, not false and not null.
+        data["exploration"] = json!(record.exploration);
     }
     data
 }

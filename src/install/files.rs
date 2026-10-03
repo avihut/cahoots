@@ -583,6 +583,7 @@ mod tests {
             description: description.to_string(),
             role,
             candidates: vec![on(HarnessId::Claude), on(HarnessId::Codex)],
+            explore: crate::registry::KindExplore { share: None },
         }
     }
 

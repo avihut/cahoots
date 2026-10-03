@@ -12,6 +12,7 @@ pub mod dirs;
 pub mod doctor;
 pub mod env;
 pub mod exit;
+pub mod explore;
 pub mod gate;
 pub mod harness;
 pub mod history;

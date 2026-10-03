@@ -57,6 +57,11 @@ pub enum Key {
     KindDescription(TaskKindName),
     KindRole(TaskKindName),
     KindCandidates(TaskKindName),
+    /// `explore.share.<role>`: the share of new runs that try the next
+    /// candidate first.
+    ExploreShare(Role),
+    /// `kinds.<name>.explore.share`: this kind's own, replacing its role's.
+    KindExploreShare(TaskKindName),
 }
 
 /// Where a setting is shown.
@@ -108,13 +113,14 @@ impl Key {
             ApplyRouting,
         ]);
         for role in Role::ALL {
-            keys.extend([Candidates(role), Calibrate(role)]);
+            keys.extend([Candidates(role), Calibrate(role), ExploreShare(role)]);
         }
         for name in config.kinds.keys() {
             keys.extend([
                 KindDescription(name.clone()),
                 KindRole(name.clone()),
                 KindCandidates(name.clone()),
+                KindExploreShare(name.clone()),
             ]);
         }
         keys
@@ -154,10 +160,17 @@ impl Key {
             KindDescription(name) => format!("kinds.{name}.description"),
             KindRole(name) => format!("kinds.{name}.role"),
             KindCandidates(name) => format!("kinds.{name}.candidates"),
+            ExploreShare(role) => format!("explore.share.{role}"),
+            KindExploreShare(name) => format!("kinds.{name}.explore.share"),
         }
     }
 
     pub fn parse(name: &str) -> Option<Key> {
+        if let ["kinds", kind, "explore", "share"] = name.split('.').collect::<Vec<_>>()[..] {
+            return Some(Key::KindExploreShare(
+                TaskKindName::try_from(kind.to_string()).ok()?,
+            ));
+        }
         if let ["kinds", kind, field] = name.split('.').collect::<Vec<_>>()[..] {
             let kind = TaskKindName::try_from(kind.to_string()).ok()?;
             return match field {
@@ -183,10 +196,11 @@ impl Key {
             MaxActiveRuns | MaxDepth | Timeout | Wait | IntGrace | TermGrace | Watchdog
             | AllowInPlace => Section::Runs,
             Review | Blind | SampleRate | ApplyRouting => Section::Review,
-            Candidates(_) | Calibrate(_) => Section::Roles,
-            KindDescription(name) | KindRole(name) | KindCandidates(name) => {
-                Section::TaskKind(name.clone())
-            }
+            Candidates(_) | Calibrate(_) | ExploreShare(_) => Section::Roles,
+            KindDescription(name)
+            | KindRole(name)
+            | KindCandidates(name)
+            | KindExploreShare(name) => Section::TaskKind(name.clone()),
         }
     }
 
@@ -582,6 +596,13 @@ pub fn current(
                 origin(user.calibrate.is_some()),
             ));
         }
+        all.push(Setting::new(
+            Key::ExploreShare(role),
+            Kind::Share,
+            Some(Value::Share(now.explore.share[&role])),
+            Some(Value::Share(base.explore.share[&role])),
+            origin(config.explore.share.contains_key(&role)),
+        ));
     }
     for (name, entry) in &config.kinds {
         all.extend([
@@ -605,6 +626,20 @@ pub fn current(
                 Some(Value::Candidates(entry.candidates.clone())),
                 None,
                 Origin::Config,
+            ),
+            // Its default is what its role gives it: with no share of its
+            // own, a kind explores as often as its role does.
+            Setting::new(
+                Key::KindExploreShare(name.clone()),
+                Kind::Share,
+                Some(Value::Share(
+                    entry
+                        .explore
+                        .share
+                        .unwrap_or(now.explore.share[&entry.role]),
+                )),
+                Some(Value::Share(now.explore.share[&entry.role])),
+                origin(entry.explore.share.is_some()),
             ),
         ]);
     }
@@ -726,9 +761,12 @@ pub fn find<'a>(settings: &'a [Setting], name: &str) -> Res<&'a Setting> {
                 "{name} belongs to a list of your own — set roles.{role}.candidates first (the \
                  default lists always calibrate)"
             ),
-            Some(Key::KindDescription(kind) | Key::KindRole(kind) | Key::KindCandidates(kind)) => {
-                unknown_kind(&kind).message
-            }
+            Some(
+                Key::KindDescription(kind)
+                | Key::KindRole(kind)
+                | Key::KindCandidates(kind)
+                | Key::KindExploreShare(kind),
+            ) => unknown_kind(&kind).message,
             _ => format!("no setting is called {name:?}"),
         },
     ))
@@ -892,7 +930,11 @@ impl fmt::Display for Value {
 /// change the config refuses (a cap above where runs stop) is `Usage`, and
 /// the file is left as it was.
 pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
-    if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key {
+    if let Key::KindDescription(name)
+    | Key::KindRole(name)
+    | Key::KindCandidates(name)
+    | Key::KindExploreShare(name) = key
+    {
         let config = UserConfig::load(file)?;
         if !config.kinds.contains_key(name) {
             return Err(unknown_kind(name));
@@ -909,7 +951,13 @@ pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
 
 /// Takes one setting out of config.toml, so its default applies again.
 pub fn reset(file: &Path, key: &Key) -> Res<UserConfig> {
-    if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key {
+    if let Key::KindExploreShare(name) = key {
+        // Optional: taking it out gives the kind its role's share again.
+        if !UserConfig::load(file)?.kinds.contains_key(name) {
+            return Err(unknown_kind(name));
+        }
+    } else if let Key::KindDescription(name) | Key::KindRole(name) | Key::KindCandidates(name) = key
+    {
         let config = UserConfig::load(file)?;
         if !config.kinds.contains_key(name) {
             return Err(unknown_kind(name));
@@ -1229,11 +1277,13 @@ candidates = [{ harness = "claude", model = "custom", effort = "low" }]
         let config = config(KINDS);
         let keys = Key::all(&config);
         assert_eq!(
-            keys.iter().rev().take(6).map(Key::name).collect::<Vec<_>>(),
+            keys.iter().rev().take(8).map(Key::name).collect::<Vec<_>>(),
             [
+                "kinds.zed.explore.share",
                 "kinds.zed.candidates",
                 "kinds.zed.role",
                 "kinds.zed.description",
+                "kinds.alpha.explore.share",
                 "kinds.alpha.candidates",
                 "kinds.alpha.role",
                 "kinds.alpha.description"
@@ -1246,7 +1296,16 @@ candidates = [{ harness = "claude", model = "custom", effort = "low" }]
         {
             assert_eq!(Key::parse(&key.name()), Some(key.clone()));
             let row = find(&now, &key.name()).unwrap();
-            assert!(row.default.is_none() && !row.locked);
+            assert!(!row.locked);
+            if let Key::KindExploreShare(_) = key {
+                // The one kind setting that is optional: with none of its
+                // own, a kind takes its role's share, which is its default.
+                assert_eq!(row.default, Some(Value::Share(0.0)));
+                assert_eq!(row.value, row.default);
+                assert_eq!(row.origin, Origin::Default);
+                continue;
+            }
+            assert!(row.default.is_none());
             assert_eq!(row.origin, Origin::Config);
         }
         assert!(Key::parse("kinds.zed.calibrate").is_none());
@@ -1335,5 +1394,153 @@ candidates = [{ harness = "claude", model = "custom", effort = "low" }]
             Exit::Usage
         );
         assert_eq!(fs::read_to_string(&file).unwrap(), "schema = 1\n");
+    }
+
+    #[test]
+    fn exploration_settings_have_paths_defaults_and_origins() {
+        let all = Key::all(&config(KINDS));
+        for name in [
+            "explore.share.advise",
+            "explore.share.review",
+            "explore.share.explore",
+            "explore.share.implement",
+            "kinds.zed.explore.share",
+            "kinds.alpha.explore.share",
+        ] {
+            let key = Key::parse(name).unwrap_or_else(|| panic!("{name} does not parse"));
+            assert_eq!(key.name(), name);
+            assert!(all.contains(&key), "{name} is in the catalog");
+        }
+        assert_eq!(Key::ExploreShare(Role::Review).section(), Section::Roles);
+        assert!(Key::parse("explore.share.deploy").is_none());
+        assert!(Key::parse("kinds.zed.explore").is_none());
+        assert!(Key::parse("kinds.zed.explore.rate").is_none());
+        assert!(Key::parse("kinds.Bad.explore.share").is_none());
+        // A role: zero by default, the config's value once set.
+        let now = current(&UserConfig::default(), None, None);
+        let role = find(&now, "explore.share.advise").unwrap();
+        assert_eq!(role.kind, Kind::Share);
+        assert_eq!(
+            (&role.value, &role.default, role.origin),
+            (
+                &Some(Value::Share(0.0)),
+                &Some(Value::Share(0.0)),
+                Origin::Default
+            )
+        );
+        let set_up = config(&format!(
+            "{KINDS}[explore.share]\nreview = 0.25\nadvise = 0\n"
+        ));
+        let now = current(&set_up, None, None);
+        let review = find(&now, "explore.share.review").unwrap();
+        assert_eq!(review.value, Some(Value::Share(0.25)));
+        assert_eq!(review.default, Some(Value::Share(0.0)));
+        assert_eq!(review.origin, Origin::Config);
+        let zero = find(&now, "explore.share.advise").unwrap();
+        assert_eq!(zero.origin, Origin::Config, "an explicit zero is a setting");
+        // A kind: its role's share is its default, an override its value.
+        let (zed, alpha) = (
+            find(&now, "kinds.zed.explore.share").unwrap(),
+            find(&now, "kinds.alpha.explore.share").unwrap(),
+        );
+        assert_eq!(zed.value, Some(Value::Share(0.25)), "zed is a review kind");
+        assert_eq!(
+            (&zed.default, zed.origin),
+            (&Some(Value::Share(0.25)), Origin::Default)
+        );
+        assert_eq!(
+            (&alpha.value, alpha.origin),
+            (&Some(Value::Share(0.0)), Origin::Default)
+        );
+        let own = config(&format!(
+            "{KINDS}[kinds.zed.explore]\nshare = 0.6\n[explore.share]\nreview = 0.25\n"
+        ));
+        let own = current(&own, None, None);
+        let zed = find(&own, "kinds.zed.explore.share").unwrap();
+        assert_eq!(zed.value, Some(Value::Share(0.6)));
+        assert_eq!(zed.default, Some(Value::Share(0.25)));
+        assert_eq!(zed.origin, Origin::Config);
+        // Values are read as fractions, held to 0–1, and nothing else.
+        assert_eq!(review.parse("0.5").unwrap(), Value::Share(0.5));
+        for bad in ["1.5", "-0.1", "nan", "inf", "-inf", "50%", "", "half"] {
+            let fail = review.parse(bad).unwrap_err();
+            assert_eq!(fail.exit, Exit::Usage, "{bad:?}");
+            assert!(
+                fail.message.contains("a share from 0.0 to 1.0"),
+                "{bad:?}: {}",
+                fail.message
+            );
+        }
+        assert_eq!(Value::Share(0.25).to_toml().to_string().trim(), "0.25");
+    }
+
+    #[test]
+    fn exploration_shares_set_and_reset_without_losing_the_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("config.toml");
+        fs::write(&file, KINDS).unwrap();
+        let role = Key::ExploreShare(Role::Advise);
+        let kind = Key::parse("kinds.zed.explore.share").unwrap();
+        set(&file, &role, &Value::Share(0.2)).unwrap();
+        let config = set(&file, &kind, &Value::Share(0.0)).unwrap();
+        let zed = config
+            .kinds
+            .values()
+            .find(|k| k.role == Role::Review)
+            .unwrap();
+        assert_eq!(zed.explore.share, Some(0.0));
+        assert_eq!(config.explore.share[&Role::Advise], 0.2);
+        let written = fs::read_to_string(&file).unwrap();
+        assert!(
+            written.contains("# keep me") && written.contains("# words"),
+            "{written}"
+        );
+        // Resetting the kind's share gives it its role's back, every required
+        // field still there; resetting the role's puts back zero.
+        let config = reset(&file, &kind).unwrap();
+        let zed = config
+            .kinds
+            .values()
+            .find(|k| k.role == Role::Review)
+            .unwrap();
+        assert_eq!((zed.explore.share, zed.candidates.len()), (None, 2));
+        assert_eq!(zed.description, "Review Rust.");
+        let config = reset(&file, &role).unwrap();
+        assert!(config.explore.share.is_empty());
+        // Back to the person's own text, bar the blank line the removed
+        // `[kinds.zed.explore]` header had above it (comments and blank lines
+        // above a removed table stay, above whatever follows it).
+        assert_eq!(
+            fs::read_to_string(&file).unwrap().replace("\n\n", "\n"),
+            KINDS
+        );
+        // An unknown kind is the usage refusal everywhere, nothing written.
+        let unknown = Key::parse("kinds.missing.explore.share").unwrap();
+        let before = fs::read_to_string(&file).unwrap();
+        for fail in [
+            set(&file, &unknown, &Value::Share(0.5)).unwrap_err(),
+            reset(&file, &unknown).unwrap_err(),
+            find(
+                &current(&config_of(&file), None, None),
+                "kinds.missing.explore.share",
+            )
+            .unwrap_err(),
+        ] {
+            assert_eq!(fail.exit, Exit::Usage);
+            assert!(
+                fail.message.starts_with("unknown task kind \"missing\""),
+                "{}",
+                fail.message
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            before,
+            "nothing was written"
+        );
+    }
+
+    fn config_of(file: &Path) -> UserConfig {
+        UserConfig::load(file).unwrap()
     }
 }
