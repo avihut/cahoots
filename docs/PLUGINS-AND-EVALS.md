@@ -39,8 +39,10 @@ hard rules say why there are no others.
 **No flag that an agent can pass changes a fence.** The setting that picks
 a strategy lives in config.toml. A person changes it with `cahoots settings`,
 or with `settings set`. An agent-tier flag may select among things a person
-wrote, such as a kind of task by name (#33). It never selects a tool, a
-model, an effort, a sandbox mode or a strategy.
+wrote, such as a kind of task by name (#33). Today's flags already narrow
+the choice: `--to` names one enabled harness. No agent-tier flag selects a
+worktree provider, a driver, a grader, a strategy, a model, an effort or a
+sandbox mode.
 
 **Detection may suggest, but it never authorizes.** If the repository
 looks like it wants daft, `doctor` may say so. The repository does not get
@@ -134,7 +136,8 @@ the tool a person's setting.
 
 Routing calibration (`src/calibrate.rs`) can swap two adjacent candidates in
 a role when the lower one has done better. While cahoots drives only two
-harnesses, that swap never changes what an agent caller gets. Here is why.
+harnesses, that swap almost never changes what an agent caller gets. On the
+default lists it never does. Here is why, and where the exception is.
 
 1. **The caller's harness is dropped.** `pick::candidates` removes every
    candidate of the caller's harness. The skill tells every agent to pass
@@ -151,8 +154,13 @@ harnesses, that swap never changes what an agent caller gets. Here is why.
    - So when the first candidate of a harness is skipped, so is the second,
      and the second never runs.
    - It never earns evidence, and it never reaches `calibrate::MIN_SAMPLE`.
-     The one way it can is evidence left over from a list a person
-     reordered by hand.
+   - **The exception** is a list a person wrote. `UserConfig::validate` refuses
+     only an empty list, so `[roles.<role>]` may hold two candidates of one
+     harness. If the person later reorders that list, both candidates may
+     have evidence from the earlier order. With `calibrate = true`, a swap
+     between them can then change the model an agent caller gets. Nothing
+     but a person's reordering produces that evidence, and no test covers
+     it.
 4. **A swap across harnesses can be suggested, but it changes nothing for
    the caller.** `Registry::learned` pools evidence across callers. If it
    puts Claude above Codex, a Claude caller still gets Codex, its only
@@ -166,14 +174,17 @@ As evals, the evidence is weak too:
 - there is no fixed set of tasks;
 - each task gets one candidate;
 - each model is judged by a different caller on different work;
-- the caller grades its own delegation, with three labels
-  (`history::Outcome`: accepted, reworked, discarded);
+- the caller is meant to grade its own delegation, with three labels
+  (`history::Outcome`: accepted, reworked, discarded). The label is not
+  attributed: `outcome` takes no caller, and its event in the history holds
+  only the run id and the label;
 - there is one score per role.
 
-The caller also judges the callee. The harness that delegated a run records
-its outcome and, with review on, reviews it (`src/review.rs`). So when
-Claude delegates to Codex, Claude's taste scores Codex. That is backwards
-for comparing models.
+The caller also judges the callee. The skill asks the harness that
+delegated a run to record its outcome. With review on, that harness alone
+reviews the run: `learn::review_submit` refuses a reviewer that is not the
+story's caller. So when Claude delegates to Codex, Claude's taste scores
+Codex. That is backwards for comparing models.
 
 **The small bound on what learning may change is deliberate** (rule 6). One
 adjacent swap, held in a struct with one field, is the right size. The
@@ -302,9 +313,16 @@ change the contract and the threat model.
 
 **The line between an adapter and an orchestrator** is who holds the plan
 of work. Today cahoots decides who and whether, carries one request,
-returns one answer, and holds only runs. It would cross the line once it
-held tasks or a roster, once messages flowed more than one way, or once a
-target delegated onward.
+returns one answer, and holds only runs.
+
+A target can already delegate onward when a person raises
+`limits.max_depth`, which defaults to 1 and goes up to 3. `run` refuses at
+the limit, and each callee gets `CAHOOTS_DEPTH` one higher. Each hop is a
+run of its own, gated and recorded, and cahoots holds nothing that links
+the hops.
+
+cahoots would cross the line once it held tasks or a roster, once messages
+flowed more than one way, or once it planned onward delegation itself.
 
 Orchestration can live above cahoots: a lead agent, or a multiplexer,
 calling cahoots once per message, so that the pick, the gate, the fence and
@@ -357,7 +375,7 @@ has its place.
   the base commit. It is computed when the outcome is recorded, and again
   after a survival window. It is read-only, with `git` under the binary
   policy.
-- **Hidden tests on replay** (#39) follow the SWE-bench pattern:
+- **Withheld tests on replay** (#39) follow the SWE-bench pattern:
   fail-to-pass and pass-to-pass.
   - This means running the repository's tests on code another agent wrote.
     cahoots has never run repository code on purpose, and must never do it
@@ -372,6 +390,12 @@ has its place.
   finds the path and pins it. It runs with a scrubbed environment and a
   fixed JSON protocol, and a failure refuses. It runs on the explicit,
   human-verb path only, never on an agent's path.
+  - A scrubbed environment is not a fence. The grader, and the repository
+    tests it runs, can still reach the network and write wherever the
+    person can.
+  - **Open for #44:** what confines the grader, and how it squares with
+    hard rules 1 and 5. This is part of why #30 recommends that the person
+    grades first.
 - **A judge for the reading roles** (#45). `advise`, `review` and `explore`
   have no tests to run. The judge is a fenced reader, run on either
   harness, whose answer is forced into a closed score vocabulary, the way
@@ -463,18 +487,26 @@ The words used here:
 4. **Implicit grading** (#37), with the kept-diff ratio.
 5. **The private suite** (#38). `evals add <run>` turns an accepted writer
    run into a task. The task keeps the run's base commit, brief and kind,
-   and the test files of the kept diff become its hidden tests.
+   and the test files of the kept diff become its withheld tests: they are
+   not in the trial's worktree.
    - `evals list` and `evals remove` manage the suite.
    - A rot check flags a task whose base commit is gone.
    - Tasks live under the data directory, and never leave the machine by
      themselves.
+   - **Withheld is not hidden.** A callee runs as the same user, with the
+     real home. Claude's readers keep `Read`, `Grep` and `Glob`, and Codex's
+     sandbox limits writes, not reads (`docs/SPIKE.md` S6: a sandboxed Codex
+     read cahoots' state directory). So a trial could find its own tests
+     while it runs.
+   - **Open for #38 and #39:** how the suite is kept out of a trial's
+     reach, or, failing that, how a trial that read it is detected.
 6. **Explicit runs** (#39). `evals run --kind <k> --candidate <c>
    --trials <n>` runs a kind's tasks for one candidate. For each task:
    - a worktree is cut at the base commit, through the provider seam, with
      hooks off;
    - a fenced `implement` run gets the task's brief. It is gated like any
      run and labelled as an eval;
-   - the hidden tests are applied on top of the result, in a copy;
+   - the withheld tests are applied on top of the result, in a copy;
    - the trial is graded as #30 decides.
 7. **Metrics** (#34, #40). These come with error bars and pairing, and
    they say plainly when the evidence is not enough.
@@ -526,9 +558,16 @@ This document changes no rule. These tickets name a change to
 | #35 | an exploration picks only among the person's listed candidates |
 | #41 | a strategy returns a permutation of the listed candidates, and nothing else |
 
-Two more touch the boundary without naming the threat model: #44 runs a
-pinned outside binary on the explicit path, and #48 adds a new way to launch
-a target. Each says how it changes the threat model in its own PR.
+Three more touch the boundary without naming the threat model:
+
+- #44 runs a pinned outside binary on the explicit path.
+- #46 brings in scores from outside. The threat model says today that
+  routing moves only on outcome statistics. Imported scores are a new input
+  to routing, bounded like learned state: data that may only reorder the
+  person's listed candidates.
+- #48 adds a new way to launch a target.
+
+Each says how it changes the threat model in its own PR.
 
 ## The build order
 
