@@ -236,10 +236,10 @@ it was before the writer started; otherwise `changes_error` says the
 configuration changed, and nothing runs. A resumed in-place run is held to
 the configuration the original run recorded, never a fresh reading, so a
 first writer cannot set the baseline its own resume is judged against. And
-when a run ends — a normal exit included — the supervisor kills the callee's
-whole process group before the run is marked terminal, so no process it left
-behind can still be writing the tree, or its `.git/config`, while `changes`
-is read. A process that left the group (`setsid`, a double fork) is beyond
+when a run ends — a normal exit, or an error inside the supervisor,
+included — the supervisor kills the callee's whole process group before the
+run is marked terminal, so no process it left behind can still be writing the
+tree, or its `.git/config`, while `changes` is read. A process that left the group (`setsid`, a double fork) is beyond
 that reach, and so is a change `changes` is told to ignore in the submodule
 or outside the configuration it snapshots; the caller is told to read a
 change before trusting it for exactly these reasons. A worktree is removed
