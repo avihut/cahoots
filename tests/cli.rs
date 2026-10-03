@@ -63,6 +63,8 @@ fn a_bad_command_line_is_exit_2_with_an_envelope_like_any_other_exit() {
 fn a_human_verb_without_a_terminal_is_refused_by_policy() {
     for verb in [
         vec!["install"],
+        vec!["install", "--meter", "none"],
+        vec!["install", "--dry-run"],
         vec!["uninstall"],
         vec!["enable", "codex"],
         vec!["settings"],

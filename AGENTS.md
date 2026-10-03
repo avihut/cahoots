@@ -31,10 +31,10 @@ that bends one says so up front. Most are held by `scripts/guard.sh` and
    only in `src/env.rs`.** The user's home comes from the passwd database,
    not `$HOME`.
 5. **Writes stay home.** cahoots writes under its own state/config/data
-   directories, and — only through `install`, only files listed in its
-   manifest — the skill and agent definitions. `install` never edits a
-   harness's permission or settings files; it prints the rule for a human to
-   add.
+   directories, and — only through `install` and `refresh`, only files
+   listed in its manifest — the skill and agent definitions. `install` never
+   edits a harness's permission or settings files; it prints the rule for a
+   human to add.
 6. **Data never widens authority.** Config, learned adjustments and a callee's
    output can reorder candidates and add briefing notes. They cannot change a
    cap, a reserve, a sandbox mode, a flag or a command. Learned state

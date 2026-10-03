@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::dir::{Dir, Entry, entry_by_path, outside_home};
 use crate::dirs::Dirs;
 use crate::exit::{Fail, Res};
 use crate::model::{HarnessId, Role, TaskKindName};
@@ -267,7 +268,8 @@ fn stamp_of(text: &str) -> Option<String> {
 /// A file is only ever written inside the user's home — judged by where the
 /// path RESOLVES, and judged BEFORE anything is created: an agent home that is
 /// a symlink to somewhere else must not even get a directory made through it.
-/// So the nearest ancestor that already exists is resolved first.
+/// So the nearest ancestor that already exists is resolved first. The write
+/// itself then happens in the directory held open (`Dir`), judged again.
 fn confined(home: &Path, dir: &Path) -> Res<()> {
     match outside_home(home, dir)? {
         None => Ok(()),
@@ -277,21 +279,6 @@ fn confined(home: &Path, dir: &Path) -> Res<()> {
             resolved.display()
         ))),
     }
-}
-
-/// Where `dir` — or its nearest ancestor that exists — resolves, when that
-/// is outside the user's home: the existing path, and where it led.
-fn outside_home(home: &Path, dir: &Path) -> Res<Option<(PathBuf, PathBuf)>> {
-    let home = fs::canonicalize(home)
-        .map_err(|error| Fail::internal(format!("cannot resolve {}: {error}", home.display())))?;
-    let existing = dir
-        .ancestors()
-        .find(|ancestor| ancestor.exists())
-        .ok_or_else(|| Fail::internal(format!("{} has no existing ancestor", dir.display())))?;
-    let resolved = fs::canonicalize(existing).map_err(|error| {
-        Fail::internal(format!("cannot resolve {}: {error}", existing.display()))
-    })?;
-    Ok((!resolved.starts_with(&home)).then(|| (existing.to_path_buf(), resolved)))
 }
 
 /// Writes what the current kinds want, then removes what they no longer do.
@@ -341,42 +328,79 @@ fn place(dirs: &Dirs, want: &Want, dry_run: bool) -> Res<Outcome> {
         Ok(text) => text,
         Err(why) => return Ok(Outcome::Skipped { why: why.clone() }),
     };
-    let path = want.path.as_path();
-    let outcome = match fs::symlink_metadata(path) {
-        Err(_) => Outcome::Installed,
-        Ok(meta) if !meta.is_file() => {
+    let (parent, name) = split(&want.path);
+    // The file is judged in the directory it will be written in, held open.
+    // One that resolves outside the home is judged through its path — never
+    // written: `confined` refuses that below.
+    let mut held = None;
+    let existing = if parent.is_dir() {
+        match Dir::open_confined(&dirs.home, parent)? {
+            Ok(dir) => {
+                let entry = dir.entry(name)?;
+                held = Some(dir);
+                entry
+            }
+            Err(_) => entry_by_path(&want.path),
+        }
+    } else {
+        Entry::Absent
+    };
+    let outcome = match existing {
+        Entry::Absent => Outcome::Installed,
+        Entry::NotRegular => {
             return Ok(Outcome::Skipped {
-                why: "exists and is not a regular file — left alone".to_string(),
+                why: NOT_REGULAR.to_string(),
             });
         }
-        Ok(_) => {
-            let existing = fs::read_to_string(path).unwrap_or_default();
-            match stamp_of(&existing) {
-                None => {
-                    return Ok(Outcome::Skipped {
-                        why: "exists and is not cahoots' (no cahoots_version stamp) — left alone"
-                            .to_string(),
-                    });
-                }
-                Some(_) if existing == *wanted => return Ok(Outcome::UpToDate),
-                Some(from) if from == env!("CARGO_PKG_VERSION") => Outcome::Refreshed,
-                Some(from) => Outcome::Updated { from },
-            }
-        }
+        Entry::Regular(existing) => match judge(&existing, wanted) {
+            Ok(outcome) => outcome,
+            Err(done) => return Ok(done),
+        },
     };
     if !dry_run {
-        let parent = path.parent().expect("an item path has a parent");
-        // BEFORE anything is created: see `confined`.
-        confined(&dirs.home, parent)?;
-        fs::create_dir_all(parent).map_err(|error| {
-            Fail::internal(format!("cannot create {}: {error}", parent.display()))
-        })?;
-        // And again now that it exists: nothing may have swapped it meanwhile.
-        confined(&dirs.home, parent)?;
-        fs::write(path, wanted)
-            .map_err(|error| Fail::internal(format!("cannot write {}: {error}", path.display())))?;
+        let dir = match held {
+            Some(dir) => dir,
+            None => {
+                // BEFORE anything is created: see `confined`.
+                confined(&dirs.home, parent)?;
+                fs::create_dir_all(parent).map_err(|error| {
+                    Fail::internal(format!("cannot create {}: {error}", parent.display()))
+                })?;
+                // And again now that it exists: nothing may have swapped it
+                // meanwhile.
+                Dir::open_confined(&dirs.home, parent)?
+                    .map_err(|why| Fail::policy(format!("{why} — refusing to write there")))?
+            }
+        };
+        dir.replace(name, wanted)?;
     }
     Ok(outcome)
+}
+
+const NOT_REGULAR: &str = "exists and is not a regular file — left alone";
+const NOT_STAMPED: &str = "exists and is not cahoots' (no cahoots_version stamp) — left alone";
+
+/// What writing `wanted` over a regular file holding `existing` would be —
+/// or, `Err`, what leaving it alone is.
+fn judge(existing: &str, wanted: &str) -> Result<Outcome, Outcome> {
+    match stamp_of(existing) {
+        None => Err(Outcome::Skipped {
+            why: NOT_STAMPED.to_string(),
+        }),
+        Some(_) if existing == wanted => Err(Outcome::UpToDate),
+        Some(from) if from == env!("CARGO_PKG_VERSION") => Ok(Outcome::Refreshed),
+        Some(from) => Ok(Outcome::Updated { from }),
+    }
+}
+
+/// A file's directory and its name. Every path cahoots writes has both.
+fn split(path: &Path) -> (&Path, &str) {
+    let parent = path.parent().expect("an item path has a parent");
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("an item path ends in a UTF-8 name");
+    (parent, name)
 }
 
 /// The one place `install` removes anything: files it wrote that the current
@@ -489,6 +513,224 @@ pub fn uninstall(dirs: &Dirs, dry_run: bool) -> Res<Vec<Report>> {
     Ok(reports)
 }
 
+/// Whether `install` has written into `harness`'s home: the manifest lists a
+/// file there.
+fn installed_in(dirs: &Dirs, manifest: &Manifest, harness: HarnessId) -> bool {
+    manifest
+        .files
+        .iter()
+        .any(|path| harness_of(dirs, path) == Some(harness))
+}
+
+const NOTHING_INSTALLED: &str =
+    "nothing has been installed here yet: run `cahoots install` from a terminal first";
+
+/// The manifest, for `refresh`, which never guesses what `install` wrote:
+/// none, an empty one, or one it cannot read is a person's to fix.
+fn load_manifest_strict(dirs: &Dirs) -> Res<Manifest> {
+    let path = manifest_path(dirs);
+    let unreadable = |error: &dyn std::fmt::Display| {
+        Fail::config(format!(
+            "cannot read {}: {error} — run `cahoots install` from a terminal to write it again",
+            path.display()
+        ))
+    };
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(Fail::config(NOTHING_INSTALLED));
+        }
+        Err(error) => return Err(unreadable(&error)),
+    };
+    let manifest: Manifest = serde_json::from_str(&text).map_err(|error| unreadable(&error))?;
+    if manifest.files.is_empty() {
+        return Err(Fail::config(NOTHING_INSTALLED));
+    }
+    Ok(manifest)
+}
+
+/// The kind whose subagent `path` is — only when it is exactly the path
+/// cahoots builds for that kind, one file directly in a harness's `agents`.
+fn kind_of(dirs: &Dirs, path: &Path) -> Option<(HarnessId, TaskKindName)> {
+    HarnessId::ALL.into_iter().find_map(|harness| {
+        let rest = path
+            .strip_prefix(dirs.home.join(home_of(harness)).join("agents"))
+            .ok()?;
+        let mut components = rest.components();
+        let only = match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(only)), None) => only.to_str()?,
+            _ => return None,
+        };
+        let suffix = match harness {
+            HarnessId::Claude => ".md",
+            HarnessId::Codex => ".toml",
+        };
+        let name = only.strip_prefix("cahoots-kind-")?.strip_suffix(suffix)?;
+        let name = TaskKindName::try_from(name.to_string()).ok()?;
+        (dirs.home.join(kind_agent_path(harness, &name)) == path).then_some((harness, name))
+    })
+}
+
+/// What `refresh` did: a report per file, and how many of them it could not
+/// change.
+#[derive(Debug)]
+pub struct Refreshed {
+    pub files: Vec<Report>,
+    pub failed: usize,
+}
+
+const NOT_WRITTEN_BY_INSTALL: &str =
+    "`cahoots install` did not write it — run it from a terminal to add it";
+const GONE_NOT_WRITTEN_BACK: &str = "gone — `cahoots install`, from a terminal, writes it again";
+const NOT_OURS_TO_ADD: &str = "exists, and `cahoots install` did not write it — left alone";
+const NOT_WRITTEN_HERE: &str =
+    "this version does not write it — `cahoots install`, from a terminal, removes it";
+
+/// `cahoots refresh`: what `install`, from a terminal, would do to the files
+/// it already wrote — and nothing more. It rewrites a file the manifest
+/// lists, still stamped, from this binary's text. It adds a kind's subagent
+/// only in a harness home the manifest already covers, and only where no
+/// file is; it removes one only by install's own rule (`remove_ours`). It
+/// never writes a file the manifest does not list otherwise, never one
+/// without the stamp, never through a link, and never anywhere outside the
+/// home. A file it cannot change is reported, and the rest still done.
+pub fn refresh(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Res<Refreshed> {
+    let mut manifest = load_manifest_strict(dirs)?;
+    let before = {
+        let mut files = manifest.files.clone();
+        files.sort();
+        files
+    };
+    let wants = wanted(dirs, kinds);
+    let mut done = Refreshed {
+        files: Vec::new(),
+        failed: 0,
+    };
+    let mut added = Vec::new();
+    for want in &wants {
+        let listed = manifest.files.contains(&want.path);
+        if listed && want.text.is_err() {
+            continue; // `prune`'s, below
+        }
+        let outcome = refresh_one(dirs, &manifest, want, listed).unwrap_or_else(|fail| {
+            done.failed += 1;
+            Outcome::Skipped {
+                why: format!("cannot write: {}", fail.message),
+            }
+        });
+        if !listed && outcome == Outcome::Installed {
+            added.push(want.path.clone());
+        }
+        done.files.push(Report {
+            path: want.path.clone(),
+            outcome,
+        });
+    }
+    let mut kept = Vec::new();
+    for path in std::mem::take(&mut manifest.files) {
+        if is_wanted(&wants, &path) {
+            kept.push(path);
+            continue;
+        }
+        let outcome = match kind_of(dirs, &path) {
+            Some(_) => remove_ours(&dirs.home, &path, false).unwrap_or_else(|fail| {
+                done.failed += 1;
+                Outcome::Skipped {
+                    why: format!("cannot remove: {}", fail.message),
+                }
+            }),
+            None => Outcome::Skipped {
+                why: NOT_WRITTEN_HERE.to_string(),
+            },
+        };
+        if still_listed(&outcome, false) {
+            kept.push(path.clone());
+        }
+        done.files.push(Report { path, outcome });
+    }
+    manifest.files = kept;
+    manifest.files.extend(added);
+    manifest.files.sort();
+    if manifest.files != before {
+        save_manifest(dirs, &mut manifest)?;
+    }
+    Ok(done)
+}
+
+/// One wanted file, for `refresh` (see its rules there).
+fn refresh_one(dirs: &Dirs, manifest: &Manifest, want: &Want, listed: bool) -> Res<Outcome> {
+    let skipped = |why: &str| {
+        Ok(Outcome::Skipped {
+            why: why.to_string(),
+        })
+    };
+    if !dirs.home.join(want.needs).is_dir() {
+        return skipped(&format!(
+            "~/{} does not exist — that harness is not set up here",
+            want.needs
+        ));
+    }
+    let (parent, name) = split(&want.path);
+    if listed {
+        let Ok(wanted) = &want.text else {
+            unreachable!("a listed file with no text is prune's")
+        };
+        if fs::symlink_metadata(parent).is_err() {
+            return skipped(GONE_NOT_WRITTEN_BACK);
+        }
+        let dir = match Dir::open_confined(&dirs.home, parent)? {
+            Ok(dir) => dir,
+            Err(why) => return skipped(&format!("{why} — left alone")),
+        };
+        return Ok(match dir.entry(name)? {
+            Entry::Absent => Outcome::Skipped {
+                why: GONE_NOT_WRITTEN_BACK.to_string(),
+            },
+            Entry::NotRegular => Outcome::Skipped {
+                why: NOT_REGULAR.to_string(),
+            },
+            Entry::Regular(existing) => match judge(&existing, wanted) {
+                Err(done) => done,
+                Ok(outcome) => {
+                    dir.replace(name, wanted)?;
+                    outcome
+                }
+            },
+        });
+    }
+    let Some(harness) = want.harness.filter(|_| want.kind) else {
+        return skipped(NOT_WRITTEN_BY_INSTALL);
+    };
+    if !installed_in(dirs, manifest, harness) {
+        return skipped(&format!(
+            "`cahoots install` has not written into ~/{} — run it there from a terminal first",
+            home_of(harness)
+        ));
+    }
+    let wanted = match &want.text {
+        Ok(text) => text,
+        Err(why) => return skipped(why),
+    };
+    if let Some((existing, resolved)) = outside_home(&dirs.home, parent)? {
+        return skipped(&format!(
+            "{} resolves to {}, outside your home — left alone",
+            existing.display(),
+            resolved.display()
+        ));
+    }
+    fs::create_dir_all(parent)
+        .map_err(|error| Fail::internal(format!("cannot create {}: {error}", parent.display())))?;
+    let dir = match Dir::open_confined(&dirs.home, parent)? {
+        Ok(dir) => dir,
+        Err(why) => return skipped(&format!("{why} — left alone")),
+    };
+    if dir.entry(name)? != Entry::Absent {
+        return skipped(NOT_OURS_TO_ADD);
+    }
+    dir.replace(name, wanted)?;
+    Ok(Outcome::Installed)
+}
+
 fn save_manifest(dirs: &Dirs, manifest: &mut Manifest) -> Res<()> {
     manifest.v = 1;
     manifest.files.sort();
@@ -519,12 +761,6 @@ pub struct Stale {
 /// What `install` would change, read-only — for `doctor`.
 pub fn stale(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Vec<Stale> {
     let manifest = load_manifest(dirs);
-    let installed_in = |harness: HarnessId| {
-        manifest
-            .files
-            .iter()
-            .any(|path| harness_of(dirs, path) == Some(harness))
-    };
     let wants = wanted(dirs, kinds);
     let mut stale = Vec::new();
     for want in &wants {
@@ -537,7 +773,9 @@ pub fn stale(dirs: &Dirs, kinds: &BTreeMap<TaskKindName, KindEntry>) -> Vec<Stal
             Err(_) => (want.kind
                 && fs::symlink_metadata(&want.path).is_err()
                 && dirs.home.join(want.needs).is_dir()
-                && want.harness.is_some_and(installed_in))
+                && want
+                    .harness
+                    .is_some_and(|harness| installed_in(dirs, &manifest, harness)))
             .then_some(StaleWhy::NotInstalled),
         };
         if let Some(why) = why {
@@ -747,6 +985,67 @@ mod tests {
             rendered.sort();
             rendered.dedup();
             assert_eq!(rendered.len(), Role::ALL.len(), "{harness}");
+        }
+    }
+
+    fn dirs_at(home: &str) -> Dirs {
+        Dirs {
+            home: PathBuf::from(home),
+            config: PathBuf::from("/nowhere/config"),
+            state: PathBuf::from("/nowhere/state"),
+            overridden: true,
+        }
+    }
+
+    /// A kind's name is held to one file name: whatever is valid lands as
+    /// one file directly in a harness's `agents`, and a name that is a path
+    /// is not a name.
+    #[test]
+    fn kind_paths_are_one_file_in_the_agents_directory() {
+        for valid in ["a", "rust-review", "x_1", &"k".repeat(64)] {
+            let name = name(valid);
+            for harness in HarnessId::ALL {
+                let path = PathBuf::from(kind_agent_path(harness, &name));
+                let parent = path.parent().unwrap();
+                assert_eq!(parent, Path::new(home_of(harness)).join("agents"));
+                assert_eq!(path.components().count(), 3, "{}", path.display());
+            }
+        }
+        for path_like in ["../x", "a/b", "..", ".x", "A", "", "a b", "a\\b", "a.md"] {
+            assert!(
+                TaskKindName::try_from(path_like.to_string()).is_err(),
+                "{path_like:?} is a kind name"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_path_cahoots_builds_reads_as_a_kinds_subagent() {
+        let dirs = dirs_at("/h");
+        let kind = |path: &str| kind_of(&dirs, Path::new(path));
+        assert_eq!(
+            kind("/h/.claude/agents/cahoots-kind-rust-review.md"),
+            Some((HarnessId::Claude, name("rust-review")))
+        );
+        assert_eq!(
+            kind("/h/.codex/agents/cahoots-kind-rust-review.toml"),
+            Some((HarnessId::Codex, name("rust-review")))
+        );
+        for not_a_kind in [
+            "/h/.claude/agents/cahoots-kind-rust-review.toml",
+            "/h/.codex/agents/cahoots-kind-rust-review.md",
+            "/h/.claude/agents/cahoots-delegate.md",
+            "/h/.claude/agents/sub/cahoots-kind-x.md",
+            "/h/.claude/agents/../agents/cahoots-kind-x.md",
+            "/h/.claude/cahoots-kind-x.md",
+            "/h/notes/cahoots-kind-x.md",
+            "/elsewhere/.claude/agents/cahoots-kind-x.md",
+            "/h/.claude/agents/cahoots-kind-.md",
+            "/h/.claude/agents/cahoots-kind-Rust.md",
+            "/h/.claude/agents/cahoots-kind-x.md.bak",
+            "/h/.claude/skills/cahoots/SKILL.md",
+        ] {
+            assert_eq!(kind(not_a_kind), None, "{not_a_kind}");
         }
     }
 

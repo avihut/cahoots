@@ -356,6 +356,11 @@ so it could never be delegated from there. The prefix keeps a kind named
   another harness), by uninstall's rule, only in the homes the run covers
   (`--harness`), and not on a dry run. `files::prune` is the only place it
   removes anything.
+- **Refresh keeps it current without a terminal.** `cahoots refresh` does
+  install's file work and nothing else: listed, stamped files from this
+  binary's text; kinds' subagents added and removed only in homes the
+  manifest covers. It never touches the meter, config.toml or the rules. It
+  reports per file in install's vocabulary.
 - **Writes and removals are confined to the home directory**, judged by
   where the path resolves and *before* anything is created or deleted — an
   agent home that is a symlink out of `$HOME` does not even get a directory
