@@ -375,7 +375,15 @@ const KIND_LINK: u32 = 0o120000;
 fn identity(path: &Path) -> Result<Option<Identity>, String> {
     let meta = match path.symlink_metadata() {
         Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // Under a directory that became a file, nothing is there either.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(format!("cannot look at {}: {error}", path.display())),
     };
     if meta.file_type().is_file() && meta.nlink() > 1 {
