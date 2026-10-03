@@ -137,7 +137,12 @@ trap '[ -z "$standin" ] || kill "$standin" 2>/dev/null; rm -rf "$tmp"' EXIT
 real_running() {
     (exec -a "$1" sleep 60) &
     standin=$!
-    until ps -o args= -p "$standin" | grep -qF -- "$1"; do :; done
+    local tries=0
+    until ps -o args= -p "$standin" | grep -qF -- "$1"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 100 ] || { echo "test-hooks: the stand-in $1 never showed in ps" >&2; exit 1; }
+        sleep 0.05
+    done
 }
 real_stopped() {
     kill "$standin"
