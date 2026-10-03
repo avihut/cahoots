@@ -669,9 +669,9 @@ fn refused_across_the_split(world: &World, brief: &str, test: &str, other: &str)
     assert_eq!(
         message(&refused),
         format!(
-            "run {id}'s change puts a file where a directory was, or the reverse, across its \
-             tests and the rest ({test} and {other}), so its hidden tests would not apply on \
-             their own"
+            "run {id}'s change has a test and a file of the rest that collide ({test} and \
+             {other}: one inside the other, or the same path but for case), so its hidden tests \
+             would not apply on their own"
         )
     );
     assert!(tree(&world.data).is_empty(), "{:?}", tree(&world.data));
@@ -699,6 +699,69 @@ fn a_test_directory_that_became_a_file_is_refused() {
         "spec/foo_spec.rb",
         "spec",
     );
+}
+
+/// A case-only rename across the split: `FooTest.java` is a test by the
+/// path rule's case-sensitive suffix, and `Footest.java` is not. Where the
+/// filesystem does not tell the two names apart, the rest of the change —
+/// `Footest.java` added — fails at the base on its own, since `FooTest.java`
+/// is still there. Refused everywhere, so a task never depends on where it
+/// is replayed.
+#[test]
+fn a_rename_that_changed_only_case_across_the_split_is_refused() {
+    let world = World::new();
+    commit_files(&world, &[("FooTest.java", "class FooTest {}\n")]);
+    let brief = "FAKE: rename=FooTest.java=Footest.java\n";
+    let run = world.accepted_writer(brief, &[]);
+    let id = run.run_id();
+    let patch = fs::read(world.run_file(&id, "patch.diff")).unwrap();
+    let sections = cahoots::patch::sections(&patch);
+    let paths: Vec<&str> = sections.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(paths, ["FooTest.java", "Footest.java"]);
+
+    // Where case does not tell names apart, the rest alone does not apply.
+    let probe = world.root.join("case-probe");
+    fs::create_dir_all(&probe).unwrap();
+    fs::write(probe.join("a"), "").unwrap();
+    if probe.join("A").exists() {
+        let base = run.data()["base_commit"].as_str().unwrap();
+        let replay = world.root.join("replay");
+        world.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            replay.to_str().unwrap(),
+            base,
+        ]);
+        let rest = world.root.join("rest.diff");
+        fs::write(&rest, sections[1].bytes).unwrap();
+        let applied = std::process::Command::new("git")
+            .args(["apply", rest.to_str().unwrap()])
+            .current_dir(&replay)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            !applied.status.success(),
+            "the rest applied alone: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+    }
+
+    let refused = at(&world, &["evals", "add", &id]);
+    assert_eq!(refused.code, 2, "{}", refused.json);
+    assert_eq!(
+        message(&refused),
+        format!(
+            "run {id}'s change has a test and a file of the rest that collide (FooTest.java and \
+             Footest.java: one inside the other, or the same path but for case), so its hidden \
+             tests would not apply on their own"
+        )
+    );
+    assert!(tree(&world.data).is_empty(), "{:?}", tree(&world.data));
 }
 
 #[test]

@@ -189,9 +189,9 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
     let sections = patch::sections(&patch);
     if let Some((test, other)) = straddling(&sections) {
         return Err(refused(format!(
-            "run {run}'s change puts a file where a directory was, or the reverse, across its \
-             tests and the rest ({test} and {other}), so its hidden tests would not apply on \
-             their own"
+            "run {run}'s change has a test and a file of the rest that collide ({test} and \
+             {other}: one inside the other, or the same path but for case), so its hidden tests \
+             would not apply on their own"
         )));
     }
 
@@ -464,8 +464,10 @@ fn unquoted(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-/// A hidden test and a file of the rest where one is under the other: a
-/// file that became a directory, or the reverse, or a link in the way.
+/// A hidden test and a file of the rest that collide: one under the other (a
+/// file that became a directory, or the reverse, or a link in the way), or
+/// the same path but for case (a rename that changed only case, where the
+/// path rule's case-sensitive `FooTest` suffix tells the two names apart).
 /// Applied apart, at the base, one of the two diffs would then fail, so such
 /// a run makes no task. A change like that wholly on one side applies, in
 /// git's order, within its one diff. Compared without the quotes, and
@@ -496,10 +498,11 @@ fn straddling<'a>(sections: &'a [patch::Section<'_>]) -> Option<(&'a str, &'a st
     };
     let (rest_files, rest_dirs) = index(&rest);
     for (test, key) in &tests {
-        // A file of the rest where the test's directory is, or under the test.
-        let other = ancestors(key)
-            .iter()
-            .find_map(|dir| rest_files.get(dir))
+        // A file of the rest at the test's own path, where the test's
+        // directory is, or under the test.
+        let other = rest_files
+            .get(key)
+            .or_else(|| ancestors(key).iter().find_map(|dir| rest_files.get(dir)))
             .or_else(|| rest_dirs.get(key));
         if let Some(other) = other {
             return Some((test, other));
@@ -621,6 +624,22 @@ mod tests {
             None
         );
         assert_eq!(found(&["tests2", "tests/a.rs"]), None);
+        // The same path but for case: a case-only rename across the split,
+        // in either order, and one in which quotes are all that differ.
+        assert_eq!(
+            found(&["FooTest.java", "Footest.java"]),
+            pair("FooTest.java", "Footest.java")
+        );
+        assert_eq!(
+            found(&["Footest.java", "FooTest.java"]),
+            pair("FooTest.java", "Footest.java")
+        );
+        assert_eq!(
+            found(&["\"caf\\303\\251Test.java\"", "caf\\303\\251test.java"]),
+            pair("\"caf\\303\\251Test.java\"", "caf\\303\\251test.java")
+        );
+        // Alike but for case on one side alone is nothing to it.
+        assert_eq!(found(&["tests/A.rs", "tests/a.rs"]), None);
     }
 
     #[test]
