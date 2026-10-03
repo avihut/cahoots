@@ -16,6 +16,7 @@ use crate::dirs::Dirs;
 use crate::exit::{Exit, Fail, Res};
 use crate::meter::{self, Chosen, MeterFile, UsageMeter};
 use crate::model::{Candidate, Effort, HarnessId, ModelName, Role, TaskKindName};
+use crate::placement::provider::ProviderId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -108,6 +109,18 @@ pub struct Review {
     pub apply_routing: bool,
 }
 
+/// What cuts a writer's worktree (`[fork]` in config.toml).
+#[derive(Debug, Clone, Serialize)]
+pub struct Fork {
+    /// The provider a person chose: git, or daft where the repository has a
+    /// `daft.yml`.
+    pub provider: ProviderId,
+    /// The daft a person chose. Unchosen, daft never runs.
+    pub daft_binary: Option<PathBuf>,
+    /// Whether daft runs the repository's hooks in a new worktree.
+    pub daft_hooks: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Registry {
     pub harnesses: BTreeMap<HarnessId, HarnessEntry>,
@@ -117,6 +130,7 @@ pub struct Registry {
     pub meters: Meters,
     pub review: Review,
     pub explore: Explore,
+    pub fork: Fork,
 }
 
 pub const DEFAULT_CAP: u8 = 75;
@@ -395,6 +409,16 @@ impl Registry {
                 ledger_max_runs_per_hour: ledger.max_runs_per_hour.unwrap_or(12),
                 ledger_max_tokens_per_day: ledger.max_tokens_per_day,
             },
+            fork: Fork {
+                provider: config.fork.provider.unwrap_or(ProviderId::Git),
+                daft_binary: config.fork.daft.as_ref().and_then(|d| d.binary.clone()),
+                daft_hooks: config
+                    .fork
+                    .daft
+                    .as_ref()
+                    .and_then(|d| d.hooks)
+                    .unwrap_or(false),
+            },
         }
     }
 
@@ -456,6 +480,23 @@ mod tests {
         ] {
             assert_eq!(default_abort_at(cap), abort_at, "cap {cap}");
         }
+    }
+
+    #[test]
+    fn git_cuts_until_a_person_chooses_daft() {
+        let fork = Registry::effective(&UserConfig::default()).fork;
+        assert_eq!(
+            (fork.provider, fork.daft_binary, fork.daft_hooks),
+            (ProviderId::Git, None, false)
+        );
+        let config = UserConfig::parse(
+            "schema = 1\nfork.provider = \"daft\"\nfork.daft.binary = \"/opt/bin/daft\"\nfork.daft.hooks = true",
+        )
+        .unwrap();
+        let fork = Registry::effective(&config).fork;
+        assert_eq!(fork.provider, ProviderId::Daft);
+        assert_eq!(fork.daft_binary, Some(PathBuf::from("/opt/bin/daft")));
+        assert!(fork.daft_hooks);
     }
 
     #[test]

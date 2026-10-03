@@ -267,11 +267,25 @@ kind whose role is `implement`, selects the same writer.
 The client decides and checks (`placement::decide`: a writer without `--fork`
 is refused; `--in-place` needs `limits.allow_in_place`); the detached
 supervisor does the cutting (`placement::cut`), because a checkout of a large
-repository can outlast a caller's tool call. The cut runs none of the
-repository's hooks: daft gets `--skip-hooks all`, and every git that cuts,
-reads or removes a worktree — and the one daft starts — gets an empty hooks
-directory of cahoots' own and no fsmonitor, so the worktree comes up without
-the repository's setup and the caller runs that there. The path daft prints is checked before
+repository can outlast a caller's tool call. What cuts it is a provider
+(`src/placement/`, a closed set like the harnesses and the meters), chosen
+by a person in config.toml and never by a flag or the repository:
+`fork.provider = "git"`, the default, cuts a detached `git worktree` under
+cahoots' state directory, and `"daft"` cuts with `daft start --fork` where
+the repository has a `daft.yml`, and git everywhere else. daft runs only
+from `fork.daft.binary`; a chosen daft that is missing or unfit fails the
+run rather than falling back to git, and each provider identifies itself by
+its `--version` before it cuts. The cut runs none of the repository's hooks
+or filters: daft gets `--skip-hooks all` unless a person sets
+`fork.daft.hooks`, every git that cuts, reads or removes a worktree — and
+the one daft starts — gets an empty hooks directory of cahoots' own and no
+fsmonitor, and every filter driver the configuration defines is turned off
+for the cut, so a Git LFS file comes up as its pointer and a git-crypt file
+as its ciphertext. A repository whose own configuration has an include git
+reads for each worktree apart (`includeIf`) is refused: what it names for
+the new worktree cannot be read before the cut. The worktree comes up without the repository's setup,
+and the caller runs that there. The tool that cuts runs in a process group
+of its own, killed when the cut returns. The path daft prints is checked before
 a writer runs in it (`placement::unfit`), and the worktree's git directory is
 read once, at the cut, and recorded (`gitdir`). The run reports `worktree` and
 `changes`, a `git status` read against that recorded git directory — or, when
@@ -282,9 +296,11 @@ run directory (`patch.diff`), and a summary of it — paths, line counts and a
 hash per changed block — in the run and in the history, which outlives the
 patch (`src/patch.rs`). In place, the supervisor records the git configuration status would
 read (`git config --list --show-origin`) before the writer starts, in the run
-directory, and status runs afterwards only if it is unchanged. Bringing the change over is the caller's job, after reading it. A
-worktree cahoots cut itself is removed once the last run on record that
-works in it ages out; one daft cut is daft's to remove.
+directory, and status runs afterwards only if it is unchanged. Bringing the change over is the caller's job, after reading it. The
+run records which provider cut its worktree, and reports who removes it
+(`worktree_owner`: `"cahoots"` or `"daft"`). A worktree git cut is removed
+once the last run on record that works in it ages out; one daft cut is
+daft's to remove, and cahoots never does.
 
 ## Exit codes (M0)
 

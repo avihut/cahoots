@@ -273,10 +273,14 @@ fn said_reset(key: &Key, before: Option<&Setting>) -> String {
     let (table, name) = split(key);
     match before {
         Some(setting) => {
+            let unset = match key {
+                Key::ForkDaftBinary => NOT_CHOSEN,
+                _ => "not set",
+            };
             let back = setting
                 .default
                 .as_ref()
-                .map_or("not set".to_string(), |d| shown(Some(d), &setting.kind));
+                .map_or(unset.to_string(), |d| shown(Some(d), &setting.kind));
             format!("Took [{table}] {name} out of config.toml: back to {back}")
         }
         None => format!("Took [{table}] {name} out of config.toml"),
@@ -322,9 +326,10 @@ fn rows(settings: &[Setting], home: &Path) -> Vec<Row> {
                 id: setting.key.name(),
                 section: section(setting.key.section()).to_string(),
                 label,
-                value: match &setting.value {
-                    Some(Value::Program(path)) => tilde(path, home),
-                    value => shown(value.as_ref(), &setting.kind),
+                value: match (&setting.value, &setting.key) {
+                    (Some(Value::Program(path)), _) => tilde(path, home),
+                    (None, Key::ForkDaftBinary) => NOT_CHOSEN.to_string(),
+                    (value, _) => shown(value.as_ref(), &setting.kind),
                 },
                 origin: match setting.origin {
                     Origin::Config => tui::Origin::Set,
@@ -344,6 +349,7 @@ fn section(section: Section) -> String {
         Section::Harness(id) => name(id).to_string(),
         Section::Meter => "Usage meter".to_string(),
         Section::Runs => "Runs".to_string(),
+        Section::Fork => "Worktrees".to_string(),
         Section::Review => "Review".to_string(),
         Section::Roles => "Roles".to_string(),
         Section::TaskKind(name) => format!("Kind · {name}"),
@@ -466,6 +472,22 @@ fn words(key: &Key) -> (String, String) {
              its own."
                 .to_string(),
         ),
+        Key::ForkProvider => (
+            "Cut by",
+            "What cuts a writer's worktree. daft cuts it only in a repository with a daft.yml; \
+             git cuts it everywhere else."
+                .to_string(),
+        ),
+        Key::ForkDaftBinary => (
+            "daft program",
+            "Which daft cuts worktrees. daft runs only from a program chosen here.".to_string(),
+        ),
+        Key::ForkDaftHooks => (
+            "daft hooks",
+            "Let daft run the repository's hooks in each new worktree, if daft trusts the \
+             repository. They are the repository's own commands, run outside any sandbox."
+                .to_string(),
+        ),
         Key::Review => (
             "Review runs",
             "Offer a sample of finished runs for review by the agent that delegated them. It \
@@ -536,6 +558,9 @@ fn role_work(role: Role) -> &'static str {
     }
 }
 
+/// An unchosen daft, as the page shows it: there is none to run.
+const NOT_CHOSEN: &str = "not chosen";
+
 /// A value as the page shows it.
 fn shown(value: Option<&Value>, kind: &Kind) -> String {
     match (value, kind) {
@@ -591,6 +616,9 @@ fn note(setting: &Setting) -> String {
             .to_string();
     }
     match (setting.origin, &setting.key, &setting.value) {
+        (Origin::Config, Key::ForkDaftBinary, _) => {
+            "Set in config.toml. Without it, daft never runs.".to_string()
+        }
         (Origin::Config, _, _) => match &setting.default {
             Some(default) => format!(
                 "Set in config.toml. The default is {}.",
@@ -616,6 +644,14 @@ fn note(setting: &Setting) -> String {
         (Origin::Default, Key::MeterBinary(_), None) => {
             "Not found: `cahoots install` looks for it.".to_string()
         }
+        (Origin::Default, Key::ForkDaftBinary, None) => match &setting.kind {
+            Kind::Program(programs) if programs.is_empty() => {
+                "None on your PATH: set fork.daft.binary to daft's path.".to_string()
+            }
+            _ => "Not chosen: daft runs only from a program chosen here. Choose one, and it is \
+                  saved to config.toml."
+                .to_string(),
+        },
         (Origin::Default, _, None) => {
             "Not set: there is no such limit. Set it, and it is saved to config.toml.".to_string()
         }
@@ -712,6 +748,12 @@ fn choice_hint(key: &Key, choice: &str) -> &'static str {
         (Key::Meter, "agent-usage") => MeterId::AgentUsage.summary(),
         (Key::Meter, "ccusage") => MeterId::Ccusage.summary(),
         (Key::Meter, _) => NO_METER,
+        (Key::ForkProvider, "git") => {
+            "a detached worktree in cahoots' state directory, removed when its runs age out"
+        }
+        (Key::ForkProvider, _) => {
+            "daft's own layout, where the repository has a daft.yml; yours to remove"
+        }
         (Key::KindRole(_), "advise") => "a second opinion; read-only",
         (Key::KindRole(_), "review") => "find problems; read-only",
         (Key::KindRole(_), "explore") => "read the codebase; read-only",
@@ -839,6 +881,7 @@ mod tests {
                 "Codex",
                 "Usage meter",
                 "Runs",
+                "Worktrees",
                 "Review",
                 "Roles"
             ],
@@ -992,6 +1035,79 @@ mod tests {
         assert_eq!(
             done,
             "Saved to config.toml: [roles.explore] candidates, claude sonnet medium first"
+        );
+    }
+
+    #[test]
+    fn the_worktrees_section_says_what_cuts_and_that_an_unchosen_daft_never_runs() {
+        let shown = rows(&now("schema = 1"), Path::new("/home/u"));
+        let row = |id: &str| shown.iter().find(|row| row.id == id).unwrap().clone();
+        let provider = row("fork.provider");
+        assert_eq!(
+            (
+                provider.section.as_str(),
+                provider.label.as_str(),
+                provider.value.as_str()
+            ),
+            ("Worktrees", "Cut by", "git")
+        );
+        let Edit::Choose { choices, current } = &provider.edit else {
+            panic!("not a choice: {:?}", provider.edit);
+        };
+        assert_eq!(*current, Some(0));
+        assert_eq!(
+            choices,
+            &vec![
+                Choice::new(
+                    "git",
+                    "a detached worktree in cahoots' state directory, removed when its runs age out"
+                ),
+                Choice::new(
+                    "daft",
+                    "daft's own layout, where the repository has a daft.yml; yours to remove"
+                ),
+            ]
+        );
+        let binary = row("fork.daft.binary");
+        assert_eq!(
+            (binary.label.as_str(), binary.value.as_str()),
+            ("daft program", "not chosen")
+        );
+        assert_eq!(
+            binary.note,
+            "None on your PATH: set fork.daft.binary to daft's path."
+        );
+        assert_eq!(binary.edit, Edit::Fixed, "nothing to choose from");
+        let hooks = row("fork.daft.hooks");
+        assert_eq!(
+            (hooks.label.as_str(), hooks.value.as_str(), &hooks.edit),
+            ("daft hooks", "off", &Edit::Toggle)
+        );
+
+        let pinned = rows(
+            &now("schema = 1\nfork.daft.binary = \"/home/u/bin/daft\""),
+            Path::new("/home/u"),
+        );
+        let binary = pinned
+            .iter()
+            .find(|row| row.id == "fork.daft.binary")
+            .unwrap();
+        assert_eq!(binary.value, "~/bin/daft");
+        assert_eq!(
+            binary.note,
+            "Set in config.toml. Without it, daft never runs."
+        );
+        let settings = now("schema = 1\nfork.daft.binary = \"/home/u/bin/daft\"");
+        assert_eq!(
+            said_reset(
+                &Key::ForkDaftBinary,
+                settings.iter().find(|s| s.key == Key::ForkDaftBinary)
+            ),
+            "Took [fork.daft] binary out of config.toml: back to not chosen"
+        );
+        assert_eq!(
+            said_set(&Key::ForkProvider, &Value::Name("daft".into())),
+            "Saved to config.toml: [fork] provider = \"daft\""
         );
     }
 

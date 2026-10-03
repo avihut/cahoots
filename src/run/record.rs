@@ -28,6 +28,7 @@ use crate::harness::{Progress, Version};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::patch::{Commit, PatchSummary};
 use crate::placement::Placement;
+use crate::placement::provider::ProviderId;
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -90,6 +91,11 @@ pub struct RunRecord {
     /// worktree's `.git` names by then.
     #[serde(default)]
     pub gitdir: Option<PathBuf>,
+    /// What cut a fork's worktree, set with it, before the writer ran: who
+    /// owns its cleanup. `None` for every other run, a fork whose cut failed,
+    /// and records from before it was kept.
+    #[serde(default)]
+    pub worktree_provider: Option<ProviderId>,
     /// The launching client's workspace and the directory the run works in.
     /// No tool started for this run — `git`, `daft`, `ps` — may come from one
     /// of them. Internal: never in the envelope.

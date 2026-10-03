@@ -192,15 +192,17 @@ pub fn run_helper_capped<S: AsRef<OsStr>>(
     run_helper_inner(binary, args, cwd, deadline, path, vars, Some(cap))
 }
 
-fn run_helper_inner<S: AsRef<OsStr>>(
+/// A helper's command: the minimal environment — the PATH given, HOME from
+/// passwd, `vars`, then `NO_LAZY_FETCH` (`scrubbed`) — stdin from nothing,
+/// stdout piped, stderr dropped. Every helper is started from it, the
+/// grouped one included.
+fn helper_command<S: AsRef<OsStr>>(
     binary: &Path,
     args: &[S],
     cwd: Option<&Path>,
-    deadline: Duration,
     path: Option<OsString>,
     vars: &[(OsString, OsString)],
-    cap: Option<usize>,
-) -> Res<(Output, bool)> {
+) -> Command {
     let mut env = Vec::new();
     if let Some(path) = path {
         env.push(("PATH".into(), path));
@@ -219,7 +221,19 @@ fn run_helper_inner<S: AsRef<OsStr>>(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let mut child = command
+    command
+}
+
+fn run_helper_inner<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
+    vars: &[(OsString, OsString)],
+    cap: Option<usize>,
+) -> Res<(Output, bool)> {
+    let mut child = helper_command(binary, args, cwd, path, vars)
         .spawn()
         .map_err(|error| Fail::internal(format!("cannot start {}: {error}", binary.display())))?;
     let overflowed = Arc::new(AtomicBool::new(false));
@@ -294,6 +308,93 @@ fn run_helper_inner<S: AsRef<OsStr>>(
         },
         overflowed,
     ))
+}
+
+/// How long a grouped helper's stdout may stay open once its group is gone.
+const GROUP_DRAIN: Duration = Duration::from_secs(5);
+
+/// What a grouped helper came to, once it exited.
+pub enum Grouped {
+    /// It exited, and what it printed was read to the end.
+    Exited(Output),
+    /// It exited, and something it started still held its stdout open after
+    /// its group was killed: a process that left the group.
+    OutputHeld,
+}
+
+/// [`run_helper_with_env`] for a tool that starts others — the tool that
+/// cuts a worktree, and the `git` or the hooks it runs. It runs in a process
+/// group of its own, and the whole group is killed once it has exited or its
+/// deadline has passed, so nothing it started keeps running after it. Its
+/// stdout is then read for a few seconds at most: past them, what holds it
+/// open left the group, and that is said (`Grouped::OutputHeld`), never
+/// waited on.
+pub fn run_helper_grouped<S: AsRef<OsStr>>(
+    binary: &Path,
+    args: &[S],
+    cwd: Option<&Path>,
+    deadline: Duration,
+    path: Option<OsString>,
+    vars: &[(OsString, OsString)],
+) -> Res<Grouped> {
+    let mut command = helper_command(binary, args, cwd, path, vars);
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|error| Fail::internal(format!("cannot start {}: {error}", binary.display())))?;
+    let group = child.id() as i32;
+    // Read on a thread of its own, and handed over on a channel, so that the
+    // wait for it has a deadline: a pipe something outside the group holds
+    // never closes.
+    let (sender, read) = std::sync::mpsc::channel();
+    match child.stdout.take() {
+        Some(mut pipe) => {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let _ = pipe.read_to_end(&mut bytes);
+                let _ = sender.send(bytes);
+            });
+        }
+        // Nothing to read: nothing to wait for.
+        None => drop(sender),
+    }
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < deadline => {
+                std::thread::sleep(Duration::from_millis(15))
+            }
+            Ok(None) => {
+                signal_group(group, Signal::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Fail::internal(format!(
+                    "{} did not finish within {}s",
+                    binary.display(),
+                    deadline.as_secs()
+                )));
+            }
+            Err(error) => {
+                signal_group(group, Signal::SIGKILL);
+                return Err(Fail::internal(format!("waiting for a helper: {error}")));
+            }
+        }
+    };
+    // What it started goes with it, before its output is waited for: a
+    // process left in the group would otherwise hold the pipe open.
+    signal_group(group, Signal::SIGKILL);
+    let bytes = match read.recv_timeout(GROUP_DRAIN) {
+        Ok(bytes) => bytes,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Vec::new(),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Grouped::OutputHeld),
+    };
+    Ok(Grouped::Exited(Output {
+        status: status.code(),
+        stdout: String::from_utf8(bytes.clone()).unwrap_or_default(),
+        bytes,
+    }))
 }
 
 /// A system tool cahoots itself needs (`git`, `daft`, `ps`), held to the same
@@ -389,6 +490,12 @@ fn require_git_floor(git: &Path, workspace: &[&Path]) -> Res<()> {
         passed.push(git.to_path_buf());
     }
     Ok(())
+}
+
+/// [`system_tool`] from the one path a person chose for it, never a PATH
+/// lookup: the caller sets PATH, and could put a tool of its own first.
+pub fn pinned_system_tool(name: &str, pinned: &Path, workspace: &[&Path]) -> Res<PathBuf> {
+    as_system_tool(name, resolve_binary(name, Some(pinned), workspace))
 }
 
 fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
@@ -1152,6 +1259,14 @@ pub(crate) mod tests {
                 .unwrap();
         assert!(!overflowed);
         assert_eq!(lazy_fetch_lines(&capped), once, "run_helper_capped");
+        // The grouped helper: the tool that cuts a worktree, and every git
+        // it starts.
+        let Grouped::Exited(grouped) =
+            run_helper_grouped(env, &[] as &[&str], None, deadline, None, &relaxed).unwrap()
+        else {
+            panic!("env's output was held");
+        };
+        assert_eq!(lazy_fetch_lines(&grouped), once, "run_helper_grouped");
     }
 
     #[test]
@@ -1209,6 +1324,103 @@ pub(crate) mod tests {
             fail.message
         );
         assert!(!ran.exists(), "the old git ran for more than its version");
+    }
+
+    /// Waits until `pid` is gone: killed, and reaped by whoever inherited it.
+    fn gone(pid: i32) -> bool {
+        let started = Instant::now();
+        while kill(Pid::from_raw(pid), None).is_ok() {
+            if started.elapsed() > Duration::from_secs(10) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        true
+    }
+
+    #[test]
+    fn a_grouped_helper_kills_its_group_once_it_exits_and_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        // Read by `sh`, not run itself: a file just written may not be run
+        // while a fork elsewhere in the suite still holds it open.
+        let sh = Path::new("/bin/sh");
+        let script = |name: &str, text: String| {
+            let path = root.join(name);
+            fs::write(&path, text).unwrap();
+            path
+        };
+        let pid = |name: &str| -> i32 {
+            fs::read_to_string(root.join(name))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let path = || Some(OsString::from("/usr/bin:/bin"));
+
+        // A process left in the group, holding stdout: it goes with the
+        // group, and what was printed is read at once.
+        let left = script(
+            "left.sh",
+            format!(
+                "sleep 30 &\necho $! > '{}'\necho done\n",
+                root.join("left.pid").display()
+            ),
+        );
+        let started = Instant::now();
+        let Grouped::Exited(output) =
+            run_helper_grouped(sh, &[&left], None, Duration::from_secs(20), path(), &[]).unwrap()
+        else {
+            panic!("the output was held");
+        };
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!((output.status, output.stdout.as_str()), (Some(0), "done\n"));
+        assert!(gone(pid("left.pid")), "the process left in the group lives");
+
+        // One that left the group, still holding the pipe, is said and not
+        // waited on past the drain: `tests/providers.rs` shows that end to
+        // end, with a process that leaves the group the portable way.
+
+        // Past the deadline, the whole group goes: the helper and what it started.
+        let late = script(
+            "late.sh",
+            format!(
+                "sleep 30 &\necho $! > '{}'\nsleep 30\n",
+                root.join("late.pid").display()
+            ),
+        );
+        let fail = run_helper_grouped(sh, &[&late], None, Duration::from_secs(1), path(), &[])
+            .err()
+            .expect("past its deadline");
+        assert!(
+            fail.message.ends_with("did not finish within 1s"),
+            "{}",
+            fail.message
+        );
+        assert!(gone(pid("late.pid")), "what the helper started lives");
+    }
+
+    #[test]
+    fn a_pinned_system_tool_is_that_path_or_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let daft = executable(&root, "daft", 0o755);
+        assert_eq!(pinned_system_tool("daft", &daft, &[]).unwrap(), daft);
+        let fail = pinned_system_tool("daft", &root.join("nowhere"), &[]).unwrap_err();
+        assert_eq!(fail.exit, Exit::Config);
+        assert!(
+            fail.message.starts_with("cahoots needs `daft`: "),
+            "{}",
+            fail.message
+        );
+        let fail = pinned_system_tool("daft", &daft, &[&root]).unwrap_err();
+        assert_eq!(fail.exit, Exit::Policy);
+        assert!(
+            fail.message.starts_with("refusing to run `daft`: "),
+            "{}",
+            fail.message
+        );
     }
 
     #[test]

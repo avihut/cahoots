@@ -119,9 +119,20 @@ yourself before the tests. Read the change with `git -C <worktree> diff`, run
 the tests there, and bring over what you want. cahoots never commits or
 merges for you. `cahoots status <run>` shows the commit the worktree was cut
 at (`data.base_commit`), so `git -C <worktree> diff <base_commit>` includes
-anything the writer committed there too. In a
-[daft](https://github.com/avihut/daft) repository the worktree is cut with
-`daft start --fork`, with daft's hooks skipped too.
+anything the writer committed there too. No filter runs while it is cut
+either, so a Git LFS file there is its pointer until you run `git lfs pull`
+in it.
+
+By default git cuts the worktree, under cahoots' own state directory. In a
+[daft](https://github.com/avihut/daft) repository you can have daft cut it
+instead, with `daft start --fork`: choose daft and its program in
+`cahoots settings` (`fork.provider` and `fork.daft.binary`, under
+Worktrees). daft cuts only where the repository has a `daft.yml`, and git
+everywhere else; `cahoots doctor` says when a repository has one and git is
+cutting. daft's hooks stay off unless you turn on `fork.daft.hooks`.
+`data.worktree_owner` says who removes the worktree: `cahoots`, once its
+runs age out after a week, or `daft`, which leaves it for you to remove with
+`daft remove`.
 
 Each command an agent runs prints one JSON object and exits with a code that
 means something (`cahoots exit-codes` lists them), so neither your agent nor

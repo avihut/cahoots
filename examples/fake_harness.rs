@@ -3,7 +3,8 @@
 //! `claude` or `codex`, it answers `--version` with that CLI's fingerprint and
 //! otherwise speaks that CLI's output stream. Named `usage-cli` or `ccusage`,
 //! it is a usage meter instead, and named `daft`, it cuts a fork the way its
-//! plan says (so no test ever runs the real daft).
+//! plan says, and answers `--version` as daft does (so no test ever runs the
+//! real daft).
 //!
 //! The brief (stdin) steers it, one directive per line:
 //!
@@ -184,10 +185,35 @@ fn fake_ccusage(exe: &std::path::Path, argv: &[String]) {
 /// its argv, where it ran, its PATH, every `GIT_CONFIG_*` it was given and
 /// its `GIT_NO_LAZY_FETCH` — with its pid in `daft.pid`. The plan: `{"sleep":
 /// s, "make": "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit":
-/// n, "at": "<commit-ish>", "lose": "<path>"}`; it makes a worktree at the
-/// commit it was given (`at` overrides it), then removes the file `lose`
-/// names (an object, say), and exits 0 unless it says otherwise.
+/// n, "at": "<commit-ish>", "lose": "<path>", "linger": s, "escape": s,
+/// "plant_filter": "<command>"}`; it makes a worktree at the commit it was
+/// given (`at` overrides it), then removes the file `lose` names (an object,
+/// say), and exits 0 unless it says otherwise. `linger` leaves a `sleep`
+/// behind, holding its stdout, its pid in `daft.linger.pid`; `escape` does
+/// the same from a process group of its own (`daft.escape.pid`);
+/// `plant_filter` names a filter `planted` for every path of the base's, as
+/// a process writing the git configuration while the worktree is cut would.
+///
+/// `--version` is answered first (`daft.version` beside the binary
+/// overrides `daft 1.27.9`) and logged apart, to `daft.versions` — its PATH
+/// and where it ran — so `daft.calls` counts only cuts.
 fn fake_daft(exe: &Path, argv: &[String]) {
+    if argv.iter().any(|arg| arg == "--version") {
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(exe.with_file_name("daft.versions"))
+            .expect("versions");
+        let call = json!({
+            "path": std::env::var("PATH").ok(),
+            "cwd": std::env::current_dir().ok(),
+        });
+        let _ = writeln!(log, "{call}");
+        let version = std::fs::read_to_string(exe.with_file_name("daft.version"))
+            .unwrap_or_else(|_| "daft 1.27.9".to_string());
+        println!("{}", version.trim());
+        return;
+    }
     let git_config: std::collections::BTreeMap<String, String> = std::env::vars()
         .filter(|(name, _)| name.starts_with("GIT_CONFIG"))
         .collect();
@@ -212,17 +238,62 @@ fn fake_daft(exe: &Path, argv: &[String]) {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
+    if let Some(secs) = plan["linger"].as_u64() {
+        // Deliberately never waited on, and left in daft's own group with
+        // daft's stdout: what the cut's group kill is for.
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sleep")
+            .arg(secs.to_string())
+            .spawn()
+            .expect("sleep");
+        let _ = std::fs::write(
+            exe.with_file_name("daft.linger.pid"),
+            child.id().to_string(),
+        );
+    }
+    if let Some(secs) = plan["escape"].as_u64() {
+        // In a process group of its own, with daft's stdout: out of the cut's
+        // reach, as a process that called setsid is.
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sleep")
+            .arg(secs.to_string())
+            .process_group(0)
+            .spawn()
+            .expect("sleep");
+        let _ = std::fs::write(
+            exe.with_file_name("daft.escape.pid"),
+            child.id().to_string(),
+        );
+    }
     if let Some(secs) = plan["sleep"].as_u64() {
         std::thread::sleep(Duration::from_secs(secs));
     }
     let print = plan["print"].as_str().unwrap_or_default();
+    let base = argv
+        .iter()
+        .position(|arg| arg == "-C")
+        .and_then(|at| argv.get(at + 1));
+    if let (Some(command), Some(base)) = (plan["plant_filter"].as_str(), base) {
+        let planted = std::process::Command::new("git")
+            .args(["-C", base, "config", "filter.planted.smudge", command])
+            .env_remove("GIT_CONFIG_COUNT")
+            .status()
+            .expect("git");
+        assert!(planted.success(), "the fake could not plant a filter");
+        let attributes = Path::new(base).join(".git/info/attributes");
+        if let Some(parent) = attributes.parent() {
+            std::fs::create_dir_all(parent).expect("info");
+        }
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(attributes)
+            .expect("attributes");
+        out.write_all(b"* filter=planted\n").expect("attributes");
+    }
     match plan["make"].as_str().unwrap_or("worktree") {
         "worktree" => {
-            let base = argv
-                .iter()
-                .position(|arg| arg == "-C")
-                .and_then(|at| argv.get(at + 1))
-                .expect("daft -C <base>");
+            let base = base.expect("daft -C <base>");
             // At the commit it was given, as the real daft forks at its last
             // positional; HEAD when there is none.
             let last = argv.last().map(String::as_str).unwrap_or_default();

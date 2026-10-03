@@ -6,12 +6,20 @@
 //!
 //! The client decides and checks (`decide`); the detached supervisor does the
 //! cutting (`cut`), because a checkout of a large repository can take longer
-//! than a caller's tool call may. The cut runs no command the repository
-//! defines: no git hook, no `daft.yml` job, no fsmonitor (docs/THREAT-MODEL.md,
-//! Writers).
+//! than a caller's tool call may. What cuts it is a provider a person chose
+//! (`provider`: git, or daft where the repository has a `daft.yml`). The cut
+//! runs no command the repository defines: no git hook, no `daft.yml` job
+//! unless a person turned daft's hooks on, no fsmonitor, no filter
+//! (docs/THREAT-MODEL.md, Writers).
 
-use std::ffi::{OsStr, OsString};
+mod daft;
+mod git;
+pub mod provider;
+
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -22,8 +30,9 @@ use crate::exit::{Exit, Fail, Res};
 use crate::model::Role;
 use crate::patch::Commit;
 use crate::paths::{self, Workspace};
-use crate::registry::Registry;
+use crate::registry::{self, Registry};
 use crate::spawn;
+use provider::{CutSpec, Owner, Place, ProviderId};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,11 +45,6 @@ pub enum Placement {
     /// A writer in a fresh worktree cut from the caller's HEAD.
     Fork,
 }
-
-/// How long `daft start --fork` and `git worktree add` may take, before a
-/// run's own `--timeout` shortens it.
-const DAFT_DEADLINE: Duration = Duration::from_secs(900);
-const GIT_DEADLINE: Duration = Duration::from_secs(300);
 
 /// Decides where a run will work and refuses what may not happen. For a fork
 /// the returned directory is the BASE it will be cut from.
@@ -86,152 +90,210 @@ pub fn decide(
     }
 }
 
-/// Cuts the worktree a writer will work in, and returns its path and its git
-/// directory.
+/// A worktree cut for a writer: where it is, its git directory as read at
+/// the cut, and the provider that cut it.
+#[derive(Debug, Clone)]
+pub struct Cut {
+    pub worktree: PathBuf,
+    pub gitdir: PathBuf,
+    pub provider: ProviderId,
+}
+
+/// Cuts the worktree a writer will work in, with the provider `fork` chooses
+/// for this repository (`provider::provider_for`): git, or daft where a
+/// person chose it and the repository has a `daft.yml` at its top. A chosen
+/// daft that is missing or unfit fails the cut; it never falls back to git.
 ///
-/// In a repository that opted into daft (a `daft.yml` at its top) the fork is
-/// daft's — `daft start --fork`, with every hook skipped — and the path daft
-/// prints is used only if it is fit for a writer (`unfit`). Anywhere else it
-/// is a plain detached `git worktree` under cahoots' state directory, outside
-/// every workspace. No repository hook runs either way. `roots` are the
-/// directories no tool started here may come from; `deadline` is the run's
-/// own timeout, which shortens the cut's. `at` is the commit to cut at — the
-/// one the run recorded — and with none, the base's HEAD.
+/// No repository hook runs, unless a person turned daft's on, and no filter
+/// runs during the checkout: every filter driver the configuration defines
+/// is turned off for the cut, and a driver that appears while it runs fails
+/// it. The tool runs in a process group of its own, killed when it returns.
+/// git's worktree goes where cahoots chooses, under its state directory;
+/// the path daft prints is used only if it is fit for a writer (`unfit`).
+/// `roots` are the directories no tool started here may come from;
+/// `deadline` is the run's own timeout, which shortens the cut's. `at` is
+/// the commit to cut at — the one the run recorded — and with none, the
+/// base's HEAD.
 pub fn cut(
     dirs: &Dirs,
+    fork: &registry::Fork,
     base: &Path,
     run_id: &str,
     roots: &[&Path],
     deadline: Duration,
     at: Option<&Commit>,
-) -> Res<(PathBuf, PathBuf)> {
+) -> Res<Cut> {
     let (top, common) = spawn::git_roots(base, roots)?
         .ok_or_else(|| cut_failed("the base is no longer a repository"))?;
     let mut roots = roots.to_vec();
     roots.extend([base, top.as_path()]);
 
-    if top.join("daft.yml").is_file() {
-        match spawn::system_tool("daft", &roots) {
-            Ok(daft) => {
-                return cut_with_daft(dirs, &daft, base, (&top, &common), &roots, deadline, at);
-            }
-            Err(fail) if fail.exit == Exit::Policy => {
-                return Err(Fail::policy(format!(
-                    "cannot cut a worktree: {}",
-                    fail.message
-                )));
-            }
-            // No daft to run: a plain worktree, as anywhere else.
-            Err(_) => {}
-        }
-    }
+    let id = provider::provider_for(fork.provider, top.join("daft.yml").is_file());
+    let tool = provider::provider(id);
+    let (binary, _) = provider::locate(id, fork, &roots)?;
+    // A tool that runs git of its own finds it on the PATH it is given: that
+    // git is held to the binary policy and the version floor before the tool
+    // starts (`spawn::path_for_git_users`). git itself was, by `locate`.
+    let path = if tool.binary_name() == "git" {
+        spawn::helper_path(&roots)
+    } else {
+        spawn::path_for_git_users(&roots)?
+    };
+    let hooks = id == ProviderId::Daft && fork.daft_hooks;
 
-    let worktrees = dirs.state.join("worktrees");
-    ensure_private_dir(&worktrees)?;
-    let path = worktrees.join(run_id);
-    let git = spawn::system_tool("git", &roots)?;
-    let deadline = deadline.min(GIT_DEADLINE);
-    let before = linked_worktrees(&common)?;
-    let mut args = quiet_git_args(dirs)?;
-    args.extend([
-        OsString::from("-C"),
-        base.into(),
-        "worktree".into(),
-        "add".into(),
-        "--detach".into(),
-        path.clone().into(),
-        at.map_or("HEAD", Commit::as_str).into(),
-    ]);
-    let started = Instant::now();
-    let output =
-        spawn::run_helper_with_env(&git, &args, None, deadline, spawn::helper_path(&roots), &[])
-            .map_err(|fail| did_not_finish("`git worktree add`", started, deadline, fail))?;
-    if output.status != Some(0) || !path.is_dir() {
-        return Err(cut_failed(
-            "`git worktree add` refused (a repository with no commit has no HEAD to cut from)",
-        ));
-    }
-    // A refused pin leaves the worktree where it is: no run on record points
-    // at it, so the refusal names it, for a person to remove.
-    let gitdir = pin(dirs, &path, &common, &roots, &before).map_err(|why| {
-        Fail::policy(format!(
-            "cannot cut a worktree: {}, {why} — refusing to run a writer there, and the \
-             worktree is left there for a person to remove",
-            path.display()
+    // Checked before the configuration is listed: the git that lists it is
+    // given these settings too, and a hooks directory that is not empty is
+    // refused here, as it always was, before anything cuts.
+    let quiet = quiet_git_args(dirs)?;
+    // The filters to turn off are the ones the configuration names now.
+    let listing = config_listing(dirs, base, &roots).map_err(|why| {
+        cut_failed(&format!(
+            "the git configuration could not be read ({why}), so its filters cannot be turned off"
         ))
     })?;
-    Ok((path, gitdir))
-}
+    if let Some(key) = provider::includes_read_per_worktree(&listing).first() {
+        return Err(Fail::policy(format!(
+            "cannot cut a worktree: the repository's own git configuration sets {key}, an \
+             include git reads for each worktree apart — what it names in a new worktree cannot \
+             be read before the cut, so not every filter could be turned off"
+        )));
+    }
+    let filters = provider::filter_drivers(&listing);
+    if hooks && let Some(key) = provider::steering_daft_hooks(&listing).first() {
+        return Err(Fail::policy(format!(
+            "cannot cut a worktree: the repository's own git configuration sets {key} — with \
+             fork.daft.hooks on, it would choose what daft runs"
+        )));
+    }
+    let before = linked_worktrees(&common)?;
 
-/// `daft start --fork`, with no hook of the repository's: `--skip-hooks all`
-/// for daft's own, and for the `git` it runs, the same empty hooks directory
-/// cahoots' own git gets. `--no-carry`, so that a person's carry setting
-/// never brings their uncommitted work into the writer's tree (and from
-/// there into its patch), and the commit to fork from, when there is one.
-/// `repository` is the base's: its toplevel and its common directory.
-fn cut_with_daft(
-    dirs: &Dirs,
-    daft: &Path,
-    base: &Path,
-    (top, common): (&Path, &Path),
-    roots: &[&Path],
-    deadline: Duration,
-    at: Option<&Commit>,
-) -> Res<(PathBuf, PathBuf)> {
-    let deadline = deadline.min(DAFT_DEADLINE);
-    // The git daft will find on its PATH, checked before daft starts.
-    let path = spawn::path_for_git_users(roots)?;
-    let before = linked_worktrees(common)?;
-    let mut args = vec![
-        OsStr::new("-C"),
-        base.as_os_str(),
-        OsStr::new("start"),
-        OsStr::new("--fork"),
-        OsStr::new("--no-cd"),
-        OsStr::new("--skip-hooks"),
-        OsStr::new("all"),
-        OsStr::new("--no-carry"),
-    ];
-    args.extend(at.map(|commit| OsStr::new(commit.as_str())));
+    let chosen = match tool.place() {
+        Place::Chosen => {
+            let worktrees = dirs.state.join("worktrees");
+            ensure_private_dir(&worktrees)?;
+            Some(worktrees.join(run_id))
+        }
+        Place::Printed => None,
+    };
+    let argv = provider::command_line(
+        tool,
+        &CutSpec {
+            base,
+            at,
+            path: chosen.as_deref(),
+            hooks,
+            quiet: &quiet,
+        },
+    )?;
+    let vars = cut_git_env(dirs, &filters)?;
+    let deadline = deadline.min(tool.deadline());
     let started = Instant::now();
-    let output =
-        spawn::run_helper_with_env(daft, &args, None, deadline, path, &quiet_git_env(dirs)?)
-            .map_err(|fail| did_not_finish("`daft start --fork`", started, deadline, fail))?;
-    match output.status {
-        Some(0) => {}
-        Some(code) => {
+    let ran = spawn::run_helper_grouped(&binary, &argv, None, deadline, path, &vars);
+    let printed = match &ran {
+        Ok(spawn::Grouped::Exited(output)) => last_line(&output.stdout),
+        _ => None,
+    };
+
+    // A filter named while the tool ran was not turned off, and may have
+    // run: the writer does not start there, whatever the tool made of it.
+    let now = config_listing(dirs, base, &roots).map_err(|why| {
+        cut_failed(&format!(
+            "the git configuration could not be read again after the cut ({why}), so a filter \
+             it gained cannot be ruled out"
+        ))
+    })?;
+    let gained: Vec<String> = provider::filter_drivers(&now)
+        .difference(&filters)
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    if !gained.is_empty() {
+        let made = chosen
+            .as_deref()
+            .or(printed.as_deref().map(Path::new))
+            .filter(|made| made.is_dir());
+        return Err(Fail::policy(format!(
+            "cannot cut a worktree: the git configuration gained a filter ({}) while the \
+             worktree was cut — refusing to run a writer there{}",
+            gained.join(", "),
+            made.map_or(String::new(), |made| format!(
+                ", and {} is left for a person to remove",
+                made.display()
+            ))
+        )));
+    }
+
+    let output = match ran.map_err(|fail| did_not_finish(tool.what(), started, deadline, fail))? {
+        spawn::Grouped::Exited(output) => output,
+        spawn::Grouped::OutputHeld => {
             return Err(cut_failed(&format!(
-                "`daft start --fork` exited with status {code}"
+                "{} left a process holding its output",
+                tool.what()
             )));
         }
-        None => return Err(cut_failed("`daft start --fork` was killed by a signal")),
+    };
+    if output.status != Some(0) {
+        return Err(cut_failed(&tool.failure(output.status)));
     }
-    let Some(printed) = output
-        .stdout
+
+    match chosen {
+        Some(path) => {
+            if !path.is_dir() {
+                return Err(cut_failed(&tool.failure(output.status)));
+            }
+            // A refused pin leaves the worktree where it is: no run on record
+            // points at it, so the refusal names it, for a person to remove.
+            let gitdir = pin(dirs, &path, &common, &roots, &before).map_err(|why| {
+                Fail::policy(format!(
+                    "cannot cut a worktree: {}, {why} — refusing to run a writer there, and the \
+                     worktree is left there for a person to remove",
+                    path.display()
+                ))
+            })?;
+            Ok(Cut {
+                worktree: path,
+                gitdir,
+                provider: id,
+            })
+        }
+        None => {
+            let Some(printed) = printed else {
+                return Err(cut_failed(&format!("{} printed no path", tool.what())));
+            };
+            let refuse = |why: &str| {
+                Fail::policy(format!(
+                    "cannot cut a worktree: {} printed {printed}, which {why} — refusing to run a \
+                     writer there",
+                    tool.what()
+                ))
+            };
+            if let Some(why) = unfit(dirs, &printed, &top, &common, &roots) {
+                return Err(refuse(why));
+            }
+            let worktree = fs::canonicalize(&printed).map_err(|_| refuse("is not a directory"))?;
+            let gitdir = pin(dirs, &worktree, &common, &roots, &before).map_err(|why| {
+                Fail::policy(format!(
+                    "cannot cut a worktree: {} printed {printed}, {why} — refusing to run a \
+                     writer there",
+                    tool.what()
+                ))
+            })?;
+            Ok(Cut {
+                worktree,
+                gitdir,
+                provider: id,
+            })
+        }
+    }
+}
+
+/// The last line with something on it, trimmed: the path a tool printed.
+fn last_line(stdout: &str) -> Option<String> {
+    stdout
         .lines()
         .map(str::trim)
         .rev()
         .find(|line| !line.is_empty())
-    else {
-        return Err(cut_failed("`daft start --fork` printed no path"));
-    };
-    let refuse = |why: &str| {
-        Fail::policy(format!(
-            "cannot cut a worktree: `daft start --fork` printed {printed}, which {why} — \
-             refusing to run a writer there"
-        ))
-    };
-    if let Some(why) = unfit(dirs, printed, top, common, roots) {
-        return Err(refuse(why));
-    }
-    let worktree = fs::canonicalize(printed).map_err(|_| refuse("is not a directory"))?;
-    let gitdir = pin(dirs, &worktree, common, roots, &before).map_err(|why| {
-        Fail::policy(format!(
-            "cannot cut a worktree: `daft start --fork` printed {printed}, {why} — refusing to \
-             run a writer there"
-        ))
-    })?;
-    Ok((worktree, gitdir))
+        .map(str::to_string)
 }
 
 fn cut_failed(what: &str) -> Fail {
@@ -556,9 +618,21 @@ pub(crate) fn fork_git_dir(
         .ok_or_else(gone)
 }
 
-/// Removes a worktree cahoots cut itself (never one of daft's, never the
-/// caller's tree) once no run on record works in it any more.
-pub fn discard(dirs: &Dirs, base: &Path, worktree: &Path, roots: &[&Path]) {
+/// Removes a worktree cahoots cut itself once no run on record works in it
+/// any more: one its provider leaves to cahoots (git's), under cahoots'
+/// `worktrees` — never one of daft's, wherever daft put it, and never the
+/// caller's tree. A record from before the provider was recorded has none,
+/// and is held to the path alone.
+pub fn discard(
+    dirs: &Dirs,
+    base: &Path,
+    worktree: &Path,
+    cut_by: Option<ProviderId>,
+    roots: &[&Path],
+) {
+    if cut_by.is_some_and(|id| provider::provider(id).owner() != Owner::Cahoots) {
+        return;
+    }
     if worktree == base || !worktree.starts_with(dirs.state.join("worktrees")) {
         return;
     }
@@ -618,16 +692,42 @@ pub(crate) fn quiet_git_args(dirs: &Dirs) -> Res<Vec<OsString>> {
         .collect())
 }
 
-/// The quiet settings as `GIT_CONFIG_*` variables: for `daft`, so that the
-/// git it starts is told too.
-fn quiet_git_env(dirs: &Dirs) -> Res<Vec<(OsString, OsString)>> {
-    let settings = quiet_settings(dirs)?;
+/// What the tool that cuts a worktree is told, as `GIT_CONFIG_*` variables,
+/// so that every `git` it starts is told too: the quiet settings, then, for
+/// each filter driver in `filters`, no smudge, clean or process command, and
+/// not required — an emptied filter that is still required fails the
+/// checkout. Each file a filter would have converted comes up as git stores
+/// it. Variables, not `-c`, which splits at the first `=`, and a driver's
+/// name may hold one.
+pub(crate) fn cut_git_env(
+    dirs: &Dirs,
+    filters: &BTreeSet<Vec<u8>>,
+) -> Res<Vec<(OsString, OsString)>> {
+    let mut settings: Vec<(OsString, OsString)> = quiet_settings(dirs)?
+        .into_iter()
+        .map(|(key, value)| (OsString::from(key), value))
+        .collect();
+    for name in filters {
+        for (var, value) in [
+            ("smudge", ""),
+            ("clean", ""),
+            ("process", ""),
+            ("required", "false"),
+        ] {
+            // Byte for byte: the driver's own name, whatever its bytes.
+            let mut key = b"filter.".to_vec();
+            key.extend_from_slice(name);
+            key.push(b'.');
+            key.extend_from_slice(var.as_bytes());
+            settings.push((OsString::from_vec(key), value.into()));
+        }
+    }
     let mut vars = vec![(
         OsString::from("GIT_CONFIG_COUNT"),
         OsString::from(settings.len().to_string()),
     )];
     for (n, (key, value)) in settings.into_iter().enumerate() {
-        vars.push((format!("GIT_CONFIG_KEY_{n}").into(), key.into()));
+        vars.push((format!("GIT_CONFIG_KEY_{n}").into(), key));
         vars.push((format!("GIT_CONFIG_VALUE_{n}").into(), value));
     }
     Ok(vars)
@@ -699,6 +799,66 @@ mod tests {
             unfit_here(&root.join("missing")),
             Some("is not a directory")
         );
+    }
+
+    #[test]
+    fn the_cut_env_turns_every_filter_off() {
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let dirs = Dirs {
+            home: root.join("home"),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+            overridden: true,
+        };
+        let filters: BTreeSet<Vec<u8>> =
+            [b"evil".to_vec(), b"a=b".to_vec(), b"ev\xffil".to_vec()].into();
+        let vars = cut_git_env(&dirs, &filters).unwrap();
+        let get = |name: &str| {
+            vars.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone().into_vec())
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        assert_eq!(get("GIT_CONFIG_COUNT"), b"14");
+        assert_eq!(vars.len(), 1 + 2 * 14);
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..14)
+            .map(|n| {
+                (
+                    get(&format!("GIT_CONFIG_KEY_{n}")),
+                    get(&format!("GIT_CONFIG_VALUE_{n}")),
+                )
+            })
+            .collect();
+        assert_eq!(pairs[0].0, b"core.hooksPath");
+        assert_eq!(
+            pairs[0].1,
+            dirs.no_hooks().into_os_string().into_vec(),
+            "the empty hooks directory"
+        );
+        assert_eq!(pairs[1], (b"core.fsmonitor".to_vec(), b"false".to_vec()));
+        // In the set's order; a name holding `=`, or bytes that are not
+        // UTF-8, a key as it is.
+        let mut expected = Vec::new();
+        for name in [&b"a=b"[..], b"evil", b"ev\xffil"] {
+            for (var, value) in [
+                ("smudge", ""),
+                ("clean", ""),
+                ("process", ""),
+                ("required", "false"),
+            ] {
+                let mut key = b"filter.".to_vec();
+                key.extend_from_slice(name);
+                key.push(b'.');
+                key.extend_from_slice(var.as_bytes());
+                expected.push((key, value.as_bytes().to_vec()));
+            }
+        }
+        assert_eq!(pairs[2..], expected);
+        // Nothing to turn off: the quiet settings alone.
+        let quiet = cut_git_env(&dirs, &BTreeSet::new()).unwrap();
+        assert_eq!(quiet[0], ("GIT_CONFIG_COUNT".into(), "2".into()));
     }
 
     #[test]

@@ -122,16 +122,18 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     if record.placement == Placement::Fork {
         let base = record.base.clone().unwrap_or_else(|| record.cwd.clone());
         if record.resumed_from.is_none() {
-            let (worktree, gitdir) = placement::cut(
+            let cut = placement::cut(
                 dirs,
+                &registry.fork,
                 &base,
                 &record.id,
                 &record.tool_roots(),
                 Duration::from_secs(record.timeout_secs),
                 record.base_commit.as_ref(),
             )?;
-            record.cwd = worktree;
-            record.gitdir = Some(gitdir);
+            record.cwd = cut.worktree;
+            record.gitdir = Some(cut.gitdir);
+            record.worktree_provider = Some(cut.provider);
             dir.save(record)?;
             // Read against the pinned git directory: the worktree is cut at
             // the commit the run recorded, or the writer does not start.

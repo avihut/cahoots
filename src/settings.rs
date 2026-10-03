@@ -8,6 +8,8 @@
 //! The defaults are the registry's own — an empty config's registry — so a
 //! default is written down once. Reading the settings never runs anything:
 //! programs are found on PATH and in `meter.json`, not asked for a version.
+//! Saving a daft is the one change that runs one: it is asked its version
+//! before it is written down (`set`).
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -20,6 +22,7 @@ use crate::config::{self, UserConfig};
 use crate::exit::{Exit, Fail, Res};
 use crate::meter::{Exe, MeterFile, MeterId, Selection};
 use crate::model::{Candidate, HarnessId, ModelName, Role, TaskKindName};
+use crate::placement::provider::{self, ProviderId};
 use crate::registry::{self, Registry};
 use crate::spawn;
 
@@ -48,6 +51,11 @@ pub enum Key {
     TermGrace,
     Watchdog,
     AllowInPlace,
+    /// `fork.provider`: what cuts a writer's worktree.
+    ForkProvider,
+    /// `fork.daft.binary`: the one daft that may run.
+    ForkDaftBinary,
+    ForkDaftHooks,
     Review,
     Blind,
     SampleRate,
@@ -70,6 +78,7 @@ pub enum Section {
     Harness(HarnessId),
     Meter,
     Runs,
+    Fork,
     Review,
     Roles,
     TaskKind(TaskKindName),
@@ -107,6 +116,9 @@ impl Key {
             TermGrace,
             Watchdog,
             AllowInPlace,
+            ForkProvider,
+            ForkDaftBinary,
+            ForkDaftHooks,
             Review,
             Blind,
             SampleRate,
@@ -151,6 +163,9 @@ impl Key {
             TermGrace => "limits.term_grace_secs".to_string(),
             Watchdog => "limits.watchdog_secs".to_string(),
             AllowInPlace => "limits.allow_in_place".to_string(),
+            ForkProvider => "fork.provider".to_string(),
+            ForkDaftBinary => "fork.daft.binary".to_string(),
+            ForkDaftHooks => "fork.daft.hooks".to_string(),
             Review => "review.enabled".to_string(),
             Blind => "review.blind".to_string(),
             SampleRate => "review.sample_rate".to_string(),
@@ -195,6 +210,7 @@ impl Key {
             | RunsPerHour | TokensPerDay => Section::Meter,
             MaxActiveRuns | MaxDepth | Timeout | Wait | IntGrace | TermGrace | Watchdog
             | AllowInPlace => Section::Runs,
+            ForkProvider | ForkDaftBinary | ForkDaftHooks => Section::Fork,
             Review | Blind | SampleRate | ApplyRouting => Section::Review,
             Candidates(_) | Calibrate(_) | ExploreShare(_) => Section::Roles,
             KindDescription(name)
@@ -540,14 +556,49 @@ pub fn current(
             locked: false,
         });
     }
+    all.push(toggle(
+        Key::AllowInPlace,
+        now_limits.allow_in_place,
+        base_limits.allow_in_place,
+        origin(limits.allow_in_place.is_some()),
+    ));
+
+    let fork = &config.fork;
+    let daft = fork.daft.as_ref();
+    let provider = |id: ProviderId| Some(Value::Name(id.as_str().to_string()));
+    all.push(Setting::new(
+        Key::ForkProvider,
+        Kind::Choice(ProviderId::ALL.map(ProviderId::as_str).to_vec()),
+        provider(now.fork.provider),
+        provider(base.fork.provider),
+        origin(fork.provider.is_some()),
+    ));
+    // Never "the first on PATH": an unchosen daft never runs. The copies on
+    // PATH are offered to choose from, and nothing is asked of them here.
+    let pinned = daft.and_then(|daft| daft.binary.clone());
+    let on_path: Vec<PathBuf> = spawn::find_all_on_path("daft", path)
+        .into_iter()
+        .filter(|binary| spawn::resolve_binary("daft", Some(binary), &[]).is_ok())
+        .collect();
+    all.push(Setting::new(
+        Key::ForkDaftBinary,
+        Kind::Program(programs(
+            pinned.as_deref(),
+            on_path.iter().map(|p| (p, Source::Path)),
+        )),
+        pinned.clone().map(Value::Program),
+        None,
+        origin(pinned.is_some()),
+    ));
+    all.push(toggle(
+        Key::ForkDaftHooks,
+        now.fork.daft_hooks,
+        base.fork.daft_hooks,
+        origin(daft.and_then(|daft| daft.hooks).is_some()),
+    ));
+
     let review = &config.review;
     for (key, value, default, set) in [
-        (
-            Key::AllowInPlace,
-            now_limits.allow_in_place,
-            base_limits.allow_in_place,
-            limits.allow_in_place.is_some(),
-        ),
         (
             Key::Review,
             now.review.enabled,
@@ -833,6 +884,9 @@ impl Setting {
                     )
                     .map(drop),
                     Key::MeterBinary(id) => Exe::pin(*id, &path).map(drop),
+                    Key::ForkDaftBinary => {
+                        spawn::resolve_binary("daft", Some(&path), &[]).map(drop)
+                    }
                     _ => Ok(()),
                 };
                 held.map_err(|fail| refuse(fail.message))?;
@@ -928,8 +982,18 @@ impl fmt::Display for Value {
 
 /// Sets one setting in config.toml, and returns the config it now holds. A
 /// change the config refuses (a cap above where runs stop) is `Usage`, and
-/// the file is left as it was.
+/// the file is left as it was. A daft is asked its version first, and one
+/// that is not daft, or older than cahoots supports, is refused the same
+/// way: the one setting whose saving runs a program.
 pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
+    if let (Key::ForkDaftBinary, Value::Program(path)) = (key, value) {
+        provider::locate_pinned_daft(path, &[]).map_err(|fail| {
+            Fail::new(
+                Exit::Usage,
+                format!("{key} = {}: {}", path.display(), fail.message),
+            )
+        })?;
+    }
     if let Key::KindDescription(name)
     | Key::KindRole(name)
     | Key::KindCandidates(name)
@@ -1161,6 +1225,92 @@ mod tests {
         assert_eq!(
             setting(&settings, "harness.codex.binary").value,
             Some(Value::Program(dirs[1].join("codex")))
+        );
+    }
+
+    #[test]
+    fn the_daft_program_offers_copies_on_path_but_is_never_one_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let mut dirs = Vec::new();
+        for (dir, mode) in [("a", 0o755), ("b", 0o777)] {
+            let dir = root.join(dir);
+            fs::create_dir(&dir).unwrap();
+            let daft = dir.join("daft");
+            fs::write(&daft, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&daft, fs::Permissions::from_mode(mode)).unwrap();
+            dirs.push(dir);
+        }
+        let path = std::env::join_paths(&dirs).unwrap();
+        let settings = current(&UserConfig::default(), None, Some(&path));
+        let binary = setting(&settings, "fork.daft.binary");
+        let Kind::Program(programs) = &binary.kind else {
+            panic!("{:?}", binary.kind);
+        };
+        assert_eq!(
+            programs.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
+            [dirs[0].join("daft")],
+            "the one anyone could write is not offered"
+        );
+        assert_eq!(
+            (binary.value, binary.default, binary.origin),
+            (None, None, Origin::Default),
+            "a daft on PATH is offered, and never the one used"
+        );
+
+        let pinned = current(
+            &config("schema = 1\nfork.daft.binary = \"/opt/bin/daft\""),
+            None,
+            Some(&path),
+        );
+        let binary = setting(&pinned, "fork.daft.binary");
+        assert_eq!(
+            (binary.value, binary.origin),
+            (
+                Some(Value::Program(PathBuf::from("/opt/bin/daft"))),
+                Origin::Config
+            )
+        );
+        let Kind::Program(programs) = &binary.kind else {
+            panic!("{:?}", binary.kind);
+        };
+        assert_eq!(
+            programs
+                .iter()
+                .map(|p| (p.path.clone(), p.from))
+                .collect::<Vec<_>>(),
+            [
+                (PathBuf::from("/opt/bin/daft"), Source::Config),
+                (dirs[0].join("daft"), Source::Path)
+            ]
+        );
+        assert!(
+            setting(&pinned, "fork.daft.binary").parse("daft").is_err(),
+            "relative"
+        );
+
+        let provider = setting(&settings, "fork.provider");
+        assert_eq!(provider.kind, Kind::Choice(vec!["git", "daft"]));
+        assert_eq!(provider.value, Some(Value::Name("git".to_string())));
+        assert_eq!(Key::ForkDaftHooks.section(), Section::Fork);
+        let chosen = current(
+            &config("schema = 1\n[fork]\nprovider = \"daft\"\n[fork.daft]\nhooks = true"),
+            None,
+            None,
+        );
+        let provider = setting(&chosen, "fork.provider");
+        assert_eq!(
+            (provider.value, provider.origin),
+            (Some(Value::Name("daft".to_string())), Origin::Config)
+        );
+        let hooks = setting(&chosen, "fork.daft.hooks");
+        assert_eq!(
+            (hooks.value, hooks.default, hooks.origin),
+            (
+                Some(Value::Bool(true)),
+                Some(Value::Bool(false)),
+                Origin::Config
+            )
         );
     }
 
