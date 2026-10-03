@@ -220,6 +220,32 @@ one that was there before, the caller's own among them; otherwise the run
 fails before the writer starts. A fork that was never cut cannot be resumed —
 it would start in the caller's own tree.
 
+**No lazy fetch.** Repository data cannot make git fetch. In a partial
+clone, git fetches a missing object on demand, and that fetch follows the
+repository's own remote configuration — which can name a remote helper, a
+command, run outside every sandbox. The diff flags, the empty hooks
+directory and `core.fsmonitor=false` do not stop it. So every helper and
+every callee cahoots starts gets its environment from one place in
+`src/spawn`, which
+clears it and sets `GIT_NO_LAZY_FETCH=1` after everything a caller passes —
+an empty list included — so nothing can drop or relax it, and
+`scripts/guard.sh` holds that shape. Every `git` cahoots runs gets it; so
+does `daft`, which hands it to the `git` it starts (it removes only git's
+discovery variables) — and that `git`, the first on the PATH daft is given,
+which need not be the one cahoots finds on its own, is held to the binary
+policy and the floor below before daft starts — and so does the callee, whose harness runs `git` of
+its own outside its tool sandbox. A step that needs an object the
+repository lacks fails as it would for one it cannot read: no base commit is
+recorded, the cut fails and the writer never starts, no patch is kept,
+`changes_error` says why — and no transport starts. Only a `git` that
+honours the variable on every path to a fetch is run at all: 2.46 or later,
+or a May 2024 security release of an earlier line (2.39.4, 2.40.2, 2.41.1,
+2.42.2, 2.43.4, 2.44.1, 2.45.1 or later in that line), where `fetch_objects`
+itself checks it. 2.45.0 knows the variable, but its checkout and diff
+prefetch go around it. Any other `git` — or one whose version cannot be
+read — is asked only `--version`, outside any repository, and never run:
+the step that needed it refuses, naming the floor (a `run` exits 34).
+
 **How far.** Each harness's own fence, proven on the command line and checked
 by `validate` against the ROLE — a reader can never be handed a writer's
 command line, whatever a builder does:

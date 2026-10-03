@@ -176,11 +176,12 @@ fn fake_ccusage(exe: &std::path::Path, argv: &[String]) {
 
 /// As `daft`: `daft -C <base> start --fork …`, done the way `daft.plan` (next
 /// to the binary) says, and logged to `daft.calls`, one JSON object a call —
-/// its argv, where it ran, its PATH and every `GIT_CONFIG_*` it was given —
-/// with its pid in `daft.pid`. The plan: `{"sleep": s, "make":
-/// "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit": n, "at":
-/// "<commit-ish>"}`; it makes a worktree at the commit it was given (`at`
-/// overrides it) and exits 0 unless it says otherwise.
+/// its argv, where it ran, its PATH, every `GIT_CONFIG_*` it was given and
+/// its `GIT_NO_LAZY_FETCH` — with its pid in `daft.pid`. The plan: `{"sleep":
+/// s, "make": "worktree"|"dir"|"file"|"nothing", "print": "<path>", "exit":
+/// n, "at": "<commit-ish>", "lose": "<path>"}`; it makes a worktree at the
+/// commit it was given (`at` overrides it), then removes the file `lose`
+/// names (an object, say), and exits 0 unless it says otherwise.
 fn fake_daft(exe: &Path, argv: &[String]) {
     let git_config: std::collections::BTreeMap<String, String> = std::env::vars()
         .filter(|(name, _)| name.starts_with("GIT_CONFIG"))
@@ -190,6 +191,7 @@ fn fake_daft(exe: &Path, argv: &[String]) {
         "cwd": std::env::current_dir().ok(),
         "path": std::env::var("PATH").ok(),
         "git_config": git_config,
+        "no_lazy_fetch": std::env::var("GIT_NO_LAZY_FETCH").ok(),
     });
     let mut log = std::fs::OpenOptions::new()
         .create(true)
@@ -249,6 +251,9 @@ fn fake_daft(exe: &Path, argv: &[String]) {
             std::fs::write(print, "not a directory\n").expect("a file");
         }
         _ => {}
+    }
+    if let Some(lose) = plan["lose"].as_str() {
+        std::fs::remove_file(lose).expect("the file to lose");
     }
     eprintln!("daft (fake): forked {print}");
     println!("{print}");

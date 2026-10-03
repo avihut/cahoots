@@ -33,8 +33,9 @@ directions.
 
 ## Install
 
-You need macOS or Linux, git, Claude Code and Codex installed and signed in,
-and Rust 1.95 or newer:
+You need macOS or Linux, git 2.46 or newer (or a May 2024 security release
+such as 2.39.4 or 2.45.1), Claude Code and Codex installed and signed in, and
+Rust 1.95 or newer:
 
 ```sh
 cargo install --git https://github.com/avihut/cahoots --locked

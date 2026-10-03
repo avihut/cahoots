@@ -110,6 +110,25 @@ fn canonical_of(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Every process started here — each git, the git `daft` starts, the
+/// callee's own — is told that git must never fetch a missing object on
+/// demand. In a partial clone that
+/// fetch follows the repository's remote configuration, which can name a
+/// remote helper — a command, run outside every sandbox. A step that needs
+/// an object that is not there fails instead, as it would for one that
+/// cannot be read. Only a git that honours the variable on every path to a
+/// fetch is run at all (`honours_no_lazy_fetch`).
+const NO_LAZY_FETCH: (&str, &str) = ("GIT_NO_LAZY_FETCH", "1");
+
+/// The only place a process started here gets its environment: cleared,
+/// then `vars`, then `NO_LAZY_FETCH` — last, so that nothing in `vars`, an
+/// empty list included, can drop or relax it (`scripts/guard.sh` holds it).
+fn scrubbed(command: &mut Command, vars: Vec<(OsString, OsString)>) {
+    command.env_clear();
+    command.envs(vars);
+    command.env(NO_LAZY_FETCH.0, NO_LAZY_FETCH.1);
+}
+
 /// What a finished helper command produced.
 pub struct Output {
     pub status: Option<i32>,
@@ -182,20 +201,21 @@ fn run_helper_inner<S: AsRef<OsStr>>(
     vars: &[(OsString, OsString)],
     cap: Option<usize>,
 ) -> Res<(Output, bool)> {
+    let mut env = Vec::new();
+    if let Some(path) = path {
+        env.push(("PATH".into(), path));
+    }
+    if let Ok(home) = crate::dirs::passwd_home() {
+        env.push(("HOME".into(), home.into_os_string()));
+    }
+    env.extend(vars.iter().cloned());
     let mut command = Command::new(binary);
     command
         .args(args)
-        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
-    if let Ok(home) = crate::dirs::passwd_home() {
-        command.env("HOME", home);
-    }
-    command.envs(vars.iter().map(|(name, value)| (name, value)));
+    scrubbed(&mut command, env);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -278,9 +298,97 @@ fn run_helper_inner<S: AsRef<OsStr>>(
 
 /// A system tool cahoots itself needs (`git`, `daft`, `ps`), held to the same
 /// binary policy as a harness. One that is missing is a setup problem (34);
-/// one the policy refuses is a refusal (33), and is never run.
+/// one the policy refuses is a refusal (33), and is never run. So is a `git`
+/// too old to be held to `NO_LAZY_FETCH` (34, `require_git_floor`).
 pub fn system_tool(name: &str, workspace: &[&Path]) -> Res<PathBuf> {
-    as_system_tool(name, resolve_binary(name, None, workspace))
+    let tool = as_system_tool(name, resolve_binary(name, None, workspace))?;
+    if name == "git" {
+        require_git_floor(&tool, workspace)?;
+    }
+    Ok(tool)
+}
+
+/// The gits that `NO_LAZY_FETCH` holds on every path to a fetch: from
+/// 2.46.0, and the May 2024 security releases of the lines before it, which
+/// check it where every lazy fetch starts (promisor-remote.c,
+/// `fetch_objects`). 2.45.0 knows the variable but its checkout and diff
+/// prefetch go around it. The minimum patch release, by minor version.
+const NO_LAZY_FETCH_FIXED: [(u32, u32); 7] = [
+    (39, 4),
+    (40, 2),
+    (41, 1),
+    (42, 2),
+    (43, 4),
+    (44, 1),
+    (45, 1),
+];
+
+/// Whether the git that printed `version` (`git --version`) never fetches
+/// lazily once told so. A version this cannot read is not one.
+fn honours_no_lazy_fetch(version: &str) -> bool {
+    let Some(number) = version.trim().strip_prefix("git version ") else {
+        return false;
+    };
+    let mut parts = number
+        .split(|c: char| !c.is_ascii_digit())
+        .map(str::parse::<u32>);
+    let (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch))) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    match (major, minor) {
+        (3.., _) | (2, 46..) => true,
+        (2, minor) => NO_LAZY_FETCH_FIXED
+            .iter()
+            .any(|&(line, first)| line == minor && patch >= first),
+        _ => false,
+    }
+}
+
+/// Refuses a `git` that would fetch lazily despite `NO_LAZY_FETCH` — a setup
+/// problem (34), never run for anything but `--version`, which it is asked
+/// outside any repository. One that passes is not asked again.
+fn require_git_floor(git: &Path, workspace: &[&Path]) -> Res<()> {
+    static PASSED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    if PASSED
+        .lock()
+        .is_ok_and(|passed| passed.iter().any(|seen| seen == git))
+    {
+        return Ok(());
+    }
+    let version = run_helper_with_env(
+        git,
+        &["--version"],
+        Some(Path::new("/")),
+        Duration::from_secs(10),
+        helper_path(workspace),
+        &[],
+    )
+    .ok()
+    .filter(|output| output.status == Some(0))
+    .map(|output| output.stdout.trim().to_string())
+    .unwrap_or_default();
+    if !honours_no_lazy_fetch(&version) {
+        let found = if version.is_empty() {
+            "it did not say its version".to_string()
+        } else {
+            format!("found `{version}`")
+        };
+        return Err(Fail::new(
+            Exit::Config,
+            format!(
+                "cahoots needs a git that never fetches lazily — 2.46 or later, or 2.39.4, \
+                 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1 or 2.45.1 or later in its line — \
+                 refusing to run {} ({found})",
+                git.display()
+            ),
+        ));
+    }
+    if let Ok(mut passed) = PASSED.lock() {
+        passed.push(git.to_path_buf());
+    }
+    Ok(())
 }
 
 fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
@@ -300,6 +408,24 @@ fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
 /// filter programs — to the same rule.
 pub fn helper_path(workspace: &[&Path]) -> Option<OsString> {
     helper_path_from(env::path_var().as_deref(), workspace)
+}
+
+/// [`helper_path`], for a tool that runs `git` of its own (`daft`): the
+/// first `git` on it — the one the tool will find, which need not be the one
+/// this process finds, since a workspace entry this PATH drops may have come
+/// first — is held to the binary policy and to the floor
+/// (`require_git_floor`) before the tool starts. A `git` it refuses, or none
+/// at all, is the refusal it would be for cahoots' own.
+pub fn path_for_git_users(workspace: &[&Path]) -> Res<Option<OsString>> {
+    let path = helper_path(workspace);
+    let found = find_on_path("git", path.as_deref())
+        .ok_or_else(|| Fail::new(Exit::TargetUnavailable, "`git` is not on PATH".to_string()));
+    let git = as_system_tool(
+        "git",
+        found.and_then(|git| resolve_binary("git", Some(&git), workspace)),
+    )?;
+    require_git_floor(&git, workspace)?;
+    Ok(path)
 }
 
 fn helper_path_from(path: Option<&OsStr>, workspace: &[&Path]) -> Option<OsString> {
@@ -336,11 +462,14 @@ pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBu
     let mut roots = workspace.to_vec();
     roots.push(&here);
     roots.extend(tops.iter().map(PathBuf::as_path));
-    let git = match system_tool("git", &roots) {
+    let git = match as_system_tool("git", resolve_binary("git", None, &roots)) {
         Ok(git) => git,
         Err(fail) if fail.exit == Exit::Policy => return Err(fail),
         Err(_) => return Ok(None),
     };
+    // A git too old to be held to `NO_LAZY_FETCH` is a refusal, never "no
+    // git": that would leave the repository's top out of the workspace.
+    require_git_floor(&git, &roots)?;
     let path = helper_path(&roots);
     let ask = |what: &str| {
         let output = run_helper_with_env(
@@ -611,9 +740,11 @@ pub struct Callee<'a> {
     pub caller: Option<HarnessId>,
 }
 
-/// The callee's whole environment: cleared, then rebuilt from an allowlist,
-/// with HOME from passwd. The caller's harness markers, tokens and proxies
-/// never reach it — and a vendor API key only when billing says so.
+/// The callee's environment: cleared, then rebuilt from an allowlist, with
+/// HOME from passwd — and, as every process here gets, `NO_LAZY_FETCH`: the
+/// harness runs git of its own outside its tool sandbox. The caller's harness
+/// markers, tokens and proxies never reach it — and a vendor API key only
+/// when billing says so.
 pub fn callee_environment(callee: &Callee<'_>) -> Res<Vec<(OsString, OsString)>> {
     let mut vars = env::callee_passthrough(callee.harness);
     vars.push(("HOME".into(), crate::dirs::passwd_home()?.into_os_string()));
@@ -635,11 +766,11 @@ pub fn callee_environment(callee: &Callee<'_>) -> Res<Vec<(OsString, OsString)>>
 pub fn spawn_callee(callee: &Callee<'_>) -> Res<Child> {
     let brief = File::open(callee.brief)
         .map_err(|error| Fail::internal(format!("cannot open the brief: {error}")))?;
-    Command::new(callee.binary)
+    let mut command = Command::new(callee.binary);
+    scrubbed(&mut command, callee_environment(callee)?);
+    command
         .args(callee.argv)
         .current_dir(callee.cwd)
-        .env_clear()
-        .envs(callee_environment(callee)?)
         .stdin(Stdio::from(brief))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -924,6 +1055,101 @@ mod tests {
         fs::create_dir_all(fake.join("refs")).unwrap();
         fs::write(fake.join("HEAD"), format!("{}\n", "a".repeat(40))).unwrap();
         assert_eq!(repository_tops(&below), vec![root.join("a")]);
+    }
+
+    /// Every `GIT_NO_LAZY_FETCH=` line in what `env` printed.
+    fn lazy_fetch_lines(output: &Output) -> Vec<String> {
+        output
+            .stdout
+            .lines()
+            .filter(|line| line.starts_with("GIT_NO_LAZY_FETCH="))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn every_helper_environment_forbids_lazy_fetch() {
+        let env = Path::new("/usr/bin/env");
+        let once = vec!["GIT_NO_LAZY_FETCH=1".to_string()];
+        let deadline = Duration::from_secs(10);
+        let plain = run_helper(env, &[] as &[&str], None, deadline).unwrap();
+        assert_eq!(lazy_fetch_lines(&plain), once, "run_helper");
+        let empty = run_helper_with_env(env, &[] as &[&str], None, deadline, None, &[]).unwrap();
+        assert_eq!(
+            lazy_fetch_lines(&empty),
+            once,
+            "an explicit, empty environment"
+        );
+        // What a caller passes comes first: it can neither relax nor drop it.
+        let relaxed = [
+            ("GIT_NO_LAZY_FETCH".into(), "0".into()),
+            ("GIT_NO_LAZY_FETCH".into(), "".into()),
+        ];
+        let output =
+            run_helper_with_env(env, &[] as &[&str], None, deadline, None, &relaxed).unwrap();
+        assert_eq!(lazy_fetch_lines(&output), once, "a caller's own value");
+        let (capped, overflowed) =
+            run_helper_capped(env, &[] as &[&str], None, deadline, None, &relaxed, 1 << 20)
+                .unwrap();
+        assert!(!overflowed);
+        assert_eq!(lazy_fetch_lines(&capped), once, "run_helper_capped");
+    }
+
+    #[test]
+    fn the_git_floor_is_where_every_lazy_fetch_honours_the_variable() {
+        for (version, honours) in [
+            // Knows the variable, but its checkout and diff prefetch do not.
+            ("git version 2.45.0", false),
+            ("git version 2.45.1", true),
+            ("git version 2.46.0", true),
+            ("git version 2.56.0\n", true),
+            ("git version 3.0.0", true),
+            ("git version 2.39.3", false),
+            ("git version 2.39.4", true),
+            ("git version 2.39.5 (Apple Git-154)", true),
+            ("git version 2.40.1", false),
+            ("git version 2.40.2", true),
+            ("git version 2.41.1", true),
+            ("git version 2.42.1", false),
+            ("git version 2.43.3", false),
+            ("git version 2.43.4", true),
+            ("git version 2.44.0", false),
+            ("git version 2.44.1", true),
+            ("git version 2.45.0.windows.1", false),
+            ("git version 2.38.9", false),
+            ("git version 1.99.99", false),
+            ("git version 2.46", false),
+            ("2.46.0", false),
+            ("", false),
+            ("git version two", false),
+        ] {
+            assert_eq!(honours_no_lazy_fetch(version), honours, "{version:?}");
+        }
+    }
+
+    #[test]
+    fn a_git_below_the_floor_is_refused_and_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let git = dir.path().join("git");
+        fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version 2.45.0'; exit 0; fi\n\
+                 echo \"$@\" >> '{}'\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        let fail = require_git_floor(&git, &[]).unwrap_err();
+        assert_eq!(fail.exit, Exit::Config);
+        assert!(
+            fail.message.contains("found `git version 2.45.0`"),
+            "{}",
+            fail.message
+        );
+        assert!(!ran.exists(), "the old git ran for more than its version");
     }
 
     #[test]

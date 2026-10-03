@@ -188,6 +188,7 @@ fn the_callee_gets_a_scrubbed_environment() {
             .env("HTTPS_PROXY", "http://proxy.invalid")
             .env("LD_PRELOAD", "/tmp/evil.so")
             .env("HOME", "/tmp/not-my-home")
+            .env("GIT_NO_LAZY_FETCH", "0")
             .env("LC_ALL", "C"),
     );
     assert_eq!(answer.code, 0, "{}", answer.json);
@@ -207,6 +208,9 @@ fn the_callee_gets_a_scrubbed_environment() {
         "HOME must come from passwd, not from the caller"
     );
     assert_eq!(env["LC_ALL"], "C");
+    // The harness runs git of its own, outside its tool sandbox: that git
+    // never fetches lazily either, whatever the caller had set.
+    assert_eq!(env["GIT_NO_LAZY_FETCH"], "1");
     assert_eq!(env["CAHOOTS_DEPTH"], "1");
     assert_eq!(env["CAHOOTS_CALLER"], "claude");
     assert_eq!(dump["cwd"], world.work.to_str().unwrap());

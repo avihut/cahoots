@@ -249,6 +249,68 @@ impl World {
         let _ = fs::remove_file(self.root.join("hook-ran"));
     }
 
+    /// Makes this world's repository a partial clone whose promisor remote is
+    /// a marker: a local script, run by git's `ext::` transport, that notes
+    /// it ran and fetches nothing. Any lazy fetch of a missing object runs
+    /// it, so a missing object (`lose`) and no mark (`fetch_tried`) is a fetch
+    /// that never started. No network: the remote is the script.
+    pub fn promisor(&self) {
+        let marker = self.root.join("promisor-remote");
+        self.script_at(
+            &marker,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n",
+                self.root.join("fetch-tried").display()
+            ),
+        );
+        for (key, value) in [
+            ("core.repositoryformatversion", "1".to_string()),
+            ("extensions.partialClone", "origin".to_string()),
+            ("remote.origin.url", format!("ext::{}", marker.display())),
+            ("remote.origin.promisor", "true".to_string()),
+            ("protocol.ext.allow", "always".to_string()),
+        ] {
+            self.git(&["config", key, &value]);
+        }
+    }
+
+    /// Where the repository keeps `oid` as a loose object.
+    pub fn object_path(&self, oid: &str) -> PathBuf {
+        self.work
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..])
+    }
+
+    /// Removes the loose object `oid`: the repository is missing it now, as a
+    /// partial clone is missing what it never fetched.
+    pub fn lose(&self, oid: &str) {
+        fs::remove_file(self.object_path(oid)).unwrap();
+    }
+
+    /// Whether the `promisor` remote has run — a lazy fetch was tried.
+    pub fn fetch_tried(&self) -> bool {
+        self.root.join("fetch-tried").exists()
+    }
+
+    /// Runs `git <args>` in `dir` as cahoots would but WITHOUT
+    /// `GIT_NO_LAZY_FETCH`, and says whether that tried to fetch. The control
+    /// of a test that says cahoots' own `git` did not: it shows the step does
+    /// read the missing object, so the test could have failed.
+    pub fn fetches_without_the_variable(&self, dir: &Path, args: &[&str]) -> bool {
+        let _ = fs::remove_file(self.root.join("fetch-tried"));
+        let _ = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_NO_LAZY_FETCH")
+            .output()
+            .unwrap();
+        self.fetch_tried()
+    }
+
     /// Turns these targets on, and every other one off, in config.toml.
     pub fn enable(&self, harnesses: &[&str]) {
         *self.enabled.borrow_mut() = harnesses.iter().map(|h| h.to_string()).collect();
@@ -449,6 +511,9 @@ impl World {
             .env("CAHOOTS_STATE_DIR", &self.state)
             .env("CAHOOTS_HOME_DIR", &self.home)
             .env_remove("CAHOOTS_DEV_REAL_DIRS")
+            // Whatever the caller says, cahoots' own git never fetches
+            // lazily: a caller that says otherwise proves it.
+            .env("GIT_NO_LAZY_FETCH", "0")
             .env_remove("CLAUDECODE")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SANDBOX")
