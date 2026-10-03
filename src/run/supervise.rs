@@ -18,9 +18,12 @@ use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::gate::{self, Watch};
 use crate::harness::{self, RunSpec};
+use crate::patch;
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
-use crate::run::record::{RunDir, RunRecord, State, now, try_lock_file, write_private};
+use crate::run::record::{
+    RunDir, RunRecord, State, now, try_lock_file, write_private, write_private_atomic,
+};
 use crate::spawn::{self, Callee};
 
 const TICK: Duration = Duration::from_millis(200);
@@ -125,10 +128,28 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
                 &record.id,
                 &record.tool_roots(),
                 Duration::from_secs(record.timeout_secs),
+                record.base_commit.as_ref(),
             )?;
             record.cwd = worktree;
             record.gitdir = Some(gitdir);
             dir.save(record)?;
+            // Read against the pinned git directory: the worktree is cut at
+            // the commit the run recorded, or the writer does not start.
+            if let Some(sha) = &record.base_commit
+                && patch::head(
+                    dirs,
+                    &record.cwd,
+                    record.gitdir.as_deref(),
+                    &record.tool_roots(),
+                )
+                .as_ref()
+                    != Some(sha)
+            {
+                return Err(Fail::new(
+                    Exit::RunFailed,
+                    format!("cannot cut a worktree: it was not cut at {sha}"),
+                ));
+            }
         } else if base == record.cwd {
             return Err(Fail::policy(format!(
                 "run {} has no worktree of its own to go back into",
@@ -199,7 +220,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     // its `.git/config`, in that window. A process that left the group
     // (setsid, a double fork) is out of reach; that residual is in
     // docs/THREAT-MODEL.md.
-    let _group = GroupCleanup(pid);
+    let group = GroupCleanup(pid);
     record.state = State::Running;
     record.started_at = Some(now());
     record.callee_pid = Some(pid);
@@ -215,6 +236,11 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
 
     let text = record.progress.final_text.clone().unwrap_or_default();
     write_private(&dir.final_path(), text.as_bytes())?;
+
+    // The group goes now, not when this function returns: nothing the writer
+    // left in it may change the tree while its patch is read.
+    drop(group);
+    keep_patch(dirs, dir, record);
 
     let failure = record.progress.failure.clone();
     let (state, exit, message) = match stop {
@@ -246,6 +272,46 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     };
     record.finish(state, exit, message);
     Ok(())
+}
+
+/// A fork writer's patch since the run's base commit, kept in the run
+/// directory and summed up in the record — however the run stopped, so a
+/// stopped writer's partial work is kept too. Before the run is finished, so
+/// the same run always answers the same way. Bookkeeping: a patch that
+/// cannot be kept leaves `patch` empty and a line in the log, and never
+/// changes how the run ended.
+fn keep_patch(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) {
+    record.patch = None;
+    // A fork whose cut failed has no worktree: its `cwd` is still the base.
+    let Some(base) = record
+        .base
+        .as_ref()
+        .filter(|base| record.placement == Placement::Fork && **base != record.cwd)
+    else {
+        return;
+    };
+    let Some(sha) = &record.base_commit else {
+        let _ = writeln!(
+            dir.log(),
+            "[supervisor] patch not kept: the run has no base commit to diff against"
+        );
+        return;
+    };
+    let roots = record.tool_roots();
+    let kept = placement::fork_git_dir(dirs, &record.cwd, base, record.gitdir.as_deref(), &roots)
+        .and_then(|gitdir| {
+            patch::capture(dirs, &record.cwd, &gitdir, sha, &roots).map_err(|fail| fail.message)
+        })
+        .and_then(|bytes| {
+            write_private_atomic(&dir.patch_path(), &bytes).map_err(|fail| fail.message)?;
+            Ok(patch::summarize(&bytes))
+        });
+    match kept {
+        Ok(summary) => record.patch = Some(summary),
+        Err(why) => {
+            let _ = writeln!(dir.log(), "[supervisor] patch not kept: {why}");
+        }
+    }
 }
 
 /// Reads the callee until it exits, stopping it if asked to or if it runs out

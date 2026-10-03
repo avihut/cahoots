@@ -9,7 +9,10 @@
 //! fall out of step with it.
 //!
 //! Everything in it stays on this machine (hard rule 7). It holds no brief, no
-//! answer, no file content: ids, enums, counts, and the working directory.
+//! answer, no file content: ids, enums, counts, the working directory, the
+//! commit a run started from, and for a writer the repo-relative paths it
+//! touched and a hash and line count of each block it changed — derived from
+//! content, never content.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -22,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Fail, Res};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
+use crate::patch::{Commit, PatchSummary};
 use crate::run::record::{RunRecord, State, now};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,11 @@ pub enum Event {
         /// rate of that moment — so changing the rate later never re-selects
         /// history, and nobody chooses which runs get reviewed.
         sampled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_commit: Option<Commit>,
+        /// A fork writer's patch, summed up; it outlives the patch itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patch: Option<PatchSummary>,
     },
     Outcome {
         t: u64,
@@ -112,15 +121,21 @@ pub fn read(dirs: &Dirs) -> Vec<Event> {
         .collect()
 }
 
-/// FNV-1a. Not for security: for a selection nobody gets to steer, that is the
-/// same on every machine and in every version, from the run id alone.
-pub fn is_sampled(run_id: &str, rate: f64) -> bool {
+/// FNV-1a 64. Not for security: the same on every machine and in every
+/// version. The review sample and the patch summary's block hashes are both
+/// this, and changing it re-selects the one and re-hashes the other.
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in run_id.bytes() {
-        hash ^= u64::from(byte);
+    for byte in bytes {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    ((hash % 10_000) as f64) < rate.clamp(0.0, 1.0) * 10_000.0
+    hash
+}
+
+/// A selection nobody gets to steer, from the run id alone.
+pub fn is_sampled(run_id: &str, rate: f64) -> bool {
+    ((fnv1a64(run_id.as_bytes()) % 10_000) as f64) < rate.clamp(0.0, 1.0) * 10_000.0
 }
 
 pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
@@ -140,6 +155,8 @@ pub fn finished(record: &RunRecord, sample_rate: f64) -> Event {
         tokens_out: record.progress.tokens_output,
         secs: ended.saturating_sub(record.started_at.unwrap_or(record.created_at)),
         sampled: is_sampled(&record.id, sample_rate),
+        base_commit: record.base_commit.clone(),
+        patch: record.patch.clone(),
     }
 }
 
@@ -160,6 +177,8 @@ pub struct Story {
     pub tokens_out: u64,
     pub secs: u64,
     pub sampled: bool,
+    pub base_commit: Option<Commit>,
+    pub patch: Option<PatchSummary>,
     /// `None` means unknown — never inferred from anything else.
     pub outcome: Option<Outcome>,
 }
@@ -183,6 +202,8 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                 tokens_out,
                 secs,
                 sampled,
+                base_commit,
+                patch,
             } => {
                 by_run.insert(
                     run,
@@ -201,6 +222,8 @@ pub fn stories(events: &[Event]) -> Vec<Story> {
                         tokens_out: *tokens_out,
                         secs: *secs,
                         sampled: *sampled,
+                        base_commit: base_commit.clone(),
+                        patch: patch.clone(),
                         outcome: None,
                     },
                 );
@@ -275,6 +298,42 @@ mod tests {
             Some(Outcome::Reworked),
             "the last word wins"
         );
+        // A line from before base commits and patches has neither.
+        assert!(stories[0].base_commit.is_none());
+        assert!(stories[0].patch.is_none());
+    }
+
+    #[test]
+    fn the_new_fields_round_trip() {
+        let mut event: Event = serde_json::from_str(OLD_FINISHED).unwrap();
+        // Absent, they are not written at all: a reader's line grows by nothing.
+        let raw = serde_json::to_string(&event).unwrap();
+        assert!(
+            !raw.contains("base_commit") && !raw.contains("patch"),
+            "{raw}"
+        );
+
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let summary = crate::patch::summarize(b"diff --git a/f b/f\n@@ -0,0 +1 @@\n+x\n");
+        if let Event::Finished {
+            base_commit, patch, ..
+        } = &mut event
+        {
+            *base_commit = Commit::parse(sha);
+            *patch = Some(summary.clone());
+        }
+        let raw = serde_json::to_string(&event).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["base_commit"], sha);
+        assert_eq!(json["patch"]["files"][0]["path"], "f");
+        assert!(json["patch"].get("truncated").is_none(), "{raw}");
+        let folded = stories(&[serde_json::from_str(&raw).unwrap()]);
+        assert_eq!(folded[0].base_commit.as_ref().unwrap().as_str(), sha);
+        assert_eq!(folded[0].patch.as_ref(), Some(&summary));
+
+        // A base commit that is not one does not parse, and the line is skipped.
+        let forged = raw.replace(sha, "--exec=x");
+        assert!(serde_json::from_str::<Event>(&forged).is_err());
     }
 
     const OLD_FINISHED: &str = r#"{"kind":"finished","t":10,"run":"a","role":"review","caller":"claude","target":{"harness":"codex","model":"m","effort":"high"},"dir":"/w","state":"done","exit":0,"tokens_in":9,"tokens_out":1,"secs":3,"sampled":true}"#;

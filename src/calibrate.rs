@@ -151,6 +151,8 @@ mod tests {
                 tokens_out: 0,
                 secs: 1,
                 sampled: false,
+                base_commit: None,
+                patch: None,
                 outcome: *outcome,
             })
             .collect()
