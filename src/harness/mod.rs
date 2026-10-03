@@ -354,7 +354,18 @@ mod tests {
                     &["--worktree=x"],
                 ],
             ),
-            (HarnessId::Codex, &[&["--worktree"], &["--worktree=x"]]),
+            // Codex splits the flag off an `=` before matching, so the same
+            // refusal catches a flag's `=` form; `--cd` shows it reaches past
+            // `--worktree` to the others that list splits.
+            (
+                HarnessId::Codex,
+                &[
+                    &["--worktree"],
+                    &["--worktree=x"],
+                    &["--cd", "/"],
+                    &["--cd=/"],
+                ],
+            ),
         ];
         for (id, extras) in refused {
             for role in Role::ALL {
