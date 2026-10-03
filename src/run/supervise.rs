@@ -203,6 +203,16 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     };
     let (stop, stderr_tail) = attend(dir, record, &mut child, pid, watchdog)?;
 
+    // Whatever the callee left running in its process group goes now — a
+    // normal exit included, where no kill ladder ran — before the run is
+    // marked terminal. `changes` (the in-place config comparison, then `git
+    // status`) runs in the reader that reports a terminal run, and a resume
+    // waits for one too; killing the group here means no process of this run
+    // can still be writing the tree, or its `.git/config`, in that window. A
+    // process that left the group (setsid, a double fork) is out of reach;
+    // that residual is in docs/THREAT-MODEL.md.
+    spawn::signal_group(pid, Signal::SIGKILL);
+
     let text = record.progress.final_text.clone().unwrap_or_default();
     write_private(&dir.final_path(), text.as_bytes())?;
 

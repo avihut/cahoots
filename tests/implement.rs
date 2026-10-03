@@ -639,3 +639,29 @@ fn changes_does_not_descend_into_a_submodule() {
         "the control did not report the submodule"
     );
 }
+
+#[test]
+fn a_child_left_behind_cannot_touch_the_tree_after_the_run() {
+    let world = World::new();
+    world.configure("limits.allow_in_place = true");
+    // The callee leaves a child in its process group that writes the tree a
+    // moment after the callee exits. The supervisor kills the group when the
+    // run ends, before any reader reports it, so the child never writes.
+    let answer = implement(
+        &world,
+        "FAKE: leak=race-file.txt\nFAKE: write=edit.txt",
+        &["--in-place"],
+    );
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(
+        world.work.join("edit.txt").is_file(),
+        "the callee's own edit"
+    );
+    // Well past the child's delay: had it outlived the run, it would have
+    // written by now.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(
+        !world.work.join("race-file.txt").exists(),
+        "a child the callee left wrote the tree after the run"
+    );
+}

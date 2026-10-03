@@ -225,16 +225,28 @@ directories under Codex. That is why the caller is told to READ a change
 before running anything in it. A writer cannot commit to the caller's branch,
 and cahoots never merges for anyone. `changes` is read with `git status`
 against the git directory recorded when the worktree was cut, never the one
-the worktree's `.git` names now; a status that fails says so
-(`changes_error`), never "no changes". In place, where the writer had the
-caller's own tree and perhaps its `.git`, `git status` runs only if the git
-configuration it would read — every scope and every included file, as git
-itself resolves them — is byte for byte what it was before the writer
-started; otherwise `changes_error` says the configuration changed, and
-nothing runs. A worktree is removed only when no run on record still works in
-it. One cahoots cut whose git directory then fails the pin is refused before
-the writer starts and left where it is: no run on record points at it, so
-the refusal names its path, for a person to remove.
+the worktree's `.git` names now; and always with `--ignore-submodules=all`,
+so it never descends into a submodule, whose own git directory and config —
+where a writer could name a filter or an fsmonitor command — this does not
+see. A status that fails says so (`changes_error`), never "no changes". In
+place, where the writer had the caller's own tree and perhaps its `.git`,
+`git status` runs only if the git configuration it would read — every scope
+and every included file, as git itself resolves them — is byte for byte what
+it was before the writer started; otherwise `changes_error` says the
+configuration changed, and nothing runs. A resumed in-place run is held to
+the configuration the original run recorded, never a fresh reading, so a
+first writer cannot set the baseline its own resume is judged against. And
+when a run ends — a normal exit included — the supervisor kills the callee's
+whole process group before the run is marked terminal, so no process it left
+behind can still be writing the tree, or its `.git/config`, while `changes`
+is read. A process that left the group (`setsid`, a double fork) is beyond
+that reach, and so is a change `changes` is told to ignore in the submodule
+or outside the configuration it snapshots; the caller is told to read a
+change before trusting it for exactly these reasons. A worktree is removed
+only when no run on record still works in it. One cahoots cut whose git
+directory then fails the pin is refused before the writer starts and left
+where it is: no run on record points at it, so the refusal names its path,
+for a person to remove.
 
 ## Learning is an injection channel
 

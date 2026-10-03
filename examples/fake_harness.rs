@@ -16,6 +16,8 @@
 //! FAKE: write=<name>   "edit": create <name> in the working directory
 //! FAKE: append=<file>::<text>  add <text> to <file> there (`\n`, `\t`
 //!                      for a newline and a tab); as many as the brief has
+//! FAKE: leak=<name>    leave a child in the callee's group that, a moment
+//!                      after the callee exits, writes <name> in the cwd
 //! ```
 
 use std::io::{Read, Write};
@@ -300,6 +302,24 @@ fn main() {
             .spawn()
             .expect("sleep");
         eprintln!("left child {}", child.id());
+    }
+    if let Some(name) = directive("leak") {
+        // A child left in the callee's OWN process group (no `process_group`),
+        // stdio detached so it does not hold the supervisor's pipes open. It
+        // waits, then writes `name` in the working directory: a writer that
+        // tries to touch the tree after the callee is gone. The supervisor
+        // kills the group when the run ends, so it never gets to write.
+        use std::process::Stdio;
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("sleep 1; printf leaked > '{name}'"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("leak");
+        eprintln!("left a child in the group: {}", child.id());
     }
     if let Some(name) = directive("write") {
         std::fs::write(&name, "written by the callee\n").expect("write in cwd");
