@@ -785,6 +785,71 @@ fails "$audit" exclusive tag "$(variant "$tags_record" 'del(.bypass_actors)')"
 said 'its bypass list is not visible to these credentials'
 # Extra fields GitHub adds to a bypass entry change nothing.
 passes "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].node_id = "x"')"
+# refuse:empty-response, refuse:blank-response — zero JSON values is no
+# evidence, in either mode; nor is anything but exactly one object.
+: >"$tmp/empty.json"
+printf ' \n\t\n' >"$tmp/blank.json"
+printf '[]\n' >"$tmp/array.json"
+printf 'not json\n' >"$tmp/not-json.json"
+cat "$tags_record" "$tags_record" >"$tmp/two.json"
+for mode in coverage exclusive; do
+    for kind in tag release-pr; do
+        fails "$audit" "$mode" "$kind" "$tmp/empty.json"
+        said 'not exactly one ruleset object (0 JSON values)'
+        fails "$audit" "$mode" "$kind" "$tmp/blank.json"
+        said 'not exactly one ruleset object (0 JSON values)'
+    done
+    fails "$audit" "$mode" tag "$tmp/array.json"
+    fails "$audit" "$mode" tag "$tmp/two.json"
+    fails "$audit" "$mode" tag "$tmp/not-json.json"
+done
+
+# The complete audit, with gh replaced by canned responses: the list names
+# both rulesets, and each detail response is a file in $FAKE_GH.
+mkdir -p "$tmp/fake-gh-bin" "$tmp/fake-gh"
+cat >"$tmp/fake-gh-bin/gh" <<'GH'
+#!/bin/sh
+[ "$1" = api ] || exit 2
+case $2 in
+repos/avihut/cahoots/rulesets\?*) cat "$FAKE_GH/list.json" ;;
+repos/avihut/cahoots/rulesets/*) cat "$FAKE_GH/${2##*/}.json" ;;
+*) echo "fake gh: no response for $2" >&2; exit 1 ;;
+esac
+GH
+chmod +x "$tmp/fake-gh-bin/gh"
+jq -n --slurpfile t "$tags_record" --slurpfile p "$pr_record" \
+    '[{id: 11, name: $t[0].name}, {id: 12, name: $p[0].name}, {id: 13, name: "main: integrity"}]' >"$tmp/fake-gh/list.json"
+live_audit() { env PATH="$tmp/fake-gh-bin:$PATH" FAKE_GH="$tmp/fake-gh" "$audit"; }
+# pass:audit-live — the records as GitHub would return them.
+cp "$tags_record" "$tmp/fake-gh/11.json"
+cp "$pr_record" "$tmp/fake-gh/12.json"
+passes live_audit
+said 'both release rulesets hold'
+# refuse:audit-empty-details, refuse:audit-blank-details
+: >"$tmp/fake-gh/11.json"
+: >"$tmp/fake-gh/12.json"
+fails live_audit
+said 'not exactly one ruleset object'
+printf '\n  \n' >"$tmp/fake-gh/11.json"
+cp "$pr_record" "$tmp/fake-gh/12.json"
+fails live_audit
+said 'not exactly one ruleset object'
+# refuse:audit-extra-actor, refuse:audit-unseen-bypass, refuse:audit-missing
+cp "$tags_record" "$tmp/fake-gh/11.json"
+jq "$admin" "$pr_record" >"$tmp/fake-gh/12.json"
+fails live_audit
+said 'its bypass list is not exactly the release app'
+jq 'del(.bypass_actors)' "$tags_record" >"$tmp/fake-gh/11.json"
+cp "$pr_record" "$tmp/fake-gh/12.json"
+fails live_audit
+said 'not visible to these credentials'
+cp "$tags_record" "$tmp/fake-gh/11.json"
+jq 'map(select(.id != 12))' "$tmp/fake-gh/list.json" >"$tmp/fake-gh/short.json"
+mv "$tmp/fake-gh/short.json" "$tmp/fake-gh/list.json"
+fails live_audit
+said "has no single ruleset named"
+: >"$tmp/fake-gh/list.json"
+fails live_audit
 
 # ── formula.sh ──────────────────────────────────────────────────────────────
 # A formula written the way dist 0.30 writes one (platform branches, the alias

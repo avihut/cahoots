@@ -37,7 +37,7 @@ say() { printf 'release-rulesets-audit: %s\n' "$1" >&2; }
 # check <coverage|exclusive> <tag|release-pr> <file>: exit 0 when it holds,
 # 1 with the reason on stderr when it doesn't.
 check() {
-    local mode=$1 kind=$2 file=$3 target space includes rules why
+    local mode=$1 kind=$2 file=$3 target space includes rules why name
     case $kind in
     tag)
         target=tag
@@ -56,7 +56,10 @@ check() {
         exit 2
         ;;
     esac
-    why=$(jq -r --arg mode "$mode" --arg target "$target" --arg space "$space" \
+    # Slurped: the input must be exactly one JSON object. An empty or blank
+    # response is zero values, and jq succeeds on zero values — so nothing
+    # but the word "ok" means the ruleset holds.
+    why=$(jq -rs --arg mode "$mode" --arg target "$target" --arg space "$space" \
         --argjson includes "$includes" --argjson rules "$rules" --argjson app "$app_id" '
         def literal: capture("^(?<p>[^*?\\[]*)").p;
         def cancels:
@@ -64,7 +67,10 @@ check() {
             elif startswith("~") then true
             else literal as $l | ($space | startswith($l)) or ($l | startswith($space))
             end;
-        (.conditions.ref_name.include // []) as $inc
+        if length != 1 or (.[0] | type) != "object"
+        then "the response is not exactly one ruleset object (\(length) JSON values)"
+        else .[0]
+        | (.conditions.ref_name.include // []) as $inc
         | (.conditions.ref_name.exclude // []) as $exc
         | [.rules[]?.type] as $have
         | if .enforcement != "active" then "it is not active (enforcement: \(.enforcement // "none"))"
@@ -79,12 +85,14 @@ check() {
             then "its bypass list is not visible to these credentials"
           elif $mode == "exclusive" and ((.bypass_actors | map({actor_id, actor_type, bypass_mode})) != [{actor_id: $app, actor_type: "Integration", bypass_mode: "always"}])
             then "its bypass list is not exactly the release app (\(.bypass_actors | map("\(.actor_type) \(.actor_id // "") \(.bypass_mode)") | join(", ")))"
-          else "" end' "$file") || {
+          else "ok" end
+        end' "$file") || {
         say "$file is not a ruleset"
         return 1
     }
-    if [ -n "$why" ]; then
-        say "$(jq -r '.name // "a ruleset"' "$file") does not reserve $kind for the release app: $why"
+    if [ "$why" != ok ]; then
+        name=$(jq -rs 'if length == 1 and (.[0] | type) == "object" then .[0].name // "a ruleset" else "the response" end' "$file")
+        say "${name:-the response} in $file does not reserve $kind for the release app: ${why:-jq said nothing}"
         return 1
     fi
 }
