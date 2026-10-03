@@ -730,3 +730,76 @@ fn an_unreadable_listed_file_is_a_failure_and_the_rest_done() {
     assert_eq!(fs::read(&delegate).unwrap(), before);
     assert!(gone.exists());
 }
+
+/// A directory that cannot be looked into is not a directory that is gone:
+/// the files under it are failures, counted, kept listed — and the rest done.
+#[test]
+fn a_directory_that_cannot_be_looked_into_is_a_failure_not_gone() {
+    if nix::unistd::geteuid().is_root() {
+        return; // root traverses any mode
+    }
+    let codex_files = [
+        CODEX_DELEGATE,
+        CODEX_SKILL,
+        ".codex/skills/cahoots-review/SKILL.md",
+    ];
+    // Into ~/.codex: its own metadata is there, what is under it is not.
+    let world = world(&[]);
+    installed(&world, None);
+    edit(&world.home.join(CLAUDE_DELEGATE));
+    let manifest = fs::read(world.state.join("install-manifest.json")).unwrap();
+    let codex = world.home.join(".codex");
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = Mode(&codex, 0o755);
+
+    let refreshed = refresh(&world);
+
+    drop(restore);
+    assert_eq!(refreshed.code, 1, "{}", refreshed.json);
+    assert_eq!(refreshed.json["class"], "internal_error");
+    assert_eq!(
+        refreshed.message(),
+        "3 of the files could not be changed: see data.files"
+    );
+    for rel in codex_files {
+        let why = why(&refreshed, &world, rel);
+        assert!(why.starts_with("cannot read: cannot read "), "{rel}: {why}");
+        assert!(world.home.join(rel).exists(), "{rel}");
+    }
+    assert_eq!(outcome(&refreshed, &world, CLAUDE_DELEGATE), "refreshed");
+    assert_eq!(
+        fs::read(world.state.join("install-manifest.json")).unwrap(),
+        manifest
+    );
+
+    // The harness homes' own metadata: the home itself cannot be looked into.
+    let world = self::world(&[]);
+    installed(&world, None);
+    let manifest = fs::read(world.state.join("install-manifest.json")).unwrap();
+    let before = everything(&world);
+    fs::set_permissions(&world.home, fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = Mode(&world.home, 0o755);
+
+    let refreshed = refresh(&world);
+
+    drop(restore);
+    assert_eq!(refreshed.code, 1, "{}", refreshed.json);
+    let files = refreshed.data()["files"].as_array().unwrap();
+    assert_eq!(
+        refreshed.message(),
+        format!(
+            "{} of the files could not be changed: see data.files",
+            files.len()
+        )
+    );
+    for report in files {
+        let why = report["why"].as_str().unwrap_or_default();
+        assert!(why.starts_with("cannot read: cannot read "), "{report}");
+        assert!(!why.contains("does not exist"), "{report}");
+    }
+    assert_eq!(
+        fs::read(world.state.join("install-manifest.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(everything(&world), before);
+}

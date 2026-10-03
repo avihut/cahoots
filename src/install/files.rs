@@ -702,6 +702,27 @@ impl From<Fail> for Failed {
     }
 }
 
+/// What is at `path` (through a link when `follow`): `None` when nothing is
+/// — or a file stands where a directory would be on the way. A lookup that
+/// fails for any other reason (EACCES, a sandbox's EPERM) is a failure to
+/// read, never taken for absence.
+fn looked_up(path: &Path, follow: bool) -> Result<Option<fs::Metadata>, Failed> {
+    let meta = match follow {
+        true => fs::metadata(path),
+        false => fs::symlink_metadata(path),
+    };
+    match meta {
+        Ok(meta) => Ok(Some(meta)),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(None)
+        }
+        Err(error) => Err(Failed::Read(Fail::internal(format!(
+            "cannot read {}: {error}",
+            path.display()
+        )))),
+    }
+}
+
 /// One wanted file, for `refresh` (see its rules there).
 fn refresh_one(
     dirs: &Dirs,
@@ -714,7 +735,7 @@ fn refresh_one(
             why: why.to_string(),
         })
     };
-    if !dirs.home.join(want.needs).is_dir() {
+    if !looked_up(&dirs.home.join(want.needs), true)?.is_some_and(|meta| meta.is_dir()) {
         return skipped(&format!(
             "~/{} does not exist — that harness is not set up here",
             want.needs
@@ -725,10 +746,10 @@ fn refresh_one(
         let Ok(wanted) = &want.text else {
             unreachable!("a listed file with no text is prune's")
         };
-        if fs::symlink_metadata(parent).is_err() {
+        if looked_up(parent, false)?.is_none_or(|meta| meta.is_file()) {
             return skipped(GONE_NOT_WRITTEN_BACK);
         }
-        let dir = match Dir::open_confined(&dirs.home, parent)? {
+        let dir = match Dir::open_confined(&dirs.home, parent).map_err(Failed::Read)? {
             Ok(dir) => dir,
             Err(why) => return skipped(&format!("{why} — left alone")),
         };
