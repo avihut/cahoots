@@ -1111,19 +1111,19 @@ fn an_in_place_writer_cannot_plant_a_filter_for_the_next_cut() {
     );
 }
 
-#[test]
-fn a_cut_is_refused_where_the_repositorys_config_includes_per_worktree() {
-    // An include git reads for each worktree apart can name a filter for a
-    // new worktree alone: the configuration read before the cut, in the tree
-    // it is cut from, does not name it, so it would not be turned off.
-    let world = World::new();
-    let script = filter_script(&world);
-    commit_data(&world);
+/// An include git reads for each worktree apart, naming a filter for a new
+/// linked worktree alone: in the tree the worktree is cut from, nothing
+/// names it. In the repository's own `.git/config`, where a test can put
+/// it, it stands in for one in a person's own config, which a test may not
+/// touch. The control shows the route is live on this machine's git.
+fn plant_a_filter_for_new_worktrees_alone(world: &World) {
+    let script = filter_script(world);
+    commit_data(world);
     let included = world.root.join("per-worktree.gitconfig");
     fs::write(
         &included,
         format!(
-            "[filter \"evil\"]\n\tsmudge = {}\n\trequired = true\n",
+            "[filter \"wt\"]\n\tsmudge = {}\n\trequired = true\n",
             script.display()
         ),
     )
@@ -1133,8 +1133,7 @@ fn a_cut_is_refused_where_the_repositorys_config_includes_per_worktree() {
         "includeIf.gitdir:**/worktrees/**.path",
         path_str(&included),
     ]);
-    attribute_everything(&world, "evil");
-    // In the tree it is cut from, nothing names the filter.
+    attribute_everything(world, "wt");
     let listed = std::process::Command::new("git")
         .args(["config", "--list"])
         .current_dir(&world.work)
@@ -1142,24 +1141,52 @@ fn a_cut_is_refused_where_the_repositorys_config_includes_per_worktree() {
         .output()
         .unwrap();
     assert!(
-        !String::from_utf8_lossy(&listed.stdout).contains("filter.evil"),
+        !String::from_utf8_lossy(&listed.stdout).contains("filter.wt"),
         "the base's own reading names the filter: this test shows nothing"
     );
-    the_route_is_live(&world, "per worktree");
+    the_route_is_live(world, "for new worktrees alone");
+}
 
+#[test]
+fn a_git_cut_turns_off_a_filter_only_the_new_worktree_names() {
+    // git cuts with no checkout, reads the configuration as git reads it in
+    // the new worktree, and checks out with what it names turned off.
+    let world = World::new();
+    plant_a_filter_for_new_worktrees_alone(&world);
+    let answer = fork(&world, &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(!filter_mark(&world).exists(), "the filter ran");
+    let worktree = PathBuf::from(answer.data()["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(worktree.join("data.txt")).unwrap(),
+        "stored\n"
+    );
+    // Exit 0 also means #29's check held: it was checked out at the commit
+    // the run recorded.
+    assert!(
+        worktree.join("callee-ran.txt").is_file(),
+        "the writer ran there"
+    );
+}
+
+#[test]
+fn a_daft_cut_is_refused_where_the_repositorys_config_includes_per_worktree() {
+    // daft checks out as it cuts, so the configuration can be read only in
+    // the tree the worktree is cut from, where this include names nothing.
+    let world = World::new();
+    plant_a_filter_for_new_worktrees_alone(&world);
+    let f1 = world.root.join("forks/f1");
+    world.daft(json!({"make": "worktree", "print": f1}));
     let answer = fork(&world, &[]);
     assert_eq!(answer.code, 33, "{}", answer.json);
     assert_eq!(
         answer.message(),
         "cannot cut a worktree: the repository's own git configuration sets \
          includeif.gitdir:**/worktrees/**.path, an include git reads for each worktree apart — \
-         what it names in a new worktree cannot be read before the cut, so not every filter \
-         could be turned off"
+         what it names in a new worktree cannot be read before daft checks it out, so not every \
+         filter could be turned off"
     );
-    assert_never_ran(&world, &answer, &world.state.join("worktrees"));
+    assert_never_ran(&world, &answer, &f1);
     assert!(!filter_mark(&world).exists(), "the filter ran");
-    assert!(
-        !world.state.join("worktrees").join(answer.run_id()).exists(),
-        "a worktree was cut"
-    );
+    assert!(world.daft_calls().is_empty(), "daft ran");
 }

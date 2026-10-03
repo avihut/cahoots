@@ -32,7 +32,7 @@ use crate::patch::Commit;
 use crate::paths::{self, Workspace};
 use crate::registry::{self, Registry};
 use crate::spawn;
-use provider::{CutSpec, Owner, Place, ProviderId};
+use provider::{Checkout, CutSpec, Owner, Place, ProviderId};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,15 +105,19 @@ pub struct Cut {
 /// daft that is missing or unfit fails the cut; it never falls back to git.
 ///
 /// No repository hook runs, unless a person turned daft's on, and no filter
-/// runs during the checkout: every filter driver the configuration defines
-/// is turned off for the cut, and a driver that appears while it runs fails
-/// it. The tool runs in a process group of its own, killed when it returns.
-/// git's worktree goes where cahoots chooses, under its state directory;
-/// the path daft prints is used only if it is fit for a writer (`unfit`).
-/// `roots` are the directories no tool started here may come from;
-/// `deadline` is the run's own timeout, which shortens the cut's. `at` is
-/// the commit to cut at — the one the run recorded — and with none, the
-/// base's HEAD.
+/// runs during the checkout: every filter driver the configuration names
+/// for the new worktree is turned off, and a driver that appears while the
+/// worktree is checked out fails the cut. git cuts in two steps: the
+/// worktree with no checkout, where cahoots chooses, under its state
+/// directory; then — once the configuration is read as git reads it there,
+/// conditional includes and all — the checkout, by cahoots' own git. daft
+/// checks out as it cuts, so for daft the configuration is read in the tree
+/// it is cut from, and the path daft prints is used only if it is fit for a
+/// writer (`unfit`). Each tool runs in a process group of its own, killed
+/// when it returns. `roots` are the directories no tool started here may
+/// come from; `deadline` is the run's own timeout, which shortens the cut's.
+/// `at` is the commit to cut at — the one the run recorded — and with none,
+/// the base's HEAD.
 pub fn cut(
     dirs: &Dirs,
     fork: &registry::Fork,
@@ -145,26 +149,37 @@ pub fn cut(
     // given these settings too, and a hooks directory that is not empty is
     // refused here, as it always was, before anything cuts.
     let quiet = quiet_git_args(dirs)?;
-    // The filters to turn off are the ones the configuration names now.
-    let listing = config_listing(dirs, base, &roots).map_err(|why| {
-        cut_failed(&format!(
-            "the git configuration could not be read ({why}), so its filters cannot be turned off"
-        ))
-    })?;
-    if let Some(key) = provider::includes_read_per_worktree(&listing).first() {
-        return Err(Fail::policy(format!(
-            "cannot cut a worktree: the repository's own git configuration sets {key}, an \
-             include git reads for each worktree apart — what it names in a new worktree cannot \
-             be read before the cut, so not every filter could be turned off"
-        )));
-    }
-    let filters = provider::filter_drivers(&listing);
-    if hooks && let Some(key) = provider::steering_daft_hooks(&listing).first() {
-        return Err(Fail::policy(format!(
-            "cannot cut a worktree: the repository's own git configuration sets {key} — with \
-             fork.daft.hooks on, it would choose what daft runs"
-        )));
-    }
+    // A tool that checks out as it cuts reads the configuration in the new
+    // worktree before cahoots can: what cahoots turns off is what it reads
+    // in the tree the worktree is cut from, the closest it can get. One that
+    // cuts with no checkout runs no filter, so nothing is turned off for it.
+    let filters = match tool.checkout() {
+        Checkout::Cahoots => BTreeSet::new(),
+        Checkout::Tool => {
+            let listing = config_listing(dirs, base, &roots).map_err(|why| {
+                cut_failed(&format!(
+                    "the git configuration could not be read ({why}), so its filters cannot be \
+                     turned off"
+                ))
+            })?;
+            if let Some(key) = provider::includes_read_per_worktree(&listing).first() {
+                return Err(Fail::policy(format!(
+                    "cannot cut a worktree: the repository's own git configuration sets {key}, an \
+                     include git reads for each worktree apart — what it names in a new worktree \
+                     cannot be read before {} checks it out, so not every filter could be turned \
+                     off",
+                    tool.binary_name()
+                )));
+            }
+            if hooks && let Some(key) = provider::steering_daft_hooks(&listing).first() {
+                return Err(Fail::policy(format!(
+                    "cannot cut a worktree: the repository's own git configuration sets {key} — \
+                     with fork.daft.hooks on, it would choose what daft runs"
+                )));
+            }
+            provider::filter_drivers(&listing)
+        }
+    };
     let before = linked_worktrees(&common)?;
 
     let chosen = match tool.place() {
@@ -194,32 +209,20 @@ pub fn cut(
         _ => None,
     };
 
-    // A filter named while the tool ran was not turned off, and may have
-    // run: the writer does not start there, whatever the tool made of it.
-    let now = config_listing(dirs, base, &roots).map_err(|why| {
-        cut_failed(&format!(
-            "the git configuration could not be read again after the cut ({why}), so a filter \
-             it gained cannot be ruled out"
-        ))
-    })?;
-    let gained: Vec<String> = provider::filter_drivers(&now)
-        .difference(&filters)
-        .map(|name| String::from_utf8_lossy(name).into_owned())
-        .collect();
-    if !gained.is_empty() {
+    // A filter named while the tool checked out was not turned off, and may
+    // have run: the writer does not start there, whatever the tool made of it.
+    if tool.checkout() == Checkout::Tool {
+        let now = config_listing(dirs, base, &roots).map_err(|why| {
+            cut_failed(&format!(
+                "the git configuration could not be read again after the cut ({why}), so a \
+                 filter it gained cannot be ruled out"
+            ))
+        })?;
         let made = chosen
             .as_deref()
             .or(printed.as_deref().map(Path::new))
             .filter(|made| made.is_dir());
-        return Err(Fail::policy(format!(
-            "cannot cut a worktree: the git configuration gained a filter ({}) while the \
-             worktree was cut — refusing to run a writer there{}",
-            gained.join(", "),
-            made.map_or(String::new(), |made| format!(
-                ", and {} is left for a person to remove",
-                made.display()
-            ))
-        )));
+        refuse_gained(&filters, &now, made)?;
     }
 
     let output = match ran.map_err(|fail| did_not_finish(tool.what(), started, deadline, fail))? {
@@ -235,7 +238,7 @@ pub fn cut(
         return Err(cut_failed(&tool.failure(output.status)));
     }
 
-    match chosen {
+    let (worktree, gitdir) = match chosen {
         Some(path) => {
             if !path.is_dir() {
                 return Err(cut_failed(&tool.failure(output.status)));
@@ -249,11 +252,7 @@ pub fn cut(
                     path.display()
                 ))
             })?;
-            Ok(Cut {
-                worktree: path,
-                gitdir,
-                provider: id,
-            })
+            (path, gitdir)
         }
         None => {
             let Some(printed) = printed else {
@@ -277,13 +276,189 @@ pub fn cut(
                     tool.what()
                 ))
             })?;
-            Ok(Cut {
-                worktree,
-                gitdir,
-                provider: id,
-            })
+            (worktree, gitdir)
         }
+    };
+    if tool.checkout() == Checkout::Cahoots {
+        check_out(
+            dirs,
+            &binary,
+            &quiet,
+            (&worktree, &gitdir),
+            &roots,
+            (started, deadline),
+        )?;
     }
+    Ok(Cut {
+        worktree,
+        gitdir,
+        provider: id,
+    })
+}
+
+/// The second step of a cut whose tool cut with no checkout: the git
+/// configuration read as git reads it for the new worktree — through its
+/// pinned git directory, so that a conditional include is weighed for this
+/// worktree — then the checkout, by cahoots' own `git`, with every filter
+/// driver that names turned off, then the configuration read again. The
+/// cut's one deadline covers both steps. Every refusal names the worktree,
+/// for a person to remove: no run on record points at it yet.
+fn check_out(
+    dirs: &Dirs,
+    git: &Path,
+    quiet: &[OsString],
+    (worktree, gitdir): (&Path, &Path),
+    roots: &[&Path],
+    (started, deadline): (Instant, Duration),
+) -> Res<()> {
+    let left = |what: &str| {
+        format!(
+            "{what}, and {} is left there for a person to remove",
+            worktree.display()
+        )
+    };
+    let listing = worktree_config_listing(dirs, worktree, gitdir, roots).map_err(|why| {
+        cut_failed(&left(&format!(
+            "the new worktree's git configuration could not be read ({why}), so its filters \
+             cannot be turned off"
+        )))
+    })?;
+    let filters = provider::filter_drivers(&listing);
+    let argv = checkout_line(quiet, gitdir, worktree)?;
+    let ran = spawn::run_helper_grouped(
+        git,
+        &argv,
+        None,
+        deadline.saturating_sub(started.elapsed()),
+        spawn::helper_path(roots),
+        &cut_git_env(dirs, &filters)?,
+    );
+    // Whether or not it checked out: a filter named meanwhile may have run.
+    let now = worktree_config_listing(dirs, worktree, gitdir, roots).map_err(|why| {
+        cut_failed(&left(&format!(
+            "the new worktree's git configuration could not be read again after the checkout \
+             ({why}), so a filter it gained cannot be ruled out"
+        )))
+    })?;
+    refuse_gained(&filters, &now, Some(worktree))?;
+    let what = format!("the checkout of {}", worktree.display());
+    let output = match ran {
+        Ok(spawn::Grouped::Exited(output)) => output,
+        Ok(spawn::Grouped::OutputHeld) => {
+            return Err(cut_failed(&left(&format!(
+                "{what} left a process holding its output"
+            ))));
+        }
+        Err(fail) => {
+            let fail = did_not_finish(&what, started, deadline, fail);
+            return Err(Fail::new(fail.exit, left(&fail.message)));
+        }
+    };
+    if output.status != Some(0) {
+        return Err(cut_failed(&left(&format!("{what} failed"))));
+    }
+    Ok(())
+}
+
+/// Refuses a cut (33) whose git configuration, read again after it (`now`),
+/// names a filter driver the reading it was cut with (`filters`) did not:
+/// that one was not turned off, and may have run. What the cut made, if it
+/// made anything (`made`), is named for a person to remove.
+fn refuse_gained(filters: &BTreeSet<Vec<u8>>, now: &[u8], made: Option<&Path>) -> Res<()> {
+    let gained: Vec<String> = provider::filter_drivers(now)
+        .difference(filters)
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect();
+    if gained.is_empty() {
+        return Ok(());
+    }
+    Err(Fail::policy(format!(
+        "cannot cut a worktree: the git configuration gained a filter ({}) while the worktree was \
+         cut — refusing to run a writer there{}",
+        gained.join(", "),
+        made.map_or(String::new(), |made| format!(
+            ", and {} is left for a person to remove",
+            made.display()
+        ))
+    )))
+}
+
+/// The checkout cahoots runs in a worktree cut with no checkout: what `git
+/// worktree add` itself runs to check one out — `reset --hard`, never into
+/// a submodule — through the worktree's pinned git directory, the quiet
+/// settings first. Built, then held to exactly that: anything else is a bug
+/// in cahoots, and never runs.
+pub(crate) fn checkout_line(
+    quiet: &[OsString],
+    gitdir: &Path,
+    worktree: &Path,
+) -> Res<Vec<OsString>> {
+    let mut argv = quiet.to_vec();
+    argv.extend(git_dir_args(gitdir, worktree));
+    argv.extend(["reset", "-q", "--hard", "--no-recurse-submodules"].map(OsString::from));
+    check_checkout(quiet, gitdir, worktree, &argv).map_err(|why| {
+        Fail::new(
+            Exit::Internal,
+            format!(
+                "refusing to check a worktree out: {why} (this is a bug in cahoots, not in your \
+                 setup)"
+            ),
+        )
+    })?;
+    Ok(argv)
+}
+
+fn check_checkout(
+    quiet: &[OsString],
+    gitdir: &Path,
+    worktree: &Path,
+    argv: &[OsString],
+) -> Result<(), String> {
+    let told = |at: usize, setting: &str| {
+        argv.get(at).is_some_and(|arg| arg == "-c")
+            && argv
+                .get(at + 1)
+                .and_then(|arg| arg.to_str())
+                .is_some_and(|arg| arg.starts_with(setting))
+    };
+    if !told(0, "core.hooksPath=")
+        || !told(2, "core.fsmonitor=false")
+        || argv.get(..4) != Some(quiet)
+    {
+        return Err(
+            "git is not told first that its hooks are cahoots' empty directory and that there \
+             is no fsmonitor"
+                .to_string(),
+        );
+    }
+    let [git_dir, work_tree] = git_dir_args(gitdir, worktree);
+    let expected: [OsString; 6] = [
+        git_dir,
+        work_tree,
+        "reset".into(),
+        "-q".into(),
+        "--hard".into(),
+        "--no-recurse-submodules".into(),
+    ];
+    if argv[4..] != expected {
+        return Err(format!(
+            "the checkout is not `git --git-dir={} --work-tree={} reset -q --hard \
+             --no-recurse-submodules`",
+            gitdir.display(),
+            worktree.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `--git-dir=<gitdir> --work-tree=<worktree>`: git pointed at a worktree's
+/// pinned git directory, never at what its `.git` file names.
+fn git_dir_args(gitdir: &Path, worktree: &Path) -> [OsString; 2] {
+    let (mut git_dir, mut work_tree) =
+        (OsString::from("--git-dir="), OsString::from("--work-tree="));
+    git_dir.push(gitdir);
+    work_tree.push(worktree);
+    [git_dir, work_tree]
 }
 
 /// The last line with something on it, trimmed: the path a tool printed.
@@ -493,10 +668,35 @@ pub fn changes_in_place(
 /// compared with it after are both this, so that they can only differ where
 /// the configuration did.
 pub fn config_listing(dirs: &Dirs, dir: &Path, roots: &[&Path]) -> Result<Vec<u8>, String> {
+    listing(dirs, dir, None, roots)
+}
+
+/// [`config_listing`] as git reads it for the worktree whose pinned git
+/// directory is `gitdir`: through that directory, never the worktree's
+/// `.git` file, so that a conditional include is weighed for this worktree,
+/// as its checkout weighs it.
+fn worktree_config_listing(
+    dirs: &Dirs,
+    worktree: &Path,
+    gitdir: &Path,
+    roots: &[&Path],
+) -> Result<Vec<u8>, String> {
+    listing(dirs, worktree, Some(gitdir), roots)
+}
+
+fn listing(
+    dirs: &Dirs,
+    dir: &Path,
+    gitdir: Option<&Path>,
+    roots: &[&Path],
+) -> Result<Vec<u8>, String> {
     let mut roots = roots.to_vec();
     roots.push(dir);
     let git = spawn::system_tool("git", &roots).map_err(|fail| fail.message)?;
     let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
+    if let Some(gitdir) = gitdir {
+        args.extend(git_dir_args(gitdir, dir));
+    }
     args.extend(["config", "--list", "--show-origin", "--show-scope", "-z"].map(OsString::from));
     let output = spawn::run_helper_with_env(
         &git,
@@ -523,11 +723,7 @@ fn status(
 ) -> Result<Vec<String>, String> {
     let mut args = quiet_git_args(dirs).map_err(|fail| fail.message)?;
     if let Some(gitdir) = gitdir {
-        let (mut git_dir, mut work_tree) =
-            (OsString::from("--git-dir="), OsString::from("--work-tree="));
-        git_dir.push(gitdir);
-        work_tree.push(tree);
-        args.extend([git_dir, work_tree]);
+        args.extend(git_dir_args(gitdir, tree));
     }
     // `--ignore-submodules=all`: a `git status` recurses into each populated
     // submodule with a child `git status` there, which reads the submodule's
@@ -859,6 +1055,65 @@ mod tests {
         // Nothing to turn off: the quiet settings alone.
         let quiet = cut_git_env(&dirs, &BTreeSet::new()).unwrap();
         assert_eq!(quiet[0], ("GIT_CONFIG_COUNT".into(), "2".into()));
+    }
+
+    #[test]
+    fn the_checkout_is_exactly_a_quiet_reset_through_the_pinned_git_directory() {
+        let quiet: Vec<OsString> = [
+            "-c",
+            "core.hooksPath=/state/no-hooks",
+            "-c",
+            "core.fsmonitor=false",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let (gitdir, worktree) = (
+            Path::new("/r/.git/worktrees/run"),
+            Path::new("/state/worktrees/run"),
+        );
+        let argv = checkout_line(&quiet, gitdir, worktree).unwrap();
+        let mut expected = quiet.clone();
+        expected.extend(
+            [
+                "--git-dir=/r/.git/worktrees/run",
+                "--work-tree=/state/worktrees/run",
+                "reset",
+                "-q",
+                "--hard",
+                "--no-recurse-submodules",
+            ]
+            .map(OsString::from),
+        );
+        assert_eq!(argv, expected);
+        assert!(check_checkout(&quiet, gitdir, worktree, &argv).is_ok());
+        let wrong = |edit: &dyn Fn(&mut Vec<OsString>)| {
+            let mut argv = argv.clone();
+            edit(&mut argv);
+            check_checkout(&quiet, gitdir, worktree, &argv).is_err()
+        };
+        assert!(wrong(&|argv| {
+            argv.drain(0..2);
+        }));
+        assert!(wrong(&|argv| {
+            argv.drain(2..4);
+        }));
+        assert!(wrong(
+            &|argv| argv.retain(|arg| arg != "--no-recurse-submodules")
+        ));
+        assert!(wrong(&|argv| argv.retain(|arg| arg != "--hard")));
+        assert!(wrong(&|argv| argv.push(OsString::from("HEAD~1"))));
+        assert!(wrong(
+            &|argv| argv[4] = OsString::from("--git-dir=/elsewhere")
+        ));
+        assert!(wrong(
+            &|argv| argv[5] = OsString::from("--work-tree=/elsewhere")
+        ));
+        // Told nothing: refused, whatever the rest says.
+        assert!(checkout_line(&[], gitdir, worktree).is_err());
+        assert_eq!(
+            checkout_line(&[], gitdir, worktree).unwrap_err().exit,
+            Exit::Internal
+        );
     }
 
     #[test]

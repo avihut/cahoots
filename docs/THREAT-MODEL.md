@@ -250,18 +250,21 @@ the person's own — is emptied, by its name byte for byte, as configuration
 above every config file, so each filtered file comes up as git stores it.
 That is a known limit: a fork of a Git LFS or git-crypt repository holds
 pointers or ciphertext until the caller runs that setup there. Filters are
-named in configuration, so it is read just before the cut and again after
-it; a filter that appeared in between fails the run before the writer
-starts, though its command may have run by then — a race only a process
-writing the repository's git configuration at that moment can run. The
-configuration is read in the tree the worktree is cut from, and git reads a
-conditional include (`includeIf`) for each worktree apart, so a cut is
-refused while the repository's own configuration has one, or a worktree's
-own configuration has any include: what it named for the new worktree
-alone could not be turned off. A conditional include in the person's own
-configuration that applies to the new worktree and not to the tree it is
-cut from is not read before the cut either; that one is the person's to
-keep to the trees it names. The worktree therefore comes up without the repository's
+named in configuration, and git weighs a conditional include (`includeIf`)
+for each worktree apart, so the configuration is read as git reads it for
+the new worktree: git cuts it with no checkout, and cahoots checks it out
+once it has read the configuration there, through the worktree's pinned git
+directory. It is read again after the checkout; a filter that appeared in
+between fails the run before the writer starts, though its command may have
+run by then — a race only a process writing the repository's git
+configuration at that moment can run. daft checks out as it cuts, so for
+daft the configuration is read in the tree the worktree is cut from, before
+and after: a daft cut is refused while the repository's own configuration
+has a conditional include, or a worktree's own configuration has any
+include, since what it named for the new worktree alone could not be turned
+off. A conditional include in the person's own configuration that applies
+to a new worktree and not to the tree it is cut from is the one thing a
+daft cut cannot read before daft checks it out. The worktree therefore comes up without the repository's
 setup; the caller runs it there, after reading the change. The path `daft`
 prints is used only if it is a directory at the top of a worktree of the same
 repository, not the tree it was cut from or inside it, not inside cahoots'

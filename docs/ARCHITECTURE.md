@@ -281,9 +281,13 @@ or filters: daft gets `--skip-hooks all` unless a person sets
 the one daft starts — gets an empty hooks directory of cahoots' own and no
 fsmonitor, and every filter driver the configuration defines is turned off
 for the cut, so a Git LFS file comes up as its pointer and a git-crypt file
-as its ciphertext. A repository whose own configuration has an include git
-reads for each worktree apart (`includeIf`) is refused: what it names for
-the new worktree cannot be read before the cut. The worktree comes up without the repository's setup,
+as its ciphertext. git cuts in two steps, so that the filters are the ones
+git names for the new worktree, conditional includes (`includeIf`) and all:
+`git worktree add --no-checkout`, then — once cahoots has read the
+configuration through the new worktree's pinned git directory — the
+checkout, by cahoots' own `git reset --hard`. daft checks out as it cuts,
+so a daft cut is refused while the repository's own configuration has an
+include git reads for each worktree apart. The worktree comes up without the repository's setup,
 and the caller runs that there. The tool that cuts runs in a process group
 of its own, killed when the cut returns. The path daft prints is checked before
 a writer runs in it (`placement::unfit`), and the worktree's git directory is

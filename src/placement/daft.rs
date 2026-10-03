@@ -14,7 +14,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-use super::provider::{CutSpec, Owner, Place, Provider, ProviderId};
+use super::provider::{Checkout, CutSpec, Owner, Place, Provider, ProviderId};
 use crate::harness::Version;
 
 pub struct Daft;
@@ -68,6 +68,12 @@ impl Provider for Daft {
 
     fn place(&self) -> Place {
         Place::Printed
+    }
+
+    /// `daft start --fork` checks out as it cuts: it has no way to cut with
+    /// no checkout (daft 1.27.9).
+    fn checkout(&self) -> Checkout {
+        Checkout::Tool
     }
 
     fn owner(&self) -> Owner {

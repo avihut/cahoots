@@ -75,6 +75,17 @@ pub enum Place {
     Printed,
 }
 
+/// Who checks a new worktree out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checkout {
+    /// The tool, as it cuts it. cahoots reads the configuration before it,
+    /// in the tree the worktree is cut from.
+    Tool,
+    /// cahoots, once the tool cut the worktree with no checkout: it reads the
+    /// configuration as git reads it in the new worktree first.
+    Cahoots,
+}
+
 /// Who removes the worktree once it is done with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
@@ -124,6 +135,7 @@ pub trait Provider: Sync {
     /// The command, as a message names it: "`git worktree add`".
     fn what(&self) -> &'static str;
     fn place(&self) -> Place;
+    fn checkout(&self) -> Checkout;
     fn owner(&self) -> Owner;
     /// Why a cut whose tool exited with `status` (not 0), or left nothing
     /// where cahoots chose, did not happen, in this tool's words.
@@ -373,6 +385,8 @@ mod tests {
         assert_eq!(provider(ProviderId::Daft).owner().as_str(), "daft");
         assert_eq!(provider(ProviderId::Git).place(), Place::Chosen);
         assert_eq!(provider(ProviderId::Daft).place(), Place::Printed);
+        assert_eq!(provider(ProviderId::Git).checkout(), Checkout::Cahoots);
+        assert_eq!(provider(ProviderId::Daft).checkout(), Checkout::Tool);
     }
 
     #[test]
@@ -443,6 +457,7 @@ mod tests {
                     "/r/work",
                     "worktree",
                     "add",
+                    "--no-checkout",
                     "--detach",
                     "/s/worktrees/run",
                     rev,
@@ -540,6 +555,17 @@ mod tests {
         let spec = spec(base, Some(&sha), Some(path), false, &quiet);
         let good = git.build_argv(&spec);
         assert!(git.check_argv(&spec, &good).is_ok());
+        // A checkout in the cut itself: before cahoots has read the
+        // configuration as git reads it in the new worktree.
+        let checks_out: Vec<OsString> = good
+            .iter()
+            .filter(|arg| *arg != "--no-checkout")
+            .cloned()
+            .collect();
+        assert!(
+            git.check_argv(&spec, &checks_out).is_err(),
+            "dropping --no-checkout went unnoticed"
+        );
         for drop in [0..2, 2..4, 0..4] {
             let mut argv = good.clone();
             argv.drain(drop.clone());
