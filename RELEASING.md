@@ -28,11 +28,19 @@ calling something 1.0 is a decision, not a side effect). `chore`, `ci`,
 
 ```sh
 daft go main && git pull --ff-only
+mise run formula                  # the Homebrew formula dist would publish, read against Cargo.toml
 mise run release -- --dry-run     # the verdict: what it would cut, and why
 mise run release                  # the commit and the tag. It never pushes.
 git show vX.Y.Z                   # read it. This is what becomes permanent.
 git push origin main vX.Y.Z       # irreversible: the tag can never move
 ```
+
+`mise run formula` renders `cahoots.rb` under `target/distrib` with dist and
+checks it against `Cargo.toml`: name, description, homepage, license, the four
+archives and the binary. It builds no archive, so the checksums in the render
+are placeholders. Read the render too, and compare it with `Formula/daft.rb` in
+`avihut/homebrew-tap`. A fault is fixed in `dist-workspace.toml` or
+`Cargo.toml`, never in the render.
 
 Write the notes first if you want prose rather than a list of subjects: put
 them in `.release-notes/next.md` on any PR (first line: a short title). The
@@ -45,6 +53,11 @@ vX.Y.Z && git reset --hard HEAD~1`, fix, cut again. Once pushed, the
 `release-check` (pre-push) refuses a release that is not whole — a version
 moved without a `release:` subject, a lightweight tag, a tag on the wrong
 commit. `mise run release-reminder` lists what `main` holds unreleased.
+
+dist 0.30 renders no `test do` block and has no setting for one, so
+`brew test cahoots` has nothing to run. After the tag is pushed and the formula
+is in the tap, check it by hand: `brew install avihut/tap/cahoots`,
+`cahoots --version` (it prints the released version), and `brew test cahoots`.
 
 Then publish the crate (crates.io is not part of the workflow, on purpose: a
 registry token does not belong in CI for a one-maintainer project):

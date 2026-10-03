@@ -294,5 +294,44 @@ git commit -q --allow-empty -m 'feat(cli)!: a verb changed its meaning'
 passes "$scripts/release.sh"
 passes test "$(git log -1 --format=%s)" = 'release: v0.4.0'
 
+# ── formula.sh ──────────────────────────────────────────────────────────────
+# A formula in the shape dist renders it, built from this repository's own
+# Cargo.toml (the check reads the same file); no dist, no network.
+cargo_field() { sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" "$root/Cargo.toml" | head -1; }
+formula="$tmp/cahoots.rb"
+{
+    echo 'class Cahoots < Formula'
+    echo "  desc \"$(cargo_field description)\""
+    echo "  homepage \"$(cargo_field homepage)\""
+    echo "  version \"$(cargo_field version)\""
+    for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+        echo "      url \"$(cargo_field repository)/releases/download/v$(cargo_field version)/cahoots-$target.tar.xz\""
+        echo "      sha256 \"$(printf '%064d' 0)\""
+        echo '      bin.install "cahoots"'
+    done
+    echo '  license any_of: ["MIT", "Apache-2.0"]'
+} >"$formula"
+passes "$scripts/formula.sh" --check "$formula"
+fails "$scripts/formula.sh" --check "$tmp/no-such-formula.rb"
+fails "$scripts/formula.sh" --check
+# Each thing the check reads, taken out of (or changed in) an otherwise good
+# formula: the description, a target's archive, a checksum, the license, the
+# binary. Real files, not process substitution: the check reads one many times.
+broken="$tmp/broken.rb"
+refuses_formula() { # <what is wrong> <sed expression>
+    sed "$2" "$formula" >"$broken"
+    fails "$scripts/formula.sh" --check "$broken"
+    grep -q "$1" "$out" || {
+        cat "$out" >&2
+        echo "test-hooks: formula.sh refused, but not over: $1" >&2
+        exit 1
+    }
+}
+refuses_formula 'desc' 's/^  desc .*/  desc "something else"/'
+refuses_formula 'x86_64-apple-darwin.tar.xz' '/x86_64-apple-darwin.tar.xz/d'
+refuses_formula 'no sha256' '/^      sha256 /d'
+refuses_formula 'Apache-2.0' 's/"MIT", "Apache-2.0"/"MIT"/'
+refuses_formula 'bin.install' 's/bin.install "cahoots"/bin.install "other"/'
+
 cd "$root"
 echo "test-hooks: $checks checks passed"
