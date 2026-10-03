@@ -507,7 +507,10 @@ the data directory (`~/.local/share/cahoots`), which nothing ages out:
   or `testdata` directory, or named like `foo_test.go`, `test_foo.py`,
   `foo.test.ts` or `FooTest.java` (`evals::is_test_path`) — goes to
   `tests.diff`, the rest to `solution.diff`. Sections are independent, so
-  each file applies on its own at `base_commit`. A patch with no test file
+  each file applies on its own at `base_commit` — except where a file became
+  a directory, or the reverse, and the two paths fall on either side of the
+  split (compared without quotes and without case). Then one diff would not
+  apply without the other, and the run makes no task. A patch with no test file
   still makes a task, with no hidden tests. Rust's inline `#[cfg(test)]`
   modules count as solution.
 - **Only an accepted writer's own answer.** The run must be finished, an

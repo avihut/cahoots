@@ -186,6 +186,14 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
     if path.symlink_metadata().is_ok() {
         return Err(in_the_suite());
     }
+    let sections = patch::sections(&patch);
+    if let Some((test, other)) = straddling(&sections) {
+        return Err(refused(format!(
+            "run {run}'s change puts a file where a directory was, or the reverse, across its \
+             tests and the rest ({test} and {other}), so its hidden tests would not apply on \
+             their own"
+        )));
+    }
 
     let mut roots = invoker.to_vec();
     roots.extend(record.tool_roots());
@@ -218,7 +226,7 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
 
     let (mut tests, mut solution) = (Vec::new(), Vec::new());
     let (mut hidden_tests, mut rest) = (Vec::new(), Vec::new());
-    for section in patch::sections(&patch) {
+    for section in sections {
         if is_test_path(&section.path) {
             tests.extend_from_slice(section.bytes);
             hidden_tests.push(section.path);
@@ -448,15 +456,64 @@ fn check(
     })
 }
 
+/// A path as a patch prints it, without the one pair of quotes git puts
+/// around a C-quoted path. The escapes inside are kept, never decoded.
+fn unquoted(path: &str) -> &str {
+    path.strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(path)
+}
+
+/// A hidden test and a file of the rest where one is under the other: a
+/// file that became a directory, or the reverse, or a link in the way.
+/// Applied apart, at the base, one of the two diffs would then fail, so such
+/// a run makes no task. A change like that wholly on one side applies, in
+/// git's order, within its one diff. Compared without the quotes, and
+/// without regard to case, since a filesystem may not tell `Tests` from
+/// `tests`.
+fn straddling<'a>(sections: &'a [patch::Section<'_>]) -> Option<(&'a str, &'a str)> {
+    let key = |path: &str| unquoted(path).to_ascii_lowercase();
+    // Every directory each path is in, as a key: `a/b/c` is in `a` and `a/b`.
+    let ancestors = |key: &str| -> Vec<String> {
+        key.match_indices('/')
+            .map(|(at, _)| key[..at].to_string())
+            .collect()
+    };
+    let (tests, rest): (Vec<_>, Vec<_>) = sections
+        .iter()
+        .map(|section| (section.path.as_str(), key(&section.path)))
+        .partition(|(path, _)| is_test_path(path));
+    let index = |side: &[(&'a str, String)]| {
+        let mut files = std::collections::HashMap::new();
+        let mut dirs = std::collections::HashMap::new();
+        for (path, key) in side {
+            files.insert(key.clone(), *path);
+            for dir in ancestors(key) {
+                dirs.entry(dir).or_insert(*path);
+            }
+        }
+        (files, dirs)
+    };
+    let (rest_files, rest_dirs) = index(&rest);
+    for (test, key) in &tests {
+        // A file of the rest where the test's directory is, or under the test.
+        let other = ancestors(key)
+            .iter()
+            .find_map(|dir| rest_files.get(dir))
+            .or_else(|| rest_dirs.get(key));
+        if let Some(other) = other {
+            return Some((test, other));
+        }
+    }
+    None
+}
+
 /// Whether a file in a patch is a test, by its path alone (as the patch
 /// prints it, C-quoted when git quotes it). A directory named for tests, or
 /// a file named like one in the common languages. Rust's inline
 /// `#[cfg(test)]` modules live in source files, and count as solution.
 pub fn is_test_path(path: &str) -> bool {
-    let path = path
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .unwrap_or(path);
+    let path = unquoted(path);
     let parts: Vec<&str> = path.split('/').collect();
     let (file, dirs) = parts.split_last().unwrap_or((&"", &[]));
     const DIRS: [&str; 6] = ["test", "tests", "__tests__", "spec", "specs", "testdata"];
@@ -517,6 +574,53 @@ mod tests {
         ] {
             assert!(!is_test_path(path), "{path} is not a test");
         }
+    }
+
+    #[test]
+    fn a_file_turned_directory_across_the_split_is_found() {
+        let found = |paths: &[&str]| {
+            let patch: String = paths
+                .iter()
+                .map(|path| match path.strip_prefix('"') {
+                    Some(_) => {
+                        let inner = &path[1..path.len() - 1];
+                        format!("diff --git \"a/{inner}\" \"b/{inner}\"\n@@ -0,0 +1 @@\n+x\n")
+                    }
+                    None => format!("diff --git a/{path} b/{path}\n@@ -0,0 +1 @@\n+x\n"),
+                })
+                .collect();
+            straddling(&patch::sections(patch.as_bytes()))
+                .map(|(test, other)| (test.to_string(), other.to_string()))
+        };
+        let pair = |test: &str, other: &str| Some((test.to_string(), other.to_string()));
+        // A file of the rest where a test's directory is.
+        assert_eq!(
+            found(&["tests", "tests/new_test.rs"]),
+            pair("tests/new_test.rs", "tests")
+        );
+        // A file of the rest where a test was, under its directory.
+        assert_eq!(
+            found(&["spec", "spec/foo_spec.rb"]),
+            pair("spec/foo_spec.rb", "spec")
+        );
+        // A test file where a directory of the rest is.
+        assert_eq!(
+            found(&["src/foo_test.go", "src/foo_test.go/x.rs"]),
+            pair("src/foo_test.go", "src/foo_test.go/x.rs")
+        );
+        // Quotes are not part of the path, and case does not tell them apart.
+        assert_eq!(
+            found(&["Tests", "\"tests/caf\\303\\251.rs\""]),
+            pair("\"tests/caf\\303\\251.rs\"", "Tests")
+        );
+        // Wholly on one side, or merely alike, it is nothing.
+        assert_eq!(found(&["tests/fixtures", "tests/fixtures/x"]), None);
+        assert_eq!(found(&["src/data", "src/data/x"]), None);
+        assert_eq!(
+            found(&["src/lib.rs", "src/lib.rs.orig", "tests/a.rs"]),
+            None
+        );
+        assert_eq!(found(&["tests2", "tests/a.rs"]), None);
     }
 
     #[test]

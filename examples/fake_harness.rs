@@ -19,14 +19,16 @@
 //! FAKE: leak=<name>    leave a child in the callee's group that, a moment
 //!                      after the callee exits, writes <name> in the cwd
 //! FAKE: remove=<name>  delete <name> (before `write` and `append`)
+//! FAKE: rmdir=<dir>    remove the empty directory <dir> (after `remove`)
+//! FAKE: mkdir=<dir>    make the directory <dir> (after `rmdir`)
 //! FAKE: commit         commit everything there (after `write` and `append`)
 //! FAKE: bytes=<name>   write bytes that are not UTF-8, with a CRLF
 //! FAKE: link=<name>=<target>  make <name> a link to <target>
 //! FAKE: hardlink=<name>=<target>  make <name> a hard link to <target>
 //! ```
 //!
-//! In this order: `child`, `leak`, `remove`, `write`, every `append`, then
-//! `commit`, `bytes`, `link`, `hardlink`, and last `sleep`.
+//! In this order: `child`, `leak`, `remove`, `rmdir`, `mkdir`, `write`, every
+//! `append`, then `commit`, `bytes`, `link`, `hardlink`, and last `sleep`.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -351,6 +353,12 @@ fn main() {
     }
     if let Some(name) = directive("remove") {
         std::fs::remove_file(&name).expect("remove in cwd");
+    }
+    if let Some(dir) = directive("rmdir") {
+        std::fs::remove_dir(&dir).expect("rmdir in cwd");
+    }
+    if let Some(dir) = directive("mkdir") {
+        std::fs::create_dir_all(&dir).expect("mkdir in cwd");
     }
     if let Some(name) = directive("write") {
         std::fs::write(&name, "written by the callee\n").expect("write in cwd");

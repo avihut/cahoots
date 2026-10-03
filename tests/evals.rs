@@ -648,3 +648,92 @@ fn a_planted_git_leaves_list_standing_and_remove_needs_no_git() {
     assert_eq!(removed.code, 0, "{}", removed.json);
     assert!(!task_dir(&world, &id).exists());
 }
+
+/// Commits `files` (`path`, contents) in the world's repository.
+fn commit_files(world: &World, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = world.work.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    world.git(&["add", "-A", "--", "."]);
+    world.git(&["commit", "-q", "-m", "chore: a base"]);
+}
+
+/// `evals add` of an accepted run made from `brief`, which must be refused
+/// for putting a file where a directory was across the split, leaving nothing.
+fn refused_across_the_split(world: &World, brief: &str, test: &str, other: &str) {
+    let id = world.accepted_writer(brief, &[]).run_id();
+    let refused = at(world, &["evals", "add", &id]);
+    assert_eq!(refused.code, 2, "{}", refused.json);
+    assert_eq!(
+        message(&refused),
+        format!(
+            "run {id}'s change puts a file where a directory was, or the reverse, across its \
+             tests and the rest ({test} and {other}), so its hidden tests would not apply on \
+             their own"
+        )
+    );
+    assert!(tree(&world.data).is_empty(), "{:?}", tree(&world.data));
+}
+
+#[test]
+fn a_file_that_became_the_tests_directory_is_refused() {
+    let world = World::new();
+    commit_files(&world, &[("tests", "a file, not a directory\n")]);
+    refused_across_the_split(
+        &world,
+        "FAKE: remove=tests\nFAKE: mkdir=tests\nFAKE: append=tests/new_test.rs::#[test] fn new() {}\\n\n",
+        "tests/new_test.rs",
+        "tests",
+    );
+}
+
+#[test]
+fn a_test_directory_that_became_a_file_is_refused() {
+    let world = World::new();
+    commit_files(&world, &[("spec/foo_spec.rb", "it works\n")]);
+    refused_across_the_split(
+        &world,
+        "FAKE: remove=spec/foo_spec.rb\nFAKE: rmdir=spec\nFAKE: write=spec\n",
+        "spec/foo_spec.rb",
+        "spec",
+    );
+}
+
+#[test]
+fn a_file_that_became_a_directory_on_the_tests_side_alone_makes_a_task() {
+    let world = World::new();
+    commit_files(&world, &[("tests/fixtures", "a file, not a directory\n")]);
+    let run = world.accepted_writer(
+        "FAKE: remove=tests/fixtures\nFAKE: mkdir=tests/fixtures\nFAKE: append=tests/fixtures/x::new\\n\n",
+        &[],
+    );
+    let id = run.run_id();
+    let added = at(&world, &["evals", "add", &id]);
+    assert_eq!(added.code, 0, "{}", added.json);
+    let data = &added.json["data"];
+    assert_eq!(
+        strings(&data["hidden_tests"]),
+        ["tests/fixtures", "tests/fixtures/x"]
+    );
+    assert_eq!(data["solution"], serde_json::json!([]));
+    // The hidden tests apply on their own at the base, and rebuild the tree.
+    let base = data["base_commit"].as_str().unwrap();
+    let replay = world.root.join("replay");
+    world.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        replay.to_str().unwrap(),
+        base,
+    ]);
+    let tests = task_dir(&world, &id).join("tests.diff");
+    git_in(&replay, &["apply", tests.to_str().unwrap()]);
+    let writer = PathBuf::from(run.data()["worktree"].as_str().unwrap());
+    assert_eq!(
+        fs::read(replay.join("tests/fixtures/x")).unwrap(),
+        fs::read(writer.join("tests/fixtures/x")).unwrap()
+    );
+}
