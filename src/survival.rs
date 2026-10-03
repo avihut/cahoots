@@ -443,9 +443,9 @@ pub fn due<'a>(stories: &'a [Story], superseded: &BTreeSet<String>, now: u64) ->
     due
 }
 
-/// Measures every due run once, oldest first, while `REPORT_BUDGET` lasts,
-/// and appends each measurement, best effort. What it measured comes back
-/// either way, for `report` to fold in.
+/// Measures every due run once, oldest first, within `REPORT_BUDGET`, and
+/// appends each measurement, best effort. What it measured comes back either
+/// way, for `report` to fold in; what it did not reach stays pending.
 pub fn catch_up(
     dirs: &Dirs,
     stories: &[Story],
@@ -454,17 +454,36 @@ pub fn catch_up(
     roots: &[&Path],
 ) -> CatchUp {
     let started = Instant::now();
-    let mut caught = CatchUp::default();
+    let mut events = Vec::new();
     let due = due(stories, superseded, now);
-    for (at, story) in due.iter().enumerate() {
-        if started.elapsed() >= REPORT_BUDGET {
-            caught.pending = due.len() - at;
-            break;
+    let pending = within(
+        &due,
+        REPORT_BUDGET,
+        DEADLINE,
+        || started.elapsed(),
+        |story| events.push(record(dirs, story, roots).0),
+    );
+    CatchUp { events, pending }
+}
+
+/// Takes `due` in its order while a whole `deadline` still fits in what is
+/// left of `budget` (`spent` says how much is gone), and returns how many it
+/// did not take. A measurement is never started that the budget would cut
+/// short: one cut short would be recorded unknown, and never tried again.
+fn within<T>(
+    due: &[T],
+    budget: Duration,
+    deadline: Duration,
+    spent: impl Fn() -> Duration,
+    mut take: impl FnMut(&T),
+) -> usize {
+    for (at, item) in due.iter().enumerate() {
+        if spent().saturating_add(deadline) > budget {
+            return due.len() - at;
         }
-        let (event, _) = record(dirs, story, roots);
-        caught.events.push(event);
+        take(item);
     }
-    caught
+    0
 }
 
 #[cfg(test)]
@@ -675,6 +694,58 @@ mod tests {
             due: false,
         }]);
         assert_eq!(thirds.settled.unwrap().share, Some(0.33));
+    }
+
+    #[test]
+    fn report_starts_a_measurement_only_when_a_whole_deadline_fits() {
+        use std::cell::Cell;
+        let secs = Duration::from_secs;
+        // Each measurement takes 7 s of a 30 s budget, with an 8 s deadline:
+        // started at 0, 7, 14 and 21 (21 + 8 = 29); not at 28.
+        let clock = Cell::new(Duration::ZERO);
+        let mut taken = Vec::new();
+        let due = ["oldest", "second", "third", "fourth", "fifth", "newest"];
+        let pending = within(
+            &due,
+            secs(30),
+            secs(8),
+            || clock.get(),
+            |run| {
+                taken.push(*run);
+                clock.set(clock.get() + secs(7));
+            },
+        );
+        assert_eq!(taken, ["oldest", "second", "third", "fourth"]);
+        assert_eq!(pending, 2);
+
+        // Exactly a deadline left is enough; a moment less is not.
+        let at = |spent: Duration| {
+            let mut taken = 0;
+            let pending = within(&[()], secs(30), secs(8), || spent, |_| taken += 1);
+            (taken, pending)
+        };
+        assert_eq!(at(secs(22)), (1, 0));
+        assert_eq!(at(secs(22) + Duration::from_millis(1)), (0, 1));
+        assert_eq!(at(secs(40)), (0, 1));
+        // Nothing due, nothing pending.
+        assert_eq!(within::<()>(&[], secs(30), secs(8), || secs(0), |_| {}), 0);
+    }
+
+    #[test]
+    fn the_due_runs_are_taken_oldest_first() {
+        let runs = vec![story("c", 30), story("a", 10), story("b", 20)];
+        let now = 30 + WINDOW_SECS;
+        let order: Vec<&str> = due(&runs, &BTreeSet::new(), now)
+            .iter()
+            .map(|story| story.run.as_str())
+            .collect();
+        assert_eq!(order, ["a", "b", "c"]);
+        // Not yet due, or superseded: not taken.
+        let order: Vec<&str> = due(&runs, &BTreeSet::from(["a".to_string()]), now - 10)
+            .iter()
+            .map(|story| story.run.as_str())
+            .collect();
+        assert_eq!(order, ["b"]);
     }
 
     #[test]

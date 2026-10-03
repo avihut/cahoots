@@ -506,7 +506,10 @@ mod tests {
             sampled: false,
             base_commit: None,
             patch: None,
+            resumed_from: None,
+            base_repo: None,
             outcome,
+            measures: Vec::new(),
         }
     }
 

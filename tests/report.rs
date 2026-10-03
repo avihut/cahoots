@@ -236,7 +236,8 @@ fn report_seeds_every_current_kind_candidate() {
         bare.json,
         json!({"v":1,"code":0,"class":"ok","retry":"never","data":{
             "days":30,"runs":0,"sample_floor":8,
-            "by_role_and_target":{},"by_kind_and_target":{}
+            "by_role_and_target":{},"by_kind_and_target":{},
+            "survival":{"window_days":14,"measured":0,"pending":0}
         }})
     );
 }

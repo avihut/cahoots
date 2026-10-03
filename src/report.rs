@@ -177,8 +177,7 @@ impl Tally {
         self.row.median_secs = self.secs.get(self.secs.len() / 2).copied().unwrap_or(0);
         self.evidence.finish();
         self.row.evidence = view(&self.evidence);
-        self.row.survival =
-            (!self.standings.is_empty()).then(|| survival::tally(&self.standings));
+        self.row.survival = (!self.standings.is_empty()).then(|| survival::tally(&self.standings));
         self.row
     }
 }
@@ -622,7 +621,10 @@ mod tests {
         let summary = summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 100);
         assert_eq!(summary.runs, 1);
         assert_eq!(summary.by_kind_and_target.values().next().unwrap().runs, 1);
-        assert_eq!(summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 101).runs, 0);
+        assert_eq!(
+            summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 101).runs,
+            0
+        );
         assert!(
             summarize(&stories, &BTreeMap::new(), &BTreeMap::new(), 101)
                 .by_kind_and_target
@@ -683,7 +685,15 @@ mod tests {
     fn a_row_shows_survival_only_for_the_runs_measured() {
         let target = candidate("m", Effort::High);
         let stories = vec![
-            story("w", 5, Some("rust-fix"), Role::Implement, &target, State::Done, None),
+            story(
+                "w",
+                5,
+                Some("rust-fix"),
+                Role::Implement,
+                &target,
+                State::Done,
+                None,
+            ),
             story("r", 5, None, Role::Advise, &target, State::Done, None),
         ];
         let plain = rows(&stories, &BTreeMap::new());
