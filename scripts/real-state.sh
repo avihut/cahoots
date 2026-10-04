@@ -16,7 +16,7 @@
 # the machines that run the suite, so a real run elsewhere meanwhile can trip
 # it too (#75) — and then the answer is to rerun, not to excuse. To tell the
 # two apart, a failure names every changed path, says whether it is one a run
-# writes or one only `install`, `refresh` and `settings` do, and says whether
+# writes or one normal runs do not write, and says whether
 # a real cahoots was seen running meanwhile. Seen or not, the guard fails.
 #
 # A real cahoots is a process whose argv[0] is named `cahoots` and is not a
@@ -186,7 +186,7 @@ guard)
                 printf '    %s\n' "${run_paths[@]}"
             fi
             if [ ${#other_paths[@]} -gt 0 ]; then
-                echo "  What only install, refresh and settings write — never a run:"
+                echo "  Paths normal runs do not write:"
                 printf '    %s\n' "${other_paths[@]}"
             fi
             if [ -n "$seen" ]; then

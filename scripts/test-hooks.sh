@@ -173,7 +173,7 @@ said "$fake_home/.local/bin/cahoots"
 # What no run writes changed while it ran: it fails, names it, and says a test
 # likely did it.
 fails guard /bin/sh -c "echo 'schema = 2' >'$fake_home/.config/cahoots/config.toml'"
-said "never a run:"
+said "Paths normal runs do not write:"
 said "$fake_home/.config/cahoots/config.toml"
 said "But no run writes the second list: $likely"
 real_stopped
