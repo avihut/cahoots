@@ -134,7 +134,7 @@ description = "Check a PR's title and, for the release PR, its diff (env: PR_TIT
 run = "scripts/pr-title.sh"
 
 [tasks.release-rulesets-audit]
-description = "The driver's audit, with the maintainer's gh credentials: both release rulesets are active, cover their refs, and let only the release app bypass them (args: coverage|exclusive <tag|release-pr> <ruleset.json> for the pure check)"
+description = "The driver's audit, with the maintainer's gh credentials: the three release rulesets are active and cover their refs; only the release app bypasses the two it reserves, and nobody bypasses `release tags are immutable` (args: coverage|exclusive|sealed <tag|release-pr|tag-immutable> <ruleset.json> for the pure check)"
 run = "scripts/release-rulesets-audit.sh"
 
 [tasks.formula]
