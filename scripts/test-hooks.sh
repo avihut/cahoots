@@ -191,20 +191,37 @@ done
 
 # The sampler dying mid-look, by a TERM (how it was once stopped, #87),
 # neither breaks the guard nor lets a change through: nothing changed still
-# passes, and a change still fails, in words. A command that kills its
-# sibling under the guard — the sampler — does it here.
-cat >"$tmp/kill-sampler" <<'EOF'
+# passes, and a change still fails, in words. The helper runs directly under
+# the guard, so its sibling there is the sampler: it kills it, records how
+# many it saw die, and only then makes its change, if it was given one.
+cat >"$tmp/kill-sampler" <<EOF
 #!/bin/sh
-for pid in $(ps -A -o pid=,ppid= | awk -v guard="$PPID" -v me="$$" '$2 == guard && $1 != me { print $1 }'); do
-    kill -TERM "$pid" 2>/dev/null || true
+dead=0
+for pid in \$(ps -A -o pid=,ppid= | awk -v guard="\$PPID" -v me="\$\$" '\$2 == guard && \$1 != me { print \$1 }'); do
+    kill -TERM "\$pid" 2>/dev/null || continue
+    tries=0
+    while ps -o stat= -p "\$pid" | grep -qv '^Z'; do
+        tries=\$((tries + 1))
+        [ "\$tries" -lt 50 ] || exit 1
+        sleep 0.05
+    done
+    dead=\$((dead + 1))
 done
-sleep 0.3
+echo "\$dead" >'$tmp/sampler-dead'
+[ \$# -eq 0 ] || { mkdir -p "\$1" && echo '{}' >"\$1/run.json"; }
 EOF
 chmod +x "$tmp/kill-sampler"
+sampler_died() {
+    [ "$(cat "$tmp/sampler-dead")" = 1 ] || { echo "test-hooks: kill-sampler killed $(cat "$tmp/sampler-dead") samplers, not 1" >&2; exit 1; }
+    rm "$tmp/sampler-dead"
+}
 real_running "$fake_home/.local/bin/cahoots"
 passes guard "$tmp/kill-sampler"
-fails guard /bin/sh -c "'$tmp/kill-sampler' && $(new_run killed)"
+sampler_died
+fails guard "$tmp/kill-sampler" "$fake_state/runs/killed"
+sampler_died
 said "What a run writes:"
+said "$fake_state/runs/killed/run.json"
 real_stopped
 # Quick commands, back to back: each one's sampler is gone before it ends.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
