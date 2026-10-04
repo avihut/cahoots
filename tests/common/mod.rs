@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -954,6 +955,9 @@ impl AtTerminal {
                 Stdout::Piped => Stdio::piped(),
                 Stdout::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
             });
+        // A group of its own, so that ending the session can end everything
+        // the command started, not only the command.
+        command.process_group(0);
         let child = command.spawn().expect("cahoots starts");
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
@@ -1044,6 +1048,25 @@ impl AtTerminal {
             json,
             screen,
             mode: tcgetattr(self.slave.as_fd()).expect("the terminal's mode"),
+        }
+    }
+}
+
+/// However the session ends (`finish`, a failed assertion, a panic in
+/// `wait_for`, or no `finish` at all), the command and its group are gone with
+/// it: a `Child` that is dropped is left running (#85).
+impl Drop for AtTerminal {
+    fn drop(&mut self) {
+        // The group is the command's own, and what the command started may
+        // outlive it, so it is signalled even when the command has exited (a
+        // group that is gone is no error). A group's id is not reused while
+        // any of it lives, and not within a test's span otherwise.
+        let group = nix::unistd::Pid::from_raw(self.child.id() as i32);
+        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        let _ = self.child.wait();
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }

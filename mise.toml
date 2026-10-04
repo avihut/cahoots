@@ -68,7 +68,10 @@ description = "The whole suite — no real harness is ever called, no network is
 # person actually has — their cahoots config/state, or what `install` puts in
 # their agent homes. Even a real cahoots running meanwhile trips it; the
 # message says when one did, and then the answer is to rerun.
-run = "scripts/no-warnings.sh scripts/real-state.sh guard env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
+#
+# And in the stray-process check: a test that drives a terminal must end its
+# command, so nothing from target/ is left running when the suite returns (#85).
+run = "scripts/no-warnings.sh scripts/no-strays.sh scripts/real-state.sh guard env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
 
 [tasks.smoke]
 description = "LOCAL ONLY: one tiny REAL run in each direction (costs a little of both plans) — never part of check-all or CI"

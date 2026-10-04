@@ -89,6 +89,39 @@ fails "$scripts/no-warnings.sh" /bin/sh -c 'exit 7'
 fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "warning: package diagnostic" >&2'
 fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "ld: warning: linker diagnostic"'
 
+# ── no-strays.sh ────────────────────────────────────────────────────────────
+# A program "under the build directory" is only its argv[0] to ps, so a
+# `sleep` is started under that name (a copied system binary would be killed
+# by macOS for its broken signature).
+strays_target="$tmp/strays-target"
+fake="$strays_target/debug/cahoots"
+mkdir -p "$strays_target/debug"
+no_strays() { env NO_STRAYS_TARGET="$strays_target" NO_STRAYS_GRACE=3 "$scripts/no-strays.sh" "$@"; }
+# `$tmp/fake-run <seconds> [background]`: a sleep whose program is the fake.
+cat >"$tmp/fake-run" <<'SCRIPT'
+#!/usr/bin/env bash
+fake="$(dirname "$0")/strays-target/debug/cahoots"
+if [ "${2:-}" = background ]; then
+    (exec -a "$fake" sleep "$1") >/dev/null 2>&1 &
+else
+    exec -a "$fake" sleep "$1"
+fi
+SCRIPT
+chmod +x "$tmp/fake-run"
+passes no_strays /bin/sh -c 'echo clean'
+passes no_strays "$tmp/fake-run" 0
+exits 7 no_strays /bin/sh -c 'exit 7'
+# Still winding down when the command returns, gone within the grace period.
+passes no_strays "$tmp/fake-run" 1 background
+# Left running for good: refused, and named.
+fails no_strays "$tmp/fake-run" 30 background
+said "$fake 30"
+pkill -f "$fake 30" 2>/dev/null || true
+# One an earlier run left is not this command's.
+"$tmp/fake-run" 31 background
+passes no_strays /bin/sh -c 'echo clean'
+pkill -f "$fake 31" 2>/dev/null || true
+
 # ── real-state.sh ───────────────────────────────────────────────────────────
 fake_home="$tmp/fake-home"
 mkdir -p "$fake_home/.claude/skills/cahoots" "$fake_home/.codex"
