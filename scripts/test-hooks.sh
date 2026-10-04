@@ -189,6 +189,28 @@ for build in "$fake_home/src/target/debug/cahoots" "$fake_home/project/feat/x/bi
     real_stopped
 done
 
+# The sampler dying mid-look, by a TERM (how it was once stopped, #87),
+# neither breaks the guard nor lets a change through: nothing changed still
+# passes, and a change still fails, in words. A command that kills its
+# sibling under the guard — the sampler — does it here.
+cat >"$tmp/kill-sampler" <<'EOF'
+#!/bin/sh
+for pid in $(ps -A -o pid=,ppid= | awk -v guard="$PPID" -v me="$$" '$2 == guard && $1 != me { print $1 }'); do
+    kill -TERM "$pid" 2>/dev/null || true
+done
+sleep 0.3
+EOF
+chmod +x "$tmp/kill-sampler"
+real_running "$fake_home/.local/bin/cahoots"
+passes guard "$tmp/kill-sampler"
+fails guard /bin/sh -c "'$tmp/kill-sampler' && $(new_run killed)"
+said "What a run writes:"
+real_stopped
+# Quick commands, back to back: each one's sampler is gone before it ends.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    passes guard /bin/sh -c true
+done
+
 # The installed cahoots, run by name, fails the suite — even when the test
 # swallows its refusal. Merely finding it on PATH is no failure. (A harmless
 # `cahoots` is next on PATH, so a guard that lost its own still never reaches

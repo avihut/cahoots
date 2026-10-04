@@ -145,13 +145,22 @@ guard)
 
     before=$(fingerprint)
     look >"$tmp/seen"
-    (while :; do look; sleep 0.1; done) >>"$tmp/seen" &
+    # The sampler is asked to stop, not killed, and drops the EXIT trap it
+    # inherits: a bash killed mid-loop may run that trap and remove $tmp
+    # under the guard (#87, Linux CI). It also stops if $tmp goes.
+    (
+        trap - EXIT
+        while [ -d "$tmp" ] && [ ! -e "$tmp/stop" ]; do
+            look
+            sleep 0.1
+        done
+    ) >>"$tmp/seen" &
     sampler=$!
 
     status=0
     PATH="$tmp/bin:$PATH" "$@" || status=$?
 
-    kill "$sampler" 2>/dev/null || true
+    : >"$tmp/stop"
     wait "$sampler" 2>/dev/null || true
     sampler=""
     look >>"$tmp/seen"
