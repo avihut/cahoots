@@ -146,6 +146,9 @@ fn install_writes_stamped_files_and_is_idempotent() {
                 "aggregate reports",
                 "diagnostic text",
                 "off by default",
+                "as a background command",
+                "wait <run> --timeout 1800",
+                "keep the loop above",
             ] {
                 assert!(text.contains(words), "{path} lacks {words:?}");
             }
