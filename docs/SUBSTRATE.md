@@ -121,7 +121,7 @@ from section 3.
 |---|---|---|
 | `daft start <branch>`, then `open_ticket.py`: a herdr workspace with lazygit, a shell and the agent | `--fork` cuts a detached worktree at HEAD with no repository hooks, by git or daft. `--dir` names another worktree of the same repository | Stays: the named branch, its setup hooks and the layout |
 | The orchestrator works from a repository of its own (cahoots-evals) | `run` and `resume` judge `--dir` and the brief against the caller's working directory | Gap 13 |
-| One writer per worktree | A fork belongs to one run. In place is off unless a person turns it on | Covered |
+| One writer per worktree | Not enforced. A fork is cut for one run, but `resume` starts a new run in the same worktree and checks only that the run it names has ended. The locks are per run and per harness slot, and in-place writers share none | Stays for now: the orchestrator runs one writer, and one `resume` round, per worktree and session at a time. Gap 15 |
 | A plan is read-only after the handoff, by permission mode or by instruction | A reader's fence is in code | Covered for runs through cahoots |
 
 ### Starting, watching and talking to an agent
@@ -146,9 +146,9 @@ from section 3.
 | The skill today | Through cahoots | Verdict |
 |---|---|---|
 | `start_review.py`: a Codex pane with `-s workspace-write`, read-only by its brief | `run --role review --to codex`: read-only by code | Gap 8 |
-| The same reviewer confirms each new SHA, by a prompt to its session | `resume` | Covered |
+| The same reviewer confirms each new SHA, by a prompt to its session | `resume` | Covered, one round at a time (gap 15) |
 | The reviewer writes `tickets/<n>/review-<sha7>.md` | A reader writes nothing. Its answer comes back through `result` | Stays: the orchestrator writes the file |
-| The verdict is pinned to a SHA | `base_commit` on every run | Covered |
+| The verdict is pinned to a SHA | `base_commit`: HEAD in the run's directory, read once before launch. A record, not a pin | Stays: the orchestrator attests the SHA in every round (3a) |
 | The plan holder confirms conformance | `resume` of the planner's run | Gap 10 |
 | What became of a review | `outcome` | Covered |
 | CI, `gh pr merge --squash --match-head-commit`, PR comments, the merge and CI watchers | nothing | Stays: rule 1 |
@@ -213,6 +213,7 @@ Sizes are XS to L. "Whose" follows section 1.
 | 12 | What a withheld reply and a model switch look like in a headless run | Unknown. In a pane, a vendor's filter has withheld a long review reply, and a model switch is a dialog | XS | The first board reviews through cahoots are the trial | **new**, only if a withheld reply ends as an empty success: `fix(run): a withheld reply ends the run as failed` |
 | 13 | A run started from another repository. `--dir` takes the working directory or a worktree of its repository, and a brief must sit there or in a temp directory. THREAT-MODEL also allows "a configured root", and no such setting was found in the code | cahoots': the orchestrator's home is a repository of its own, and the rule that lets it call cahoots matches only a plain command line, so it cannot `cd` in the same call | S | nothing. The root is a person's setting | **new** `feat(run): --dir reaches a root a person configured` |
 | 14 | Codex's `ultra` effort | cahoots', if it is wanted | XS | nothing | **new** `feat(registry): the ultra effort for Codex` |
+| 15 | One live run per worktree and per session. `resume` checks that the run it names has ended, not that nothing else is live in its worktree or on its session. With more than one slot for a harness, two rounds can overlap | cahoots': a lock is machinery, and a brief cannot hold one. Until it exists the orchestrator serializes | S | nothing | **new** `fix(run): one live run per worktree and per session` |
 
 ### 3a. Gap 8: the board's reviews
 
@@ -225,22 +226,44 @@ commit:
     cahoots resume <run> --caller claude --brief .cache/ticket/review-delta.md
     cahoots outcome <run> accepted
 
-The run records `base_commit`, which pins the verdict to the SHA. `resume`
-is the delta round: the same session, model and place, as a new gated run.
-The reviewer is read-only by code. In a pane it runs with
+`resume` is the delta round: the same session, model and place, as a new
+gated run. The reviewer is read-only by code. In a pane it runs with
 `-s workspace-write` and is read-only because its brief says so.
+
+**The SHA is the orchestrator's to attest.** cahoots records `base_commit`,
+and it is not a pin. It is one reading of HEAD in the run's directory,
+taken before launch. A reader works in the caller's live tree. A dirty tree
+is not refused, nothing stops the tree from moving while the review runs, a
+reading that fails is recorded as null without refusing the run, and a
+`resume` in a live tree reads HEAD again. So in every round, the first and
+each delta:
+
+1. The brief names the pushed SHA in full, read from `git ls-remote`, and
+   the exact range to read: `git diff <base>...<sha>` in the first round,
+   `git diff <last reviewed sha>..<sha>` in a delta. Every command in the
+   brief names commits, never `HEAD` or the working tree, so the reviewer
+   reads commit objects.
+2. The verdict's first line names that SHA in full.
+3. The worktree stays at that SHA, clean, for the whole round. The builder
+   waits, as the gate already has it wait.
+4. When the round ends, the orchestrator checks three things: the verdict
+   names the expected SHA, the run's `base_commit` is not null and equals
+   it, and the worktree's HEAD still equals it.
+5. A round that fails any check does not count. No PR opens on it, and
+   nothing merges on it.
 
 **What changes or is missing.**
 
 | What | Where it is closed |
 |---|---|
 | The reviewer cannot write the review file. Its answer is the review: `result` prints up to 64 KiB, and the path of the full answer beyond that | The skill: the orchestrator writes `review-<sha7>.md` from the answer. The brief's "reply with only the verdict" turns around |
-| The reply is now the whole review, and a vendor's filter has withheld long security replies | Gap 12. If it happens headless, the fallback is a Codex writer in a fork that writes the review as a file, which comes back in `data.changes` |
+| The reply is now the whole review, and a vendor's filter has withheld long security replies | Gap 12, open. Nothing in cahoots saves a withheld review today. A round whose reply is withheld does not count, and that round goes to a pane reviewer, as now |
 | The issue, the plan and the earlier verdicts live in the orchestrator's repository | The skill: copy them into the worktree's `.cache/ticket/`, or inline them in the brief |
 | The orchestrator stands in another repository | Gap 13. Until then it changes directory first, as a call of its own |
 | A read-only reviewer cannot run the tests | Accepted. The review brief already treats that as optional: the builder ran the gate at this SHA, and CI runs on the PR |
 | Review rounds at a board's pace | A person's settings, set on this Mac already: Codex slots, the active-run ceiling, the hourly ledger, the timeout. Every `resume` counts as a run |
 | A gate refusal stalls a review | Policy, in the skill: a refusal is an answer. The ticket waits on the plan, and the desk says so |
+| Two rounds on one session must not overlap, and `resume` does not check | Gap 15. Until then the orchestrator waits for a round to end before it starts the next |
 | A ticket that outlives 7 days | A run's content is kept 7 days. After that the next round is a new run with the earlier verdicts in its brief, which the skill already does when a reviewer's context fills |
 | Nobody can watch the review, and the desk and `flow.py` do not see it | Gap 11, then the skill reads `cahoots status` |
 
@@ -248,7 +271,8 @@ The reviewer is read-only by code. In a pane it runs with
 one-shot read on the other vendor with follow-ups, and rule 4 of the runbook
 already says a cross-vendor call goes through cahoots. The fence becomes
 code, every round is gated and recorded, and each review earns an outcome.
-The cost is a reviewer nobody watches and that runs no tests. Order: try a
+The SHA stays the orchestrator's to attest, as it is today. The cost is a
+reviewer nobody watches and that runs no tests. Order: try a
 few board reviews now, by hand, to answer gap 12. Then the skill moves
 `start_review.py` onto cahoots. Gaps 11 and 13 make it comfortable and do
 not block it.
@@ -333,7 +357,7 @@ What is open on 2026-10-04, and where each gap goes. In flight: #61
 | 0 | Finish the wave in flight: pinned paths, the Homebrew path, agent paths, the plugin install | 7 | #61, #86, #71, #54 | in flight |
 | 1 | The narrow agent paths | 7 | #89 to #93 | XS to M |
 | 2 | Board reviews through cahoots, by hand, as the trial | 8, 12 | none: the orchestrator's work | XS |
-| 3 | A run from another repository | 13 | **new** | S |
+| 3 | A run from another repository, and one live run per worktree and session | 13, 15 | two **new** | S, S |
 | 4 | A run's latest activity | 11 | **new** | S |
 | 5 | The skill moves `start_review.py` onto cahoots, and the desk and `flow.py` read `cahoots status` | 8 | a project-builder proposal | S |
 | 6 | The builders' decision | 10 | **new** memo, then Avihu | S |
@@ -383,7 +407,8 @@ THREAT-MODEL in their own PR.
 Read at `eb422d4`: `AGENTS.md`, `docs/ARCHITECTURE.md`,
 `docs/THREAT-MODEL.md`, `docs/PLUGINS-AND-EVALS.md`, the installed skill
 text, and in `src/`: `cli.rs` (the tiers), `pick.rs`, `paths.rs`,
-`run/client.rs`, `model.rs`, `registry.rs`, `config.rs`, `env.rs`,
+`run/client.rs`, `run/supervise.rs`, `placement/mod.rs`, `patch.rs`,
+`model.rs`, `registry.rs`, `config.rs`, `env.rs`,
 `harness/claude.rs`, `harness/codex.rs`, `meter/mod.rs` and
 `install/rules.rs`. Of the skill, at `4e6c5ac`: `SKILL.md`, `ACTIONS.md`,
 `tools/` and the review brief. Of the orchestrator's repository: the
@@ -402,6 +427,8 @@ Not verified:
   runs offline inside its sandbox, which the hidden-test author would need;
 - that a Codex read-only run can read files outside its working directory,
   which is why 3a puts everything the reviewer reads inside the worktree;
+- that a Codex read-only run can run `git diff` between two named commits,
+  which every review round in 3a needs;
 - that no code path other than `paths::run_dir` gives `--dir` a configured
   root (gap 13);
 - whether the Agent Usage tracker's `headroom` answer carries a reset time
