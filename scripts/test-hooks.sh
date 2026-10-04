@@ -133,7 +133,8 @@ echo '{}' >"$fake_state/install-manifest.json"
 echo 'schema = 1' >"$fake_home/.config/cahoots/config.toml"
 echo '{}' >"$fake_home/.config/cahoots/meter.json"
 standin=""
-trap '[ -z "$standin" ] || kill "$standin" 2>/dev/null; rm -rf "$tmp"' EXIT
+outside=""
+trap '[ -z "$standin" ] || kill "$standin" 2>/dev/null; rm -rf "$tmp" ${outside:+"$outside"}' EXIT
 real_running() {
     (exec -a "$1" sleep 60) &
     standin=$!
@@ -149,10 +150,13 @@ real_stopped() {
     wait "$standin" 2>/dev/null || true
     standin=""
 }
-guard() {
-    env REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+guard_at() {
+    local home=$1
+    shift
+    env REAL_STATE_HOME="$home" REAL_STATE_OWN_ROOT="$home/project" \
         "$scripts/real-state.sh" guard "$@"
 }
+guard() { guard_at "$fake_home" "$@"; }
 new_run="mkdir -p '$fake_state/runs/new' && echo '{}' >'$fake_state/runs/new/run.json'"
 appended="echo '{\"event\":\"new\"}' >>'$fake_state/history.jsonl'"
 cleanup="rm -rf '$fake_state/runs/new'"
@@ -193,6 +197,95 @@ fails guard /bin/sh -c "$cleanup && echo '{\"event\":\"forged\"}' >'$fake_state/
 said "REWROTE the real history"
 fails guard /bin/sh -c "rm '$fake_state/history.jsonl'"
 real_stopped
+# The history's exception is for appending, whatever it held: an empty one
+# removed or replaced is refused, while an empty or absent one may grow, and
+# an absent one may stay absent.
+h="$fake_state/history.jsonl"
+real_running "$fake_home/.local/bin/cahoots"
+: >"$h"
+passes guard /bin/sh -c "echo '{\"event\":\"first\"}' >>'$h'"
+: >"$h"
+fails guard /bin/sh -c "rm '$h'"
+said "REWROTE the real history"
+fails guard /bin/sh -c "rm '$h' && mkdir '$h'"
+rm -rf "$h"
+passes guard /bin/sh -c "mkdir -p '$fake_state/runs/h1'"
+passes guard /bin/sh -c "echo '{\"event\":\"first\"}' >'$h'"
+rm -f "$h"
+fails guard /bin/sh -c "mkdir '$h'"
+rmdir "$h"
+echo '{"event":"old"}' >"$h"
+fails guard /bin/sh -c "cp '$h' '$h.real' && rm '$h' && ln -s '$h.real' '$h'"
+rm -f "$h" "$h.real"
+echo '{"event":"old"}' >"$h"
+
+# A real run appending while the guard takes the history's measure: a
+# `cksum` first on the guard's own PATH appends just as it is asked for the
+# measure. Nothing the command did, so it passes; a rewrite still fails.
+real_cksum=$(command -v cksum)
+mkdir -p "$tmp/racing"
+cat >"$tmp/racing/cksum" <<EOF
+#!/bin/sh
+if [ \$# -eq 0 ] && [ ! -e '$tmp/raced' ]; then
+    : >'$tmp/raced'
+    echo '{"event":"raced"}' >>'$h'
+fi
+exec '$real_cksum' "\$@"
+EOF
+chmod +x "$tmp/racing/cksum"
+passes env PATH="$tmp/racing:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c true
+[ -e "$tmp/raced" ] || { echo "test-hooks: the racing cksum never ran" >&2; exit 1; }
+rm "$tmp/raced"
+fails env PATH="$tmp/racing:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c "echo '{\"event\":\"forged\"}' >'$h'"
+said "REWROTE the real history"
+real_stopped
+
+# A first real run creates the state directory itself: with only what a run
+# writes in it, that is like an empty one. Not without a real cahoots, and
+# never as anything but a directory, or with an entry nobody knows.
+fresh="$tmp/fresh-home"
+fresh_state="$fresh/.local/state/cahoots"
+mkdir -p "$fresh"
+first_run="mkdir -p '$fresh_state/runs/a' && echo '{}' >'$fresh_state/runs/a/run.json' && echo '{}' >>'$fresh_state/history.jsonl'"
+real_running "$fresh/.local/bin/cahoots"
+passes guard_at "$fresh" /bin/sh -c "$first_run"
+rm -rf "$fresh/.local/state"
+fails guard_at "$fresh" /bin/sh -c "mkdir -p '$fresh/.local/state' && echo x >'$fresh_state'"
+rm -rf "$fresh/.local/state"
+fails guard_at "$fresh" /bin/sh -c "$first_run && echo x >'$fresh_state/learned.json'"
+rm -rf "$fresh/.local/state"
+real_stopped
+fails guard_at "$fresh" /bin/sh -c "$first_run"
+rm -rf "$fresh/.local/state"
+
+# Which repository's builds never count is found from the script, whatever a
+# hook exported: a GIT_DIR naming another repository, absolute or relative,
+# changes nothing. So a stand-in inside this repository (where test-hooks
+# runs) excuses nothing, even with git's variables pointing elsewhere.
+other_repo="$tmp/other-repo"
+git init -q "$other_repo"
+project=$(dirname "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)")
+stdout_is "$project" env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" \
+    "$scripts/real-state.sh" project
+stdout_is "$project" /bin/sh -c "cd '$other_repo' && GIT_DIR=.git GIT_INDEX_FILE=.git/index exec '$scripts/real-state.sh' project"
+real_running "$fake_home/.local/bin/cahoots"
+passes env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'echo harmless'
+fails env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
+    "$scripts/real-state.sh" guard /bin/sh -c "mkdir -p '$fake_state/runs/hooked'"
+said "No real cahoots was seen"
+real_stopped
+rm -rf "$fake_state/runs/hooked"
+# Outside any repository there is no answer, and the guard refuses.
+outside=$(mktemp -d "${TMPDIR:-/tmp}/real-state-outside.XXXXXX")
+cp "$scripts/real-state.sh" "$outside/"
+outside_env=(env GIT_CEILING_DIRECTORIES="$(dirname "$outside")" REAL_STATE_HOME="$fake_home")
+fails "${outside_env[@]}" "$outside/real-state.sh" project
+fails "${outside_env[@]}" "$outside/real-state.sh" guard /bin/sh -c true
+said "cannot find the repository"
+
 # The installed cahoots, run by name, fails the suite — even when the test
 # swallows its refusal. (A harmless `cahoots` is next on PATH, so a guard that
 # lost its own still never reaches the real one from here.)

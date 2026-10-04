@@ -5,6 +5,7 @@
 # is what proves they stayed in them.
 #
 #   scripts/real-state.sh fingerprint          names + checksums of the real paths
+#   scripts/real-state.sh project              the repository whose builds never count as real
 #   scripts/real-state.sh guard <command…>     run the command; fail if they changed
 #
 # (2026-09-20: a unit test ran a real `install` into a real ~/.claude and
@@ -80,8 +81,15 @@ fingerprint_strict() {
     for path in "${strict[@]}" "${kinds[@]}"; do
         print_tree "$path"
     done
-    # The state directory but its activity: an entry nobody knows yet is strict.
-    print_tree "$state" "${prune[@]}"
+    # The state directory but its activity: an entry nobody knows yet is
+    # strict. An absent one reads as an empty one, since a first run creates
+    # it; anything but a directory there is strict too.
+    if [ -d "$state" ] && [ ! -L "$state" ]; then
+        print_tree "$state" -mindepth 1 "${prune[@]}"
+    elif [ -e "$state" ] || [ -L "$state" ]; then
+        echo "not a directory: $state"
+        print_tree "$state"
+    fi
 }
 
 fingerprint_activity() {
@@ -91,34 +99,62 @@ fingerprint_activity() {
     done
 }
 
-# The history's size and checksum, to tell an append from a rewrite.
+# What the history is, to tell an append from a rewrite: `absent`, `other`
+# (not a regular file), or `file <crc> <bytes>` — both numbers from ONE read,
+# so a real run appending meanwhile cannot set them apart.
 history_mark() {
-    if [ -f "$history" ]; then
-        wc -c <"$history" | tr -d ' '
-        cksum <"$history"
+    local sum
+    if [ -L "$history" ]; then
+        echo other
+    elif [ -f "$history" ]; then
+        sum=$(cksum <"$history") || { echo other; return; }
+        echo "file $sum"
+    elif [ -e "$history" ]; then
+        echo other
     else
-        echo 0
-        printf '' | cksum
+        echo absent
     fi
 }
 
-# Whether the history now starts with exactly what it held before.
+# Whether the history is still, or now, a regular file that starts with
+# exactly what it held before. Absent may stay absent.
 history_appended() {
-    local size=$1 sum=$2
-    [ -f "$history" ] || [ "$size" = 0 ] || return 1
-    [ "$size" = 0 ] && return 0
-    [ "$(head -c "$size" "$history" | cksum)" = "$sum" ]
+    local kind crc bytes
+    read -r kind crc bytes <<<"$1"
+    case "$kind" in
+    absent)
+        if [ ! -e "$history" ] && [ ! -L "$history" ]; then
+            return 0
+        fi
+        [ -f "$history" ] && [ ! -L "$history" ]
+        ;;
+    file)
+        [ -f "$history" ] && [ ! -L "$history" ] || return 1
+        [ "$(head -c "$bytes" "$history" | cksum)" = "$crc $bytes" ]
+        ;;
+    *)
+        return 1
+        ;;
+    esac
 }
 
+# The repository this script belongs to — all of its worktrees. A hook
+# exports GIT_DIR and friends, relative to where IT started, so they are
+# cleared for the lookup; and with no answer the guard refuses, because
+# this is what tells this suite's builds from a real cahoots.
 project_root() {
     local common
     if [ -n "${REAL_STATE_OWN_ROOT:-}" ]; then
         echo "$REAL_STATE_OWN_ROOT"
-    elif common=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-        dirname "$common"
-    else
-        cd "$(dirname "$0")/.." && pwd
+        return
     fi
+    common=$(
+        # shellcheck disable=SC2046 # one variable name per word
+        unset $(git rev-parse --local-env-vars)
+        git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null
+    ) || return 1
+    [ -n "$common" ] || return 1
+    dirname "$common"
 }
 
 # One look at the process table: every real cahoots, as "pid argv0".
@@ -140,10 +176,16 @@ fingerprint)
     fingerprint_strict
     fingerprint_activity
     ;;
+project)
+    project_root || { echo "real-state: cannot find the repository this script belongs to" >&2; exit 2; }
+    ;;
 guard)
     shift
     [ $# -gt 0 ] || { echo "usage: real-state.sh guard <command…>" >&2; exit 2; }
-    own=$(project_root)
+    own=$(project_root) || {
+        echo "✗ real-state: cannot find the repository this script belongs to — refusing, since it is what tells this suite's builds from a real cahoots" >&2
+        exit 2
+    }
     own_p=$(cd "$own" 2>/dev/null && pwd -P || echo "$own")
     under="${REAL_STATE_HOME:-}"
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/real-state.XXXXXX")
@@ -161,7 +203,7 @@ guard)
 
     strict_before=$(fingerprint_strict)
     activity_before=$(fingerprint_activity)
-    { read -r history_size; read -r history_sum; } < <(history_mark)
+    history_before=$(history_mark)
     look >"$tmp/seen"
     (while :; do look; sleep 0.1; done) >>"$tmp/seen" &
     sampler=$!
@@ -197,11 +239,11 @@ guard)
         } >&2
     fi
     if [ "$activity_before" != "$activity_after" ]; then
-        if ! history_appended "$history_size" "$history_sum"; then
+        if ! history_appended "$history_before"; then
             tripped=1
             {
                 echo
-                echo "✗ real-state: the command REWROTE the real history at $history"
+                echo "✗ real-state: the command REWROTE the real history at $history, or removed or replaced it"
                 echo "  cahoots only ever appends to it, so nothing real did this."
                 echo "  A test must only ever touch the throwaway directories it is given."
             } >&2
@@ -229,7 +271,7 @@ guard)
     exit "$status"
     ;;
 *)
-    echo "usage: real-state.sh fingerprint | guard <command…>" >&2
+    echo "usage: real-state.sh fingerprint | project | guard <command…>" >&2
     exit 2
     ;;
 esac
