@@ -226,12 +226,14 @@ and shown, so a record edited on disk is held to the same bound:
 
 The envelope's `message` is cahoots' own words. For a run that failed by
 itself, it points at `data.failure` and never carries the callee's text.
-An older cahoots put that text in `message` itself. Such a record is read
-the same way: a message that is the stream's reason, or, when the callee
-exited and its stream gave none, the end of its stderr, is bounded into
-`data.failure`, and `message` becomes the same fixed sentence. cahoots' own
-words in an older record, such as a supervisor's error or a stop, keep
-their place.
+An older cahoots put that text in `message` itself. Such a record cannot
+say where its message came from, so a failed one is read conservatively:
+its whole message is the callee's, bounded from its end into
+`data.failure`, and `message` becomes the fixed sentence. A supervisor's
+error in such a record loses its wording, which is accepted because the
+record ages out within 7 days. In an older record, a budget stop by the
+callee's own limit is told apart from the watchdog's stop exactly, and a
+stop's message stays cahoots' own.
 
 `activity` comes only from the callee's own text and its own tool calls,
 never from a tool's result. Otherwise the repository's text, or the web's,

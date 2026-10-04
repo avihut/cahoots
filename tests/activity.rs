@@ -244,15 +244,13 @@ fn a_step_whose_save_failed_reaches_status_once_a_save_can_land() {
     world.ask(&["cancel", &run]);
 }
 
-#[test]
-fn an_older_failed_record_reads_as_the_callees_words_on_every_verb() {
-    let world = World::new();
-    let id = "01legacy-failed-run";
+/// A failed run as an older cahoots wrote it, under `id`, finished now.
+fn older_record(world: &World, id: &str, fixture: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let text = include_str!("fixtures/records/legacy-failed.json")
+    let text = fixture
         .replace("@ID@", id)
         .replace("@CWD@", world.work.to_str().unwrap());
     let mut record: Value = serde_json::from_str(&text).unwrap();
@@ -262,45 +260,65 @@ fn an_older_failed_record_reads_as_the_callees_words_on_every_verb() {
     let dir = world.state.join("runs").join(id);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("run.json"), record.to_string()).unwrap();
+}
 
-    for verb in ["wait", "result"] {
-        let shown = world.ask(&[verb, id]);
-        assert_eq!(shown.code, 40, "{verb}: {}", shown.json);
-        assert_eq!(
-            shown.message(),
-            "the run failed — the callee's own account is in data.failure",
-            "{verb}"
-        );
-        assert!(
-            !shown.json.to_string().contains("\\u001b"),
-            "{verb}: {}",
-            shown.json
-        );
-    }
-    for (verb, data) in [
-        ("wait", world.ask(&["wait", id]).data().clone()),
-        ("result", world.ask(&["result", id]).data().clone()),
-        ("status", world.ask(&["status", id]).data().clone()),
-        ("status list", listed(&world, id)),
+/// An older failed record's whole message is the callee's, whatever made
+/// it: the stream's reason, a signalled callee's stderr, or the
+/// supervisor's own error after a clean exit — the record cannot say which.
+#[test]
+fn an_older_failed_records_message_is_the_callees_on_every_verb() {
+    let world = World::new();
+    for (id, fixture, end, truncated) in [
+        (
+            "01legacy-stream",
+            include_str!("fixtures/records/legacy-failed.json"),
+            "Try again later.",
+            true,
+        ),
+        (
+            "01legacy-signalled",
+            include_str!("fixtures/records/legacy-signalled.json"),
+            "[0m ]0;owned the end of stderr",
+            true,
+        ),
+        (
+            "01legacy-internal-error",
+            include_str!("fixtures/records/legacy-internal-error.json"),
+            "cannot write /state/runs/x/final.md: No space left on device (os error 28)",
+            false,
+        ),
     ] {
-        let failure = &data["failure"];
-        let text = failure["text"].as_str().expect(verb);
-        assert_eq!(failure["untrusted"], true, "{verb}");
-        assert_eq!(failure["truncated"], true, "{verb}");
-        assert_eq!(text.chars().count(), 500, "{verb}");
-        assert!(
-            text.starts_with("]0;owned You've hit your usage limit."),
-            "{verb}: {text}"
-        );
-        assert!(
-            !text.contains('\u{1b}') && !text.contains('\u{7}'),
-            "{verb}"
-        );
-        assert_eq!(
-            data["notes"],
-            json!([{"untrusted": true, "truncated": false,
-                    "text": "stream disconnected before completion; retrying 1/5 [2J"}]),
-            "{verb}"
-        );
+        older_record(&world, id, fixture);
+        for verb in ["wait", "result"] {
+            let shown = world.ask(&[verb, id]);
+            assert_eq!(shown.code, 40, "{id} {verb}: {}", shown.json);
+            assert_eq!(
+                shown.message(),
+                "the run failed — the callee's own account is in data.failure",
+                "{id} {verb}"
+            );
+        }
+        for (verb, shown) in [
+            ("wait", world.ask(&["wait", id]).json.clone()),
+            ("result", world.ask(&["result", id]).json.clone()),
+            ("status", world.ask(&["status", id]).json.clone()),
+            ("status list", json!({"data": listed(&world, id)})),
+        ] {
+            assert!(
+                !shown.to_string().contains("\\u001b") && !shown.to_string().contains("\\u0007"),
+                "{id} {verb}: {shown}"
+            );
+            let failure = &shown["data"]["failure"];
+            let text = failure["text"].as_str().expect(verb);
+            assert_eq!(failure["untrusted"], true, "{id} {verb}");
+            assert_eq!(failure["truncated"], truncated, "{id} {verb}");
+            assert!(text.chars().count() <= 500, "{id} {verb}");
+            assert!(text.ends_with(end), "{id} {verb}: {text}");
+        }
     }
+    assert_eq!(
+        world.ask(&["status", "01legacy-stream"]).data()["notes"],
+        json!([{"untrusted": true, "truncated": false,
+                "text": "stream disconnected before completion; retrying 1/5 [2J"}])
+    );
 }

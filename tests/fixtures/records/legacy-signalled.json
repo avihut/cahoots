@@ -1,0 +1,64 @@
+{
+  "v": 1,
+  "id": "@ID@",
+  "state": "failed",
+  "exit_code": 40,
+  "message": "warning: retry 0\nwarning: retry 1\nwarning: retry 2\nwarning: retry 3\nwarning: retry 4\nwarning: retry 5\nwarning: retry 6\nwarning: retry 7\nwarning: retry 8\nwarning: retry 9\nwarning: retry 10\nwarning: retry 11\nwarning: retry 12\nwarning: retry 13\nwarning: retry 14\nwarning: retry 15\nwarning: retry 16\nwarning: retry 17\nwarning: retry 18\nwarning: retry 19\nwarning: retry 20\nwarning: retry 21\nwarning: retry 22\nwarning: retry 23\nwarning: retry 24\nwarning: retry 25\nwarning: retry 26\nwarning: retry 27\nwarning: retry 28\nwarning: retry 29\nwarning: retry 30\nwarning: retry 31\nwarning: retry 32\nwarning: retry 33\nwarning: retry 34\nwarning: retry 35\nwarning: retry 36\nwarning: retry 37\nwarning: retry 38\nwarning: retry 39\nwarning: retry 40\nwarning: retry 41\nwarning: retry 42\nwarning: retry 43\nwarning: retry 44\nwarning: retry 45\nwarning: retry 46\nwarning: retry 47\nwarning: retry 48\nwarning: retry 49\nwarning: retry 50\nwarning: retry 51\nwarning: retry 52\nwarning: retry 53\nwarning: retry 54\nwarning: retry 55\nwarning: retry 56\nwarning: retry 57\nwarning: retry 58\nwarning: retry 59\n\u001b[31mfatal: killed while reading the stream\u001b[0m\n\u001b]0;owned\u0007the end of stderr",
+  "role": "advise",
+  "kind": null,
+  "caller": "claude",
+  "target": {
+    "harness": "codex",
+    "model": "gpt-fake",
+    "effort": "high"
+  },
+  "blind": false,
+  "exploration": false,
+  "cwd": "@CWD@",
+  "placement": "caller",
+  "base": null,
+  "gitdir": null,
+  "worktree_provider": null,
+  "roots": [
+    "@CWD@"
+  ],
+  "base_commit": null,
+  "patch": null,
+  "base_repo": null,
+  "depth": 0,
+  "timeout_secs": 1800,
+  "int_grace_secs": 10,
+  "term_grace_secs": 5,
+  "binary": "/usr/local/bin/codex",
+  "harness_version": [
+    0,
+    155,
+    1
+  ],
+  "created_at": 0,
+  "started_at": 0,
+  "finished_at": 0,
+  "supervisor_pid": 4242,
+  "callee_pid": 4243,
+  "callee_started": "Sun Oct  4 06:00:00 2026",
+  "callee_exit": null,
+  "resumed_from": null,
+  "resume_session": null,
+  "progress": {
+    "session_id": "01a0bf61-0000-7000-8000-000000000009",
+    "model_reported": null,
+    "final_text": null,
+    "tokens_input": 100,
+    "tokens_cached": 50,
+    "tokens_output": 7,
+    "cost_usd": null,
+    "failure": null,
+    "budget_stop": false,
+    "permission_denials": 0,
+    "notes": []
+  },
+  "admission": {
+    "reading": null,
+    "notes": []
+  }
+}

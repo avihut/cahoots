@@ -1,0 +1,64 @@
+{
+  "v": 1,
+  "id": "@ID@",
+  "state": "failed",
+  "exit_code": 40,
+  "message": "cannot write /state/runs/x/final.md: No space left on device (os error 28)",
+  "role": "advise",
+  "kind": null,
+  "caller": "claude",
+  "target": {
+    "harness": "codex",
+    "model": "gpt-fake",
+    "effort": "high"
+  },
+  "blind": false,
+  "exploration": false,
+  "cwd": "@CWD@",
+  "placement": "caller",
+  "base": null,
+  "gitdir": null,
+  "worktree_provider": null,
+  "roots": [
+    "@CWD@"
+  ],
+  "base_commit": null,
+  "patch": null,
+  "base_repo": null,
+  "depth": 0,
+  "timeout_secs": 1800,
+  "int_grace_secs": 10,
+  "term_grace_secs": 5,
+  "binary": "/usr/local/bin/codex",
+  "harness_version": [
+    0,
+    155,
+    1
+  ],
+  "created_at": 0,
+  "started_at": 0,
+  "finished_at": 0,
+  "supervisor_pid": 4242,
+  "callee_pid": 4243,
+  "callee_started": "Sun Oct  4 06:00:00 2026",
+  "callee_exit": 0,
+  "resumed_from": null,
+  "resume_session": null,
+  "progress": {
+    "session_id": "01a0bf61-0000-7000-8000-000000000009",
+    "model_reported": null,
+    "final_text": "The gate is sound.",
+    "tokens_input": 100,
+    "tokens_cached": 50,
+    "tokens_output": 7,
+    "cost_usd": null,
+    "failure": null,
+    "budget_stop": false,
+    "permission_denials": 0,
+    "notes": []
+  },
+  "admission": {
+    "reading": null,
+    "notes": []
+  }
+}

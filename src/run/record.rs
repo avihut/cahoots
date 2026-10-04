@@ -166,37 +166,39 @@ pub const STOPPED_BY_ITS_BUDGET_SAID: &str =
 impl RunRecord {
     /// What the run's `message` says in public, and the callee's own account
     /// of its failure, bounded. A record this cahoots wrote keeps the two
-    /// apart already. An older one put the callee's words in `message`
-    /// itself — the stream's reason, or the end of its stderr — and those
-    /// are read here as the callee's, while cahoots' own words (a refusal, a
-    /// stop, an error of the supervisor's) keep their place.
+    /// apart already (`words_apart`), and is taken as written.
+    ///
+    /// An older record put the callee's words in `message` itself, and what
+    /// it kept cannot tell where a message came from: the stream's reason,
+    /// the stderr of a callee that exited or was killed by a signal, or the
+    /// supervisor's own error after a clean exit all look alike. So a failed
+    /// older record is read conservatively: its whole message is the
+    /// callee's, bounded from its end (where stderr puts an error) into the
+    /// failure, and `message` becomes the fixed sentence. A supervisor's
+    /// diagnostic in such a record loses its wording to that sentence. That
+    /// is accepted: the record ages out within the 7 days a run's content is
+    /// kept. A budget stop is told apart exactly, since the older cahoots
+    /// wrote one of two things: the callee's own reason, word for word, or
+    /// the watchdog's sentence. Every other state's message is cahoots' own.
     pub fn account(&self) -> (Option<String>, Option<CalleeText>) {
-        if self.words_apart || !matches!(self.state, State::Failed | State::Budget) {
+        if self.words_apart {
             return (self.message.clone(), self.callee_failure.clone());
         }
         let Some(message) = &self.message else {
             return (None, None);
         };
-        let keep = if self.progress.failure.as_deref() == Some(message.as_str()) {
-            Keep::Start
-        } else if self.state == State::Failed
-            && self.progress.failure.is_none()
-            && self.callee_exit.is_some()
-        {
-            // The callee ran and exited, and said nothing on its stream:
-            // what an older cahoots kept was the end of its stderr.
-            Keep::End
-        } else {
-            return (Some(message.clone()), None);
-        };
-        match CalleeText::bound(message, FAILURE_CHARS, keep) {
-            Some(said) => {
-                let public = match self.state {
-                    State::Budget => STOPPED_BY_ITS_BUDGET_SAID,
-                    _ => FAILED_BY_ITSELF,
-                };
-                (Some(public.to_string()), Some(said))
+        let public = match self.state {
+            State::Failed => FAILED_BY_ITSELF,
+            State::Budget
+                if self.progress.budget_stop
+                    && self.progress.failure.as_deref() == Some(message.as_str()) =>
+            {
+                STOPPED_BY_ITS_BUDGET_SAID
             }
+            _ => return (Some(message.clone()), None),
+        };
+        match CalleeText::bound(message, FAILURE_CHARS, Keep::End) {
+            Some(said) => (Some(public.to_string()), Some(said)),
             None => (None, None),
         }
     }
@@ -432,50 +434,69 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    #[test]
-    fn an_older_records_stream_reason_is_read_as_the_callees() {
-        let (message, said) = legacy(|_| {}).account();
+    /// The older record's whole message, read as the callee's: bounded from
+    /// its end, and the fixed sentence in its place.
+    fn read_as_the_callees(record: &RunRecord) -> CalleeText {
+        let (message, said) = record.account();
         assert_eq!(message.as_deref(), Some(FAILED_BY_ITSELF));
-        let said = said.unwrap();
-        assert!(said.text().starts_with("]0;owned You've hit"), "{said:?}");
-        assert_eq!(said.text().chars().count(), FAILURE_CHARS);
-        assert!(said.truncated());
+        let said = said.expect("the callee's account");
+        assert!(said.text().chars().count() <= FAILURE_CHARS);
+        assert!(!said.text().contains(['\u{1b}', '\u{7}', '\n']), "{said:?}");
+        said
+    }
 
-        let (message, said) = legacy(|v| {
+    #[test]
+    fn an_older_failed_records_message_is_all_the_callees() {
+        // The stream's reason.
+        let said = read_as_the_callees(&legacy(|_| {}));
+        assert!(said.text().ends_with("Try again later."), "{said:?}");
+        assert!(said.truncated());
+        // A callee killed by a signal, with stderr: no exit code.
+        let said = read_as_the_callees(&legacy(|v| {
+            v["progress"]["failure"] = serde_json::Value::Null;
+            v["callee_exit"] = serde_json::Value::Null;
+            v["message"] = format!("{}\u{1b}[31mpanic: the end", "noise\n".repeat(200)).into();
+        }));
+        assert!(said.text().ends_with("[31mpanic: the end"), "{said:?}");
+        // The supervisor's own error after a clean exit loses its wording.
+        let said = read_as_the_callees(&legacy(|v| {
+            v["progress"]["failure"] = serde_json::Value::Null;
+            v["callee_exit"] = 0.into();
+            v["message"] = "cannot write final.md: No space left on device".into();
+        }));
+        assert_eq!(
+            said.text(),
+            "cannot write final.md: No space left on device"
+        );
+        assert!(!said.truncated());
+    }
+
+    #[test]
+    fn an_older_budget_stop_is_told_apart_exactly() {
+        let budget = |v: &mut serde_json::Value| {
             v["state"] = "budget".into();
             v["exit_code"] = 41.into();
+        };
+        let (message, said) = legacy(|v| {
+            budget(v);
             v["progress"]["budget_stop"] = true.into();
         })
         .account();
         assert_eq!(message.as_deref(), Some(STOPPED_BY_ITS_BUDGET_SAID));
         assert!(said.is_some());
-    }
-
-    #[test]
-    fn an_older_records_stderr_is_read_as_the_callees_from_its_end() {
+        // The watchdog's stop is cahoots' own sentence.
+        let watchdog = "stopped: codex crossed 95% of its plan while this run was going";
         let (message, said) = legacy(|v| {
-            v["progress"]["failure"] = serde_json::Value::Null;
-            v["message"] = format!("{}\npanic: the end", "noise\n".repeat(200)).into();
+            budget(v);
+            v["message"] = watchdog.into();
         })
         .account();
-        assert_eq!(message.as_deref(), Some(FAILED_BY_ITSELF));
-        assert!(said.unwrap().text().ends_with("panic: the end"));
+        assert_eq!(message.as_deref(), Some(watchdog));
+        assert!(said.is_none());
     }
 
     #[test]
     fn cahoots_own_words_keep_their_place() {
-        // An older supervisor's own error: the callee never exited.
-        let (message, said) = legacy(|v| {
-            v["progress"]["failure"] = serde_json::Value::Null;
-            v["callee_exit"] = serde_json::Value::Null;
-            v["message"] = "cannot cut a worktree: it was not cut at abc".into();
-        })
-        .account();
-        assert_eq!(
-            message.as_deref(),
-            Some("cannot cut a worktree: it was not cut at abc")
-        );
-        assert!(said.is_none());
         // A stop is cahoots' to explain, whatever the stream said.
         let (message, said) = legacy(|v| {
             v["state"] = "timed_out".into();
