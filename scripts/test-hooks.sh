@@ -1011,7 +1011,10 @@ printf '\n  \n' >"$tmp/fake-gh/11.json"
 cp "$pr_record" "$tmp/fake-gh/12.json"
 fails live_audit
 said 'not exactly one ruleset object'
-# refuse:audit-immutable-bypassed — the app on `release tags are immutable`.
+# refuse:audit-immutable-bypassed — the app on `release tags are immutable`,
+# with the other two rulesets valid, so only it can drive the exit status.
+cp "$tags_record" "$tmp/fake-gh/11.json"
+cp "$pr_record" "$tmp/fake-gh/12.json"
 jq "$app" "$imm_record" >"$tmp/fake-gh/13.json"
 fails live_audit
 said 'its bypass list is not empty (Integration 2607344 always)'
@@ -1020,7 +1023,6 @@ fails live_audit
 said 'not visible to these credentials'
 cp "$imm_record" "$tmp/fake-gh/13.json"
 # refuse:audit-extra-actor, refuse:audit-unseen-bypass, refuse:audit-missing
-cp "$tags_record" "$tmp/fake-gh/11.json"
 jq "$admin" "$pr_record" >"$tmp/fake-gh/12.json"
 fails live_audit
 said 'its bypass list is not exactly the release app'
