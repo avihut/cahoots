@@ -15,7 +15,7 @@ the whole set by hand:
 | `check-config` | `lefthook.yml`, `daft.yml`, `mise.toml` parse |
 | `test-hooks` | the hook scripts' own pass **and** refusal paths, in a throwaway repo |
 | `clippy` | every target, warnings denied |
-| `test` | the suite; no real harness, no network — wrapped in `real-state.sh guard`, which fails it if anything a person really has (cahoots config/state, installed skill and agent files) changed; only what a run writes is excused, and only while a real cahoots is seen running |
+| `test` | the suite; no real harness, no network — wrapped in `real-state.sh guard`, which fails it if anything a person really has (cahoots config/state, installed skill and agent files) changed — even by a real cahoots running meanwhile, which its message names, so rerun when it is idle |
 | `deny` | advisories, licenses, sources, and the ban on network crates |
 | `release-build` | the *deep* ring: what a person would install still builds |
 

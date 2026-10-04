@@ -120,18 +120,17 @@ passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "echo x >'$fake_home/.claude/agents/mine.md'"
 fails "$scripts/real-state.sh" guard
 
-# A real cahoots running meanwhile (#75). A stand-in is a `sleep` whose argv[0]
-# says otherwise, started beside the guard, not by the command it runs. Under
-# REAL_STATE_HOME, only one in that home counts — and every stand-in is inside
-# this repository, which a real guard ignores, so a suite running alongside
-# is never excused by one.
+# A real cahoots running meanwhile (#75) excuses nothing: the guard still
+# fails, and its words say so, to tell a rerun from a test that touched real
+# state. A stand-in is a `sleep` whose argv[0] says otherwise, started beside
+# the guard, not by the command it runs. Under REAL_STATE_HOME only one in
+# that home counts — and every stand-in is inside this repository, which a
+# real guard ignores, so a suite running alongside never reads one as real.
 fake_state="$fake_home/.local/state/cahoots"
 mkdir -p "$fake_state/runs/old" "$fake_home/.config/cahoots"
 echo '{"event":"old"}' >"$fake_state/history.jsonl"
 echo '{}' >"$fake_state/runs/old/run.json"
-echo '{}' >"$fake_state/install-manifest.json"
 echo 'schema = 1' >"$fake_home/.config/cahoots/config.toml"
-echo '{}' >"$fake_home/.config/cahoots/meter.json"
 standin=""
 outside=""
 trap '[ -z "$standin" ] || kill "$standin" 2>/dev/null; rm -rf "$tmp" ${outside:+"$outside"}' EXIT
@@ -150,120 +149,63 @@ real_stopped() {
     wait "$standin" 2>/dev/null || true
     standin=""
 }
-guard_at() {
-    local home=$1
-    shift
-    env REAL_STATE_HOME="$home" REAL_STATE_OWN_ROOT="$home/project" \
+guard() {
+    env REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
         "$scripts/real-state.sh" guard "$@"
 }
-guard() { guard_at "$fake_home" "$@"; }
-new_run="mkdir -p '$fake_state/runs/new' && echo '{}' >'$fake_state/runs/new/run.json'"
+new_run() {
+    echo "mkdir -p '$fake_state/runs/$1' && echo '{}' >'$fake_state/runs/$1/run.json'"
+}
 appended="echo '{\"event\":\"new\"}' >>'$fake_state/history.jsonl'"
-cleanup="rm -rf '$fake_state/runs/new'"
+rerun="A real cahoots ran meanwhile; rerun when it is idle"
+likely="a test likely touched real state"
 
-# What a run writes: excused while a real one runs, refused when none does.
+# A real one running, and nothing changed: the guard passes.
 real_running "$fake_home/.local/bin/cahoots"
-passes guard /bin/sh -c "$new_run && $appended"
-said "while a real cahoots ran"
-passes guard /bin/sh -c "rm -rf '$fake_state/runs/old'"
-real_stopped
-fails guard /bin/sh -c "$cleanup"
-said "No real cahoots was seen"
-fails guard /bin/sh -c "$new_run"
-fails guard /bin/sh -c "$appended"
-# The supervisor a test left behind is a build, and so is one of this
-# repository's own: neither is a real cahoots.
-real_running "$fake_home/src/target/debug/cahoots"
-fails guard /bin/sh -c "$cleanup"
-real_stopped
-real_running "$fake_home/project/feat/x/bin/cahoots"
-fails guard /bin/sh -c "$new_run"
-real_stopped
-# Nor is one outside the watched home, when a home is given.
-real_running "$tmp/elsewhere/cahoots"
-fails guard /bin/sh -c "$cleanup"
-real_stopped
-# A real one excuses nothing a run never writes: a test-shaped write to a
-# guarded path still fails, and so does a rewritten history.
-real_running "$fake_home/.local/bin/cahoots"
-passes guard /bin/sh -c "$new_run"
+passes guard /bin/sh -c 'echo harmless'
+# What a run writes changed while it ran: still a failure, and it says rerun.
+fails guard /bin/sh -c "$(new_run during) && $appended"
+said "$rerun"
+said "What a run writes:"
+said "$fake_state/runs/during/run.json"
+said "$fake_state/history.jsonl"
+said "$fake_home/.local/bin/cahoots"
+# What no run writes changed while it ran: it fails, names it, and says a test
+# likely did it.
 fails guard /bin/sh -c "echo 'schema = 2' >'$fake_home/.config/cahoots/config.toml'"
-said "a real cahoots meanwhile is no excuse"
-fails guard /bin/sh -c "echo x >>'$fake_home/.config/cahoots/meter.json'"
-fails guard /bin/sh -c "echo x >'$fake_state/install-manifest.json'"
-fails guard /bin/sh -c "echo edited >>'$fake_home/.claude/skills/cahoots/SKILL.md'"
-fails guard /bin/sh -c "echo x >'$fake_state/learned.json'"
-fails guard /bin/sh -c "$cleanup && echo '{\"event\":\"forged\"}' >'$fake_state/history.jsonl'"
-said "REWROTE the real history"
-fails guard /bin/sh -c "rm '$fake_state/history.jsonl'"
+said "never a run:"
+said "$fake_home/.config/cahoots/config.toml"
+said "But no run writes the second list: $likely"
 real_stopped
-# The history's exception is for appending, whatever it held: an empty one
-# removed or replaced is refused, while an empty or absent one may grow, and
-# an absent one may stay absent.
-h="$fake_state/history.jsonl"
-real_running "$fake_home/.local/bin/cahoots"
-: >"$h"
-passes guard /bin/sh -c "echo '{\"event\":\"first\"}' >>'$h'"
-: >"$h"
-fails guard /bin/sh -c "rm '$h'"
-said "REWROTE the real history"
-fails guard /bin/sh -c "rm '$h' && mkdir '$h'"
-rm -rf "$h"
-passes guard /bin/sh -c "mkdir -p '$fake_state/runs/h1'"
-passes guard /bin/sh -c "echo '{\"event\":\"first\"}' >'$h'"
-rm -f "$h"
-fails guard /bin/sh -c "mkdir '$h'"
-rmdir "$h"
-echo '{"event":"old"}' >"$h"
-fails guard /bin/sh -c "cp '$h' '$h.real' && rm '$h' && ln -s '$h.real' '$h'"
-rm -f "$h" "$h.real"
-echo '{"event":"old"}' >"$h"
+# With none running, it says a test likely touched real state.
+fails guard /bin/sh -c "$(new_run alone)"
+said "No real cahoots was seen running meanwhile: $likely"
+# A build is never a real cahoots: the supervisor a test left behind, or any
+# binary of this repository's own, or one outside the watched home.
+for build in "$fake_home/src/target/debug/cahoots" "$fake_home/project/feat/x/bin/cahoots" "$tmp/elsewhere/cahoots"; do
+    real_running "$build"
+    fails guard /bin/sh -c "$(new_run "${build//\//_}")"
+    said "No real cahoots was seen running meanwhile"
+    real_stopped
+done
 
-# A real run appending while the guard takes the history's measure: a
-# `cksum` first on the guard's own PATH appends just as it is asked for the
-# measure. Nothing the command did, so it passes; a rewrite still fails.
-real_cksum=$(command -v cksum)
-mkdir -p "$tmp/racing"
-cat >"$tmp/racing/cksum" <<EOF
-#!/bin/sh
-if [ \$# -eq 0 ] && [ ! -e '$tmp/raced' ]; then
-    : >'$tmp/raced'
-    echo '{"event":"raced"}' >>'$h'
-fi
-exec '$real_cksum' "\$@"
-EOF
-chmod +x "$tmp/racing/cksum"
-passes env PATH="$tmp/racing:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
-    "$scripts/real-state.sh" guard /bin/sh -c true
-[ -e "$tmp/raced" ] || { echo "test-hooks: the racing cksum never ran" >&2; exit 1; }
-rm "$tmp/raced"
-fails env PATH="$tmp/racing:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
-    "$scripts/real-state.sh" guard /bin/sh -c "echo '{\"event\":\"forged\"}' >'$h'"
-said "REWROTE the real history"
-real_stopped
+# The installed cahoots, run by name, fails the suite — even when the test
+# swallows its refusal. Merely finding it on PATH is no failure. (A harmless
+# `cahoots` is next on PATH, so a guard that lost its own still never reaches
+# the real one from here.)
+mkdir -p "$tmp/harmless"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/harmless/cahoots"
+chmod +x "$tmp/harmless/cahoots"
+passes env PATH="$tmp/harmless:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'command -v cahoots'
+fails env PATH="$tmp/harmless:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'cahoots run || true'
+said "ran \`cahoots\` by name"
 
-# A first real run creates the state directory itself: with only what a run
-# writes in it, that is like an empty one. Not without a real cahoots, and
-# never as anything but a directory, or with an entry nobody knows.
-fresh="$tmp/fresh-home"
-fresh_state="$fresh/.local/state/cahoots"
-mkdir -p "$fresh"
-first_run="mkdir -p '$fresh_state/runs/a' && echo '{}' >'$fresh_state/runs/a/run.json' && echo '{}' >>'$fresh_state/history.jsonl'"
-real_running "$fresh/.local/bin/cahoots"
-passes guard_at "$fresh" /bin/sh -c "$first_run"
-rm -rf "$fresh/.local/state"
-fails guard_at "$fresh" /bin/sh -c "mkdir -p '$fresh/.local/state' && echo x >'$fresh_state'"
-rm -rf "$fresh/.local/state"
-fails guard_at "$fresh" /bin/sh -c "$first_run && echo x >'$fresh_state/learned.json'"
-rm -rf "$fresh/.local/state"
-real_stopped
-fails guard_at "$fresh" /bin/sh -c "$first_run"
-rm -rf "$fresh/.local/state"
-
-# Which repository's builds never count is found from the script, whatever a
-# hook exported: a GIT_DIR naming another repository, absolute or relative,
+# Which repository's builds are never real is found from the script, whatever
+# a hook exported: a GIT_DIR naming another repository, absolute or relative,
 # changes nothing. So a stand-in inside this repository (where test-hooks
-# runs) excuses nothing, even with git's variables pointing elsewhere.
+# runs) is never read as real, even with git's variables pointing elsewhere.
 other_repo="$tmp/other-repo"
 git init -q "$other_repo"
 project=$(dirname "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)")
@@ -274,10 +216,9 @@ real_running "$fake_home/.local/bin/cahoots"
 passes env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
     "$scripts/real-state.sh" guard /bin/sh -c 'echo harmless'
 fails env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
-    "$scripts/real-state.sh" guard /bin/sh -c "mkdir -p '$fake_state/runs/hooked'"
-said "No real cahoots was seen"
+    "$scripts/real-state.sh" guard /bin/sh -c "$(new_run hooked)"
+said "No real cahoots was seen running meanwhile"
 real_stopped
-rm -rf "$fake_state/runs/hooked"
 # Outside any repository there is no answer, and the guard refuses.
 outside=$(mktemp -d "${TMPDIR:-/tmp}/real-state-outside.XXXXXX")
 cp "$scripts/real-state.sh" "$outside/"
@@ -285,16 +226,6 @@ outside_env=(env GIT_CEILING_DIRECTORIES="$(dirname "$outside")" REAL_STATE_HOME
 fails "${outside_env[@]}" "$outside/real-state.sh" project
 fails "${outside_env[@]}" "$outside/real-state.sh" guard /bin/sh -c true
 said "cannot find the repository"
-
-# The installed cahoots, run by name, fails the suite — even when the test
-# swallows its refusal. (A harmless `cahoots` is next on PATH, so a guard that
-# lost its own still never reaches the real one from here.)
-mkdir -p "$tmp/harmless"
-printf '#!/bin/sh\nexit 0\n' >"$tmp/harmless/cahoots"
-chmod +x "$tmp/harmless/cahoots"
-fails env PATH="$tmp/harmless:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
-    "$scripts/real-state.sh" guard /bin/sh -c 'cahoots run || true'
-said "ran \`cahoots\` by name"
 
 # ── a fixture shaped like this repository ───────────────────────────────────
 repo="$tmp/repo"

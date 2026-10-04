@@ -5,37 +5,27 @@
 # is what proves they stayed in them.
 #
 #   scripts/real-state.sh fingerprint          names + checksums of the real paths
-#   scripts/real-state.sh project              the repository whose builds never count as real
+#   scripts/real-state.sh project              the repository whose builds are never a real cahoots
 #   scripts/real-state.sh guard <command…>     run the command; fail if they changed
 #
 # (2026-09-20: a unit test ran a real `install` into a real ~/.claude and
 # ~/.codex. The code now refuses that three ways; this is the fourth, and the
 # only one that does not depend on the code being right.)
 #
-# Two sets of paths, because cahoots is in real use on the machines that run
-# the suite (#75: a real review run by another agent failed a suite twice):
-#
-# - STRICT: any change fails. Config, the eval suite, what `install` puts in
-#   the agent homes, and everything in the state directory but the activity
-#   below — what only `install`, `refresh` and `settings` write, never a run.
-# - ACTIVITY: what a real run and the sweep of a client verb write — the run
-#   directories, the slots, the no-hooks directory, the placements, and the
-#   history, which they only ever append to. A change here fails too, unless
-#   a REAL cahoots was seen running meanwhile and the history only grew.
+# It is strict: ANY change fails, whoever made it. cahoots is in real use on
+# the machines that run the suite, so a real run elsewhere meanwhile can trip
+# it too (#75) — and then the answer is to rerun, not to excuse. To tell the
+# two apart, a failure names every changed path, says whether it is one a run
+# writes or one only `install`, `refresh` and `settings` do, and says whether
+# a real cahoots was seen running meanwhile. Seen or not, the guard fails.
 #
 # A real cahoots is a process whose argv[0] is named `cahoots` and is not a
 # build: not under a `target/` directory, nor anywhere in this repository's
 # project directory (every worktree of it), so neither this suite's binary nor
-# the supervisors another worktree's suite leaves behind counts. While the
+# the supervisors another worktree's suite leaves behind counts. And while the
 # command runs, a `cahoots` that refuses comes first on its PATH: a suite that
-# ran the installed cahoots by name would be seen as one, so it fails instead,
-# even if the test swallowed the refusal.
-#
-# What this leaves: a test-shaped write to the activity during a coincident
-# real run passes — a test does the same thing every time, and the next run
-# without one catches it. And a real verb that comes and goes between two
-# looks (`review`, `outcome`, a `status` sweep) is not seen: that fails, and
-# says to rerun.
+# runs the installed cahoots by name fails, even if the test swallowed the
+# refusal.
 #
 # For test-hooks.sh only: REAL_STATE_HOME overrides the home that is watched,
 # and then a real cahoots must also live under it; REAL_STATE_OWN_ROOT
@@ -44,10 +34,9 @@ set -euo pipefail
 
 home="${REAL_STATE_HOME:-$HOME}"
 state="$home/.local/state/cahoots"
-history="$state/history.jsonl"
-activity=(runs slots no-hooks worktrees history.jsonl)
-strict=(
+watched=(
     "$home/.config/cahoots"
+    "$state"
     "$home/.local/share/cahoots"
     "$home/.agents/skills/cahoots"
     "$home/.claude/skills/cahoots"
@@ -55,87 +44,41 @@ strict=(
     "$home/.codex/skills/cahoots"
     "$home/.codex/agents/cahoots-delegate.toml"
 )
+# What a run, or the sweep of a client verb, writes. For the words only:
+# a change here fails like any other.
+run_writes=(runs slots no-hooks worktrees history.jsonl)
 
-# Names catch what appeared or vanished; checksums, what changed.
-print_tree() {
-    local path=$1
-    shift
-    if [ -e "$path" ] || [ -L "$path" ]; then
-        find "$path" "$@" -print | LC_ALL=C sort
-        find "$path" "$@" -type f -exec cksum {} + | LC_ALL=C sort
-    else
-        echo "absent $path"
-    fi
-}
-
-fingerprint_strict() {
-    local path name
-    local prune=()
-    for name in "${activity[@]}"; do
-        prune+=(-path "$state/$name" -prune -o)
-    done
+fingerprint() {
+    local path
     # One subagent per kind of task, expanded on every call so that one which
     # appears shows up. A pattern that matches nothing stays as written and
     # fingerprints as absent.
     local kinds=("$home/.claude/agents/cahoots-kind-"*.md "$home/.codex/agents/cahoots-kind-"*.toml)
-    for path in "${strict[@]}" "${kinds[@]}"; do
-        print_tree "$path"
-    done
-    # The state directory but its activity: an entry nobody knows yet is
-    # strict. An absent one reads as an empty one, since a first run creates
-    # it; anything but a directory there is strict too.
-    if [ -d "$state" ] && [ ! -L "$state" ]; then
-        print_tree "$state" -mindepth 1 "${prune[@]}"
-    elif [ -e "$state" ] || [ -L "$state" ]; then
-        echo "not a directory: $state"
-        print_tree "$state"
-    fi
-}
-
-fingerprint_activity() {
-    local name
-    for name in "${activity[@]}"; do
-        print_tree "$state/$name"
-    done
-}
-
-# What the history is, to tell an append from a rewrite: `absent`, `other`
-# (not a regular file), or `file <crc> <bytes>` — both numbers from ONE read,
-# so a real run appending meanwhile cannot set them apart.
-history_mark() {
-    local sum
-    if [ -L "$history" ]; then
-        echo other
-    elif [ -f "$history" ]; then
-        sum=$(cksum <"$history") || { echo other; return; }
-        echo "file $sum"
-    elif [ -e "$history" ]; then
-        echo other
-    else
-        echo absent
-    fi
-}
-
-# Whether the history is still, or now, a regular file that starts with
-# exactly what it held before. Absent may stay absent.
-history_appended() {
-    local kind crc bytes
-    read -r kind crc bytes <<<"$1"
-    case "$kind" in
-    absent)
-        if [ ! -e "$history" ] && [ ! -L "$history" ]; then
-            return 0
+    for path in "${watched[@]}" "${kinds[@]}"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            # Names catch what appeared or vanished; checksums, what changed.
+            find "$path" -print | LC_ALL=C sort
+            find "$path" -type f -exec cksum {} + | LC_ALL=C sort
+        else
+            echo "absent $path"
         fi
-        [ -f "$history" ] && [ ! -L "$history" ]
-        ;;
-    file)
-        [ -f "$history" ] && [ ! -L "$history" ] || return 1
-        [ "$(head -c "$bytes" "$history" | cksum)" = "$crc $bytes" ]
-        ;;
-    *)
-        return 1
-        ;;
-    esac
+    done
+}
+
+# The paths two fingerprints differ on, one per line.
+changed_paths() {
+    diff <(echo "$1") <(echo "$2") | sed -n 's/^[<>] //p' |
+        sed -E 's/^(absent |[0-9]+ [0-9]+ )//' | LC_ALL=C sort -u
+}
+
+is_run_write() {
+    local path=$1 name
+    for name in "${run_writes[@]}"; do
+        case "$path" in
+        "$state/$name" | "$state/$name/"*) return 0 ;;
+        esac
+    done
+    [ "$path" = "$state" ]
 }
 
 # The repository this script belongs to — all of its worktrees. A hook
@@ -173,8 +116,7 @@ look() {
 
 case "${1:-}" in
 fingerprint)
-    fingerprint_strict
-    fingerprint_activity
+    fingerprint
     ;;
 project)
     project_root || { echo "real-state: cannot find the repository this script belongs to" >&2; exit 2; }
@@ -201,9 +143,7 @@ guard)
     } >"$tmp/bin/cahoots"
     chmod +x "$tmp/bin/cahoots"
 
-    strict_before=$(fingerprint_strict)
-    activity_before=$(fingerprint_activity)
-    history_before=$(history_mark)
+    before=$(fingerprint)
     look >"$tmp/seen"
     (while :; do look; sleep 0.1; done) >>"$tmp/seen" &
     sampler=$!
@@ -215,8 +155,7 @@ guard)
     wait "$sampler" 2>/dev/null || true
     sampler=""
     look >>"$tmp/seen"
-    strict_after=$(fingerprint_strict)
-    activity_after=$(fingerprint_activity)
+    after=$(fingerprint)
     seen=$(LC_ALL=C sort -u "$tmp/seen")
 
     tripped=0
@@ -228,44 +167,39 @@ guard)
             echo "  A test runs the binary it built (CARGO_BIN_EXE_cahoots), on throwaway directories."
         } >&2
     fi
-    if [ "$strict_before" != "$strict_after" ]; then
+    if [ "$before" != "$after" ]; then
         tripped=1
+        run_paths=()
+        other_paths=()
+        while read -r path; do
+            if is_run_write "$path"; then
+                run_paths+=("$path")
+            else
+                other_paths+=("$path")
+            fi
+        done < <(changed_paths "$before" "$after")
         {
             echo
             echo "✗ real-state: the command changed REAL cahoots state under $home"
-            diff <(echo "$strict_before") <(echo "$strict_after") || true
-            echo "  No run writes these, so a real cahoots meanwhile is no excuse."
-            echo "  A test must only ever touch the throwaway directories it is given."
-        } >&2
-    fi
-    if [ "$activity_before" != "$activity_after" ]; then
-        if ! history_appended "$history_before"; then
-            tripped=1
-            {
-                echo
-                echo "✗ real-state: the command REWROTE the real history at $history, or removed or replaced it"
-                echo "  cahoots only ever appends to it, so nothing real did this."
+            if [ ${#run_paths[@]} -gt 0 ]; then
+                echo "  What a run writes:"
+                printf '    %s\n' "${run_paths[@]}"
+            fi
+            if [ ${#other_paths[@]} -gt 0 ]; then
+                echo "  What only install, refresh and settings write — never a run:"
+                printf '    %s\n' "${other_paths[@]}"
+            fi
+            if [ -n "$seen" ]; then
+                echo "  A real cahoots ran meanwhile; rerun when it is idle:"
+                while read -r line; do echo "    $line"; done <<<"$seen"
+                if [ ${#other_paths[@]} -gt 0 ]; then
+                    echo "  But no run writes the second list: a test likely touched real state."
+                fi
+            else
+                echo "  No real cahoots was seen running meanwhile: a test likely touched real state."
                 echo "  A test must only ever touch the throwaway directories it is given."
-            } >&2
-        elif [ -z "$seen" ]; then
-            tripped=1
-            {
-                echo
-                echo "✗ real-state: the command changed REAL cahoots run state under $home"
-                diff <(echo "$activity_before") <(echo "$activity_after") || true
-                echo "  No real cahoots was seen running meanwhile. If one ran only briefly"
-                echo "  (\`review\`, \`outcome\`, a \`status\` sweep), rerun; otherwise a test"
-                echo "  touched more than the throwaway directories it is given."
-            } >&2
-        else
-            {
-                echo
-                echo "real-state: run state under $home changed while a real cahoots ran:"
-                while read -r line; do echo "  $line"; done <<<"$seen"
-                diff <(echo "$activity_before") <(echo "$activity_after") | grep '^[<>]' | sed 's/^/  /' || true
-                echo "  Excused: a run writes these. Everything else stayed exactly as it was."
-            } >&2
-        fi
+            fi
+        } >&2
     fi
     [ "$tripped" = 0 ] || exit 1
     exit "$status"
