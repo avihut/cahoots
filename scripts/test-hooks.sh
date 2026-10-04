@@ -9,7 +9,31 @@ scripts=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$scripts")
 mkdir -p "$root/.cache"
 tmp=$(mktemp -d "$root/.cache/test-hooks.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+# The fake processes the no-strays cases leave running, by pid, one a line.
+fake_pids="$tmp/fake-pids"
+# Kills each recorded fixture and checks that it is gone, however it was
+# started (absolute path or relative): a leftover is a failure of the test.
+reap_fakes() {
+    local pid left=0
+    [ -s "$fake_pids" ] || return 0
+    while read -r pid; do
+        # One that already ended may have had its pid reused: only a fixture
+        # (named cahoots, absolute or `./cahoots`) is touched.
+        ps -p "$pid" -o args= 2>/dev/null | grep -q 'cahoots' || continue
+        kill "$pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "test-hooks: fixture process $pid is still running" >&2
+            left=1
+        fi
+    done <"$fake_pids"
+    : >"$fake_pids"
+    return "$left"
+}
+trap 'reap_fakes; rm -rf "$tmp"' EXIT
 out="$tmp/output.log"
 checks=0
 
@@ -107,13 +131,13 @@ cat >"$tmp/fake-run" <<'SCRIPT'
 #!/usr/bin/env bash
 dir="$(cd "$(dirname "$0")" && pwd -P)/strays-target/debug"
 case "${2:-}" in
-    background) ("$dir/cahoots" "$1" >/dev/null 2>&1 &) ;;
-    relative) (cd "$dir" && ./cahoots "$1" >/dev/null 2>&1 &) ;;
+    background) ("$dir/cahoots" "$1" >/dev/null 2>&1 & echo $! >>"$(dirname "$0")/fake-pids") ;;
+    relative) (cd "$dir" && ./cahoots "$1" >/dev/null 2>&1 & echo $! >>"$(dirname "$0")/fake-pids") ;;
     *) exec "$dir/cahoots" "$1" ;;
 esac
 SCRIPT
 chmod +x "$tmp/fake-run"
-stray_sleeps() { pkill -f "$fake" 2>/dev/null || true; }
+stray_sleeps() { reap_fakes; }
 passes no_strays /bin/sh -c 'echo clean'
 passes no_strays "$tmp/fake-run" 0
 exits 7 no_strays /bin/sh -c 'exit 7'

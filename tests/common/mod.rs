@@ -862,12 +862,8 @@ pub enum Stdout {
 /// where its cursor is (`ESC [ 6 n`): at its far corner, which is its size.
 pub struct AtTerminal {
     child: std::process::Child,
-    /// Leads the command's process group and is never reaped before the group
-    /// is ended, so the group's id is ours until then: signalling it cannot
-    /// reach anyone else's, whenever the command itself is reaped.
-    anchor: std::process::Child,
-    /// The group has been ended: its id is never signalled again.
-    ended: bool,
+    /// Leads the command's process group; see `GroupAnchor`.
+    anchor: GroupAnchor,
     stdout: Stdout,
     master: Arc<OwnedFd>,
     /// Kept open, to read the terminal's mode once the command is gone.
@@ -939,11 +935,24 @@ impl AtTerminal {
 
     /// `start`, with stdin on the terminal or on nothing at all.
     pub fn start_with(
-        mut command: StdCommand,
+        command: StdCommand,
         delay: Duration,
         stdin: Stdin,
         stdout: Stdout,
     ) -> AtTerminal {
+        AtTerminal::start_in(GroupAnchor::spawn(), command, delay, stdin, stdout)
+            .expect("cahoots starts")
+    }
+
+    /// `start_with`, in the process group `anchor` leads. The anchor is owned
+    /// from the start: when this fails, or unwinds, its group is ended.
+    pub fn start_in(
+        anchor: GroupAnchor,
+        mut command: StdCommand,
+        delay: Duration,
+        stdin: Stdin,
+        stdout: Stdout,
+    ) -> std::io::Result<AtTerminal> {
         let size = Winsize {
             ws_row: 24,
             ws_col: 100,
@@ -962,21 +971,9 @@ impl AtTerminal {
                 Stdout::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
             });
         // A group of its own, so that ending the session can end everything
-        // the command started, not only the command. The anchor leads it; it
-        // gives up by itself when the test process is gone.
-        let anchor = StdCommand::new("/bin/sh")
-            .args([
-                "-c",
-                "while kill -0 \"$PPID\" 2>/dev/null; do sleep 1; done",
-            ])
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("a process group");
-        command.process_group(anchor.id() as i32);
-        let child = command.spawn().expect("cahoots starts");
+        // the command started, not only the command.
+        command.process_group(anchor.id());
+        let child = command.spawn()?;
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
         let size = Arc::new(Mutex::new((size.ws_row, size.ws_col)));
@@ -1004,10 +1001,9 @@ impl AtTerminal {
                 }
             })
         };
-        AtTerminal {
+        Ok(AtTerminal {
             child,
             anchor,
-            ended: false,
             stdout,
             master,
             slave: pty.slave,
@@ -1015,18 +1011,12 @@ impl AtTerminal {
             size,
             done,
             reader: Some(reader),
-        }
+        })
     }
 
-    /// Ends the command's group and everything in it, once. Only the anchor
-    /// is reaped here, after the signal: until then the group's id is its pid.
+    /// Ends the command's group and everything in it, once.
     fn end_group(&mut self) {
-        if std::mem::replace(&mut self.ended, true) {
-            return;
-        }
-        let group = nix::unistd::Pid::from_raw(self.anchor.id() as i32);
-        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
-        let _ = self.anchor.wait();
+        self.anchor.end();
     }
 
     /// The terminal is `rows` by `cols` now: it says so the way a terminal
@@ -1082,6 +1072,57 @@ impl AtTerminal {
             screen,
             mode: tcgetattr(self.slave.as_fd()).expect("the terminal's mode"),
         }
+    }
+}
+
+/// A process that leads a process group and is not reaped until the group is
+/// ended, so the group's id stays its pid, and ours: signalling it cannot
+/// reach anyone else's, whenever the group's members are reaped. It gives up
+/// by itself when the test process is gone. Dropping it ends the group.
+pub struct GroupAnchor {
+    leader: std::process::Child,
+    ended: bool,
+}
+
+impl GroupAnchor {
+    pub fn spawn() -> GroupAnchor {
+        let leader = StdCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "while kill -0 \"$PPID\" 2>/dev/null; do sleep 1; done",
+            ])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a process group");
+        GroupAnchor {
+            leader,
+            ended: false,
+        }
+    }
+
+    /// The group's id.
+    pub fn id(&self) -> i32 {
+        self.leader.id() as i32
+    }
+
+    /// Kills the group and reaps its leader, once; the id is never signalled
+    /// again.
+    pub fn end(&mut self) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let group = nix::unistd::Pid::from_raw(self.id());
+        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        let _ = self.leader.wait();
+    }
+}
+
+impl Drop for GroupAnchor {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 

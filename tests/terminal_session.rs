@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{AtTerminal, Stdout, alive, wait_until};
+use common::{AtTerminal, GroupAnchor, Stdin, Stdout, alive, wait_until};
 
 /// A shell that starts a `sleep` of its own and writes its pid to `pidfile`,
 /// then waits: a command with a descendant in its group.
@@ -123,6 +123,28 @@ fn ending_a_session_spares_a_process_in_another_group() {
     let mut bystander = bystander;
     bystander.kill().unwrap();
     bystander.wait().unwrap();
+}
+
+/// A command that does not start leaves nothing of its session behind: the
+/// group's anchor is owned from the moment it exists, and the test process,
+/// which stays alive through the failure, does not have to exit to clean up.
+#[test]
+fn a_command_that_fails_to_start_leaves_no_group_behind() {
+    let anchor = GroupAnchor::spawn();
+    let group = nix::unistd::Pid::from_raw(anchor.id());
+    // Alive: a group with a member answers a signal that is not sent.
+    nix::sys::signal::killpg(group, None).expect("the group is there");
+    let started = AtTerminal::start_in(
+        anchor,
+        Command::new("/nonexistent/cahoots"),
+        Duration::from_millis(0),
+        Stdin::Terminal,
+        Stdout::Terminal,
+    );
+    assert!(started.is_err());
+    wait_until("the group is gone", || {
+        nix::sys::signal::killpg(group, None) == Err(nix::errno::Errno::ESRCH)
+    });
 }
 
 /// The refusal case: what the helper is held against. Without the drop, a
