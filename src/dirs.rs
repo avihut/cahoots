@@ -34,6 +34,15 @@ pub fn passwd_home() -> Res<PathBuf> {
     }
 }
 
+/// The current user's login shell, from the passwd database: a callee's
+/// `SHELL`, never the caller's. `None` when passwd names none.
+pub fn passwd_shell() -> Option<PathBuf> {
+    match User::from_uid(Uid::current()) {
+        Ok(Some(user)) if user.shell.is_absolute() => Some(user.shell),
+        _ => None,
+    }
+}
+
 impl Dirs {
     pub fn resolve() -> Res<Dirs> {
         let overrides = [
@@ -97,6 +106,12 @@ impl Dirs {
 
     pub fn slots(&self) -> PathBuf {
         self.state.join("slots")
+    }
+
+    /// The callees' `TMPDIR`s, one per running run: a tree of its own,
+    /// apart from the runs' directories (`run::record::callee_tmpdir`).
+    pub fn agent_tmp(&self) -> PathBuf {
+        self.state.join("agent-tmp")
     }
 
     /// The eval suite's tasks, one directory each.

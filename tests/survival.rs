@@ -592,7 +592,8 @@ fn survival_unknown_when_the_base_commit_is_gone() {
     assert_eq!(survivals(&world, &run)[0]["unknown"], "base_gone");
 }
 
-/// A `git` at `dir/tools/git` that logs its argv and then is the real git.
+/// A `git` at `dir/tools/git`, pinned, that logs its argv and then is the
+/// real git.
 fn planted_git(world: &World, dir: &Path) -> PathBuf {
     let real = String::from_utf8(
         Command::new("sh")
@@ -611,7 +612,7 @@ fn planted_git(world: &World, dir: &Path) -> PathBuf {
             real.trim()
         ),
     );
-    world.prefix_path(&tools);
+    world.pin_tool("git", Some(&tools.join("git")));
     tools
 }
 

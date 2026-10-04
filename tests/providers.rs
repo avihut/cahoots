@@ -600,7 +600,8 @@ fn doctor_suggests_daft_where_the_repository_has_a_daft_yml() {
     );
     assert!(world.daft_versions().is_empty(), "doctor asked daft");
 
-    // With no git at all, the provider's binary is missing: a failure.
+    // With no git pinned, the provider's binary is missing: a failure.
+    world.pin_tool("git", None);
     let after = world.with_stdin_elsewhere(&["doctor"]).finish();
     assert_eq!(after.code, 34, "{}", after.text());
     let json: Value = serde_json::from_str(after.text().trim()).unwrap();
@@ -608,8 +609,8 @@ fn doctor_suggests_daft_where_the_repository_has_a_daft_yml() {
     assert_eq!(check["status"], "fail", "{check}");
     assert_eq!(
         check["detail"],
-        "no git on PATH — cahoots cannot see a repository without one, so --fork is refused \
-         until git is there"
+        "cahoots cannot see a repository without its git, so --fork is refused until one is \
+         pinned (tools: git says why)"
     );
 }
 
@@ -671,17 +672,30 @@ fn doctor_never_asks_a_git_the_workspace_supplies() {
             marker.display()
         ),
     );
+    // First on PATH, it is nothing to doctor: the pinned git is the one.
     world.prefix_path(&world.work.join("bin"));
     let doctor = world.ask(&["doctor"]);
+    assert_eq!(doctor.code, 0, "{}", doctor.json);
+    assert_eq!(fork_check(&doctor.json)["status"], "ok");
+    // Pinned there, it is refused, and never asked.
+    world.pin_tool("git", Some(&world.work.join("bin/git")));
+    let doctor = world.ask(&["doctor"]);
     assert_eq!(doctor.code, 34, "{}", doctor.json);
-    let check = fork_check(&doctor.json);
-    assert_eq!(check["status"], "fail", "{check}");
+    let git = doctor.json["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "tools: git")
+        .unwrap()
+        .clone();
+    assert_eq!(git["status"], "fail", "{git}");
     assert!(
-        check["detail"]
+        git["detail"]
             .as_str()
             .unwrap()
             .starts_with("refusing to run `git`: "),
-        "{check}"
+        "{git}"
     );
+    assert_eq!(fork_check(&doctor.json)["status"], "fail");
     assert!(!marker.exists(), "the planted git ran");
 }

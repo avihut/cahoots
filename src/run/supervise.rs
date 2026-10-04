@@ -22,9 +22,10 @@ use crate::patch;
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{
-    RunDir, RunRecord, State, now, try_lock_file, write_private, write_private_atomic,
+    self, RunDir, RunRecord, State, now, try_lock_file, write_private, write_private_atomic,
 };
 use crate::spawn::{self, Callee};
+use crate::tools::{self, Tool};
 
 const TICK: Duration = Duration::from_millis(200);
 /// The callee's stdout is kept verbatim, up to this much.
@@ -94,6 +95,15 @@ pub fn supervise(dirs: &Dirs, id: &str) -> Res<()> {
 fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     let registry = Registry::load(dirs)?;
     let entry = registry.harness(record.target.harness);
+    // The tools, located here as every verb that starts one locates them:
+    // from their pins, before anything is cut or started.
+    let tools = tools::locate(&registry.tools, &record.tool_roots()).inspect_err(|fail| {
+        let _ = writeln!(
+            dir.log(),
+            "[supervisor] the tools could not be located: {}",
+            fail.message
+        );
+    })?;
 
     // The slot is held for as long as this function runs. The client looked
     // first, to fail fast; this is the check that counts.
@@ -125,11 +135,11 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
             let cut = placement::cut(
                 dirs,
                 &registry.fork,
-                &base,
+                &tools.git,
+                (&base, record.base_commit.as_ref()),
                 &record.id,
                 &record.tool_roots(),
                 Duration::from_secs(record.timeout_secs),
-                record.base_commit.as_ref(),
             )?;
             record.cwd = cut.worktree;
             record.gitdir = Some(cut.gitdir);
@@ -140,6 +150,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
             if let Some(sha) = &record.base_commit
                 && patch::head(
                     dirs,
+                    &tools.git,
                     &record.cwd,
                     record.gitdir.as_deref(),
                     &record.tool_roots(),
@@ -180,7 +191,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
                 .ok_or_else(|| {
                     format!("the git configuration recorded for run {original} is gone")
                 }),
-            None => placement::config_listing(dirs, &record.cwd, &record.tool_roots()),
+            None => placement::config_listing(dirs, &tools.git, &record.cwd, &record.tool_roots()),
         };
         match recorded {
             Ok(listing) => write_private(&dir.git_config_path(), &listing)?,
@@ -200,6 +211,26 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         resume: record.resume_session.clone(),
     };
     let argv = harness::command_line(&spec)?;
+    // The callee's own, decided against this run's final roots before it
+    // starts: a PATH on which the git it finds first is the located one
+    // (`spawn::git_users_path`), the settings folder the client checked —
+    // checked again, and still the same folder — and a private TMPDIR, made
+    // now and removed on every way out of carry, after the callee's group.
+    let roots = record.tool_roots();
+    let mut binaries: Vec<&std::path::Path> = entry.binary.as_deref().into_iter().collect();
+    binaries.push(&record.binary);
+    let log = |fail: Fail| {
+        let _ = writeln!(dir.log(), "[supervisor] {}", fail.message);
+        fail
+    };
+    let path = spawn::git_users_path(&tools.git, &binaries, tools.recorded.as_deref(), &roots)
+        .map_err(log)?;
+    let home = match &record.home {
+        Some(home) => Some(still_the_home(record.target.harness, home, &roots).map_err(log)?),
+        None => None,
+    };
+    let tmpdir = record::make_callee_tmpdir(dirs, &record.id).map_err(log)?;
+    let _tmpdir = TmpCleanup(dirs.clone(), record.id.clone());
     let mut child = spawn::spawn_callee(&Callee {
         harness: record.target.harness,
         binary: &record.binary,
@@ -210,6 +241,9 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         run_id: &record.id,
         depth: record.depth + 1,
         caller: record.caller,
+        path,
+        tmpdir: &tmpdir,
+        home: home.as_deref(),
     })?;
 
     let pid = child.id() as i32;
@@ -226,7 +260,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     record.state = State::Running;
     record.started_at = Some(now());
     record.callee_pid = Some(pid);
-    let started = spawn::process_started(pid, &record.tool_roots());
+    let started = spawn::process_started(&tools.ps, pid, &record.tool_roots());
     record.callee_started = started;
     dir.save(record)?;
 
@@ -234,7 +268,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         registry: registry.clone(),
         every: Duration::from_secs(registry.limits.watchdog_secs),
     };
-    let (stop, stderr_tail) = attend(dir, record, &mut child, pid, watchdog)?;
+    let (stop, stderr_tail) = attend(dir, record, &mut child, pid, watchdog, &tools.ps)?;
 
     let text = record.progress.final_text.clone().unwrap_or_default();
     write_private(&dir.final_path(), text.as_bytes())?;
@@ -242,7 +276,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     // The group goes now, not when this function returns: nothing the writer
     // left in it may change the tree while its patch is read.
     drop(group);
-    keep_patch(dirs, dir, record);
+    keep_patch(dirs, &tools.git, dir, record);
 
     let failure = record.progress.failure.clone();
     let (state, exit, message) = match stop {
@@ -282,7 +316,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
 /// the same run always answers the same way. Bookkeeping: a patch that
 /// cannot be kept leaves `patch` empty and a line in the log, and never
 /// changes how the run ended.
-fn keep_patch(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) {
+fn keep_patch(dirs: &Dirs, git: &Tool, dir: &RunDir, record: &mut RunRecord) {
     record.patch = None;
     // A fork whose cut failed has no worktree: its `cwd` is still the base.
     let Some(base) = record
@@ -300,14 +334,21 @@ fn keep_patch(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) {
         return;
     };
     let roots = record.tool_roots();
-    let kept = placement::fork_git_dir(dirs, &record.cwd, base, record.gitdir.as_deref(), &roots)
-        .and_then(|gitdir| {
-            patch::capture(dirs, &record.cwd, &gitdir, sha, &roots).map_err(|fail| fail.message)
-        })
-        .and_then(|bytes| {
-            write_private_atomic(&dir.patch_path(), &bytes).map_err(|fail| fail.message)?;
-            Ok(patch::summarize(&bytes))
-        });
+    let kept = placement::fork_git_dir(
+        dirs,
+        git,
+        &record.cwd,
+        base,
+        record.gitdir.as_deref(),
+        &roots,
+    )
+    .and_then(|gitdir| {
+        patch::capture(dirs, git, &record.cwd, &gitdir, sha, &roots).map_err(|fail| fail.message)
+    })
+    .and_then(|bytes| {
+        write_private_atomic(&dir.patch_path(), &bytes).map_err(|fail| fail.message)?;
+        Ok(patch::summarize(&bytes))
+    });
     match kept {
         Ok(summary) => record.patch = Some(summary),
         Err(why) => {
@@ -332,6 +373,7 @@ fn attend(
     child: &mut Child,
     pid: i32,
     watchdog: Watchdog,
+    ps: &Tool,
 ) -> Res<(Option<Stop>, String)> {
     let harness = harness::harness(record.target.harness);
     let (sender, lines) = mpsc::channel();
@@ -421,7 +463,7 @@ fn attend(
                 );
                 if over_readings >= OVER_READINGS_TO_STOP && stop.is_none() && !exited {
                     stop = Some(Stop::OverBudget(percent));
-                    ladder = Some(Ladder::start(pid, record));
+                    ladder = Some(Ladder::start(pid, record, ps));
                 }
             }
             // "In a row" means what it says: a reading that is under, or that
@@ -456,7 +498,7 @@ fn attend(
                     stop = Some(Stop::TimedOut);
                 }
                 if stop.is_some() {
-                    ladder = Some(Ladder::start(pid, record));
+                    ladder = Some(Ladder::start(pid, record, ps));
                 }
             }
             if let Some(ladder) = &mut ladder {
@@ -516,6 +558,37 @@ fn read_lines<R: Read + Send + 'static>(
 /// reaches them.
 struct GroupCleanup(i32);
 
+/// Removes the run's temp directory when carry returns, however it does —
+/// declared before the callee's group, so it goes after the group does.
+struct TmpCleanup(Dirs, String);
+
+impl Drop for TmpCleanup {
+    fn drop(&mut self) {
+        record::remove_callee_tmpdir(&self.0, &self.1);
+    }
+}
+
+/// The settings folder the client checked (`RunRecord::home`, canonical),
+/// checked again against the run's final roots: still outside them and the
+/// temp directories, still this user's alone — and still itself, so that a
+/// link put in its place since is refused, never followed.
+fn still_the_home(
+    harness: crate::model::HarnessId,
+    home: &std::path::Path,
+    roots: &[&std::path::Path],
+) -> Res<std::path::PathBuf> {
+    let now = crate::pick::usable_home(harness, home, roots)?;
+    if now != home {
+        return Err(Fail::policy(format!(
+            "refusing to use harness.{harness}.home {}: it now leads to {}, not the folder that \
+             was checked",
+            home.display(),
+            now.display()
+        )));
+    }
+    Ok(now)
+}
+
 impl Drop for GroupCleanup {
     fn drop(&mut self) {
         spawn::signal_group(self.0, Signal::SIGKILL);
@@ -536,10 +609,10 @@ struct Ladder {
 }
 
 impl Ladder {
-    fn start(pgid: i32, record: &RunRecord) -> Ladder {
+    fn start(pgid: i32, record: &RunRecord, ps: &Tool) -> Ladder {
         Ladder {
             pgid,
-            descendants: spawn::descendants(pgid, &record.tool_roots()),
+            descendants: spawn::descendants(ps, pgid, &record.tool_roots()),
             rung: 0,
             next: Instant::now(),
             int_grace: Duration::from_secs(record.int_grace_secs),

@@ -31,6 +31,7 @@ use crate::patch::{self, Commit, PatchSummary};
 use crate::placement;
 use crate::run::record::State;
 use crate::spawn;
+use crate::tools::Tool;
 
 /// How long after a run finishes its survival is settled.
 pub const WINDOW_DAYS: u64 = 14;
@@ -140,9 +141,9 @@ impl TryFrom<RawPin> for RepoPin {
 /// client, before the writer exists, never later. `None` if the tree's git
 /// directory and the common directory are not both owned git directories at
 /// git's layout; such a run is not measured.
-pub fn pin(dirs: &Dirs, dir: &Path, roots: &[&Path]) -> Option<RepoPin> {
-    let tree = placement::git_dir_of(dirs, dir, roots)?;
-    let (_, common) = spawn::git_roots(dir, roots).ok()??;
+pub fn pin(dirs: &Dirs, git: &Tool, dir: &Path, roots: &[&Path]) -> Option<RepoPin> {
+    let tree = placement::git_dir_of(dirs, git, dir, roots)?;
+    let (_, common) = spawn::git_roots(git, dir, roots).ok()??;
     let tree = spawn::owned_git_dir(&tree)?;
     let common = spawn::owned_git_dir(&common)?;
     at_layout(&tree, &common).then_some(RepoPin { tree, common })
@@ -332,14 +333,14 @@ pub fn standings<'a>(
 /// Measures `story` now. Never fails: a step that cannot be taken is an
 /// unknown measurement, with its reason. `roots` is the asking process's
 /// workspace: no `git` from it, or from the repository, is run.
-pub fn measure(dirs: &Dirs, story: &Story, roots: &[&Path]) -> Measure {
-    match measuring(dirs, story, roots) {
+pub fn measure(dirs: &Dirs, git: &Tool, story: &Story, roots: &[&Path]) -> Measure {
+    match measuring(dirs, git, story, roots) {
         Ok(measure) => measure,
         Err(why) => Measure::unknown(why),
     }
 }
 
-fn measuring(dirs: &Dirs, story: &Story, roots: &[&Path]) -> Result<Measure, Why> {
+fn measuring(dirs: &Dirs, git: &Tool, story: &Story, roots: &[&Path]) -> Result<Measure, Why> {
     let started = Instant::now();
     let (Some(pin), Some(base), Some(summary)) = (
         story.base_repo.as_ref(),
@@ -360,11 +361,11 @@ fn measuring(dirs: &Dirs, story: &Story, roots: &[&Path]) -> Result<Measure, Why
     if story.dir.exists() {
         roots.push(&story.dir);
     }
-    let git = spawn::system_tool("git", &roots).map_err(|fail| match fail.exit {
+    let path = git.path(&roots);
+    let git = git.at(&roots).map_err(|fail| match fail.exit {
         Exit::Policy => Why::GitRefused,
         _ => Why::GitFailed,
     })?;
-    let path = spawn::helper_path(&roots);
     let mut prefix = placement::quiet_git_args(dirs).map_err(|_| Why::GitFailed)?;
     let mut git_dir = OsString::from("--git-dir=");
     git_dir.push(&gitdir);
@@ -419,8 +420,8 @@ fn measuring(dirs: &Dirs, story: &Story, roots: &[&Path]) -> Result<Measure, Why
 /// Measures `story` and appends the measurement to the history. The
 /// measurement is returned whatever the append did, and so is the append's
 /// failure: a caller that has already said its piece may ignore it.
-pub fn record(dirs: &Dirs, story: &Story, roots: &[&Path]) -> (Event, Res<()>) {
-    let event = measure(dirs, story, roots).event(&story.run, crate::run::record::now());
+pub fn record(dirs: &Dirs, git: &Tool, story: &Story, roots: &[&Path]) -> (Event, Res<()>) {
+    let event = measure(dirs, git, story, roots).event(&story.run, crate::run::record::now());
     let appended = history::append(dirs, &event);
     (event, appended)
 }
@@ -448,6 +449,7 @@ pub fn due<'a>(stories: &'a [Story], superseded: &BTreeSet<String>, now: u64) ->
 /// way, for `report` to fold in; what it did not reach stays pending.
 pub fn catch_up(
     dirs: &Dirs,
+    git: &Tool,
     stories: &[Story],
     superseded: &BTreeSet<String>,
     now: u64,
@@ -461,7 +463,7 @@ pub fn catch_up(
         REPORT_BUDGET,
         DEADLINE,
         || started.elapsed(),
-        |story| events.push(record(dirs, story, roots).0),
+        |story| events.push(record(dirs, git, story, roots).0),
     );
     CatchUp { events, pending }
 }

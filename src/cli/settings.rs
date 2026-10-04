@@ -21,6 +21,7 @@ use crate::meter::{MeterFile, MeterId};
 use crate::model::{HarnessId, Role};
 use crate::registry::{Registry, RoleEntry};
 use crate::settings::{self, Key, Kind, Origin, Section, Setting, Source, Unit, Value};
+use crate::tools::ToolId;
 use crate::tui::{self, Answer, Block, Choice, Edit, Ending, Event, Item, Last, Row};
 
 /// `cahoots settings`, and with `person`, its end in words, under `title`.
@@ -154,8 +155,16 @@ fn page_closed(title: String, lines: Vec<String>) -> Ending {
     }
 }
 
-/// `enable`'s words: the line its change to config.toml is said with.
-pub(super) fn enabled(dirs: &Dirs, harness: HarnessId, on: bool, title: String) -> Res<Ending> {
+/// `enable`'s words: the lines its changes to config.toml are said with —
+/// the program it pinned, the PATH and settings folder it recorded — and
+/// last, `enabled` itself.
+pub(super) fn enabled(
+    dirs: &Dirs,
+    harness: HarnessId,
+    on: bool,
+    done: &crate::registry::Enabled,
+    title: String,
+) -> Res<Ending> {
     let key = Key::Enabled(harness);
     let said = if on {
         said_set(&key, &Value::Bool(true))
@@ -163,7 +172,39 @@ pub(super) fn enabled(dirs: &Dirs, harness: HarnessId, on: bool, title: String) 
         let now = current(dirs)?;
         said_reset(&key, now.iter().find(|s| s.key == key))
     };
-    Ok(Ending::just(Some(title), Last::Said(said)))
+    let now = UserConfig::load(&dirs.config_file())?;
+    let mut lines = Vec::new();
+    if done.pinned
+        && let Some(binary) = &done.binary
+    {
+        lines.push(format!(
+            "Pinned {}: {} runs only from it",
+            tilde(binary, &dirs.home),
+            name(harness)
+        ));
+    }
+    if done.path_recorded
+        && let Some(path) = &now.tools.path
+    {
+        lines.push(saved("tools.path", path));
+    }
+    if done.home_recorded
+        && let Some(home) = now.harness.get(&harness).and_then(|h| h.home.as_ref())
+    {
+        lines.push(saved(
+            &format!("harness.{harness}.home"),
+            tilde(home, &dirs.home),
+        ));
+    }
+    if lines.is_empty() {
+        return Ok(Ending::just(Some(title), Last::Said(said)));
+    }
+    Ok(Ending {
+        title: Some(title),
+        blocks: vec![Block::Lines(lines)],
+        last: Last::Said(said),
+        paste: Vec::new(),
+    })
 }
 
 /// `registry` in words: every setting in effect, under its section as on
@@ -273,10 +314,7 @@ fn said_reset(key: &Key, before: Option<&Setting>) -> String {
     let (table, name) = split(key);
     match before {
         Some(setting) => {
-            let unset = match key {
-                Key::ForkDaftBinary => NOT_CHOSEN,
-                _ => "not set",
-            };
+            let unset = unset(key);
             let back = setting
                 .default
                 .as_ref()
@@ -328,7 +366,12 @@ fn rows(settings: &[Setting], home: &Path) -> Vec<Row> {
                 label,
                 value: match (&setting.value, &setting.key) {
                     (Some(Value::Program(path)), _) => tilde(path, home),
-                    (None, Key::ForkDaftBinary) => NOT_CHOSEN.to_string(),
+                    (Some(Value::Text(path)), Key::ToolsPath) => {
+                        let folders = path.split(':').count();
+                        format!("{folders} folder{}", if folders == 1 { "" } else { "s" })
+                    }
+                    (Some(Value::Text(path)), Key::Home(_)) => tilde(Path::new(path), home),
+                    (None, key) => unset(key).to_string(),
                     (value, _) => shown(value.as_ref(), &setting.kind),
                 },
                 origin: match setting.origin {
@@ -350,6 +393,7 @@ fn section(section: Section) -> String {
         Section::Meter => "Usage meter".to_string(),
         Section::Runs => "Runs".to_string(),
         Section::Fork => "Worktrees".to_string(),
+        Section::Tools => "Tools".to_string(),
         Section::Review => "Review".to_string(),
         Section::Roles => "Roles".to_string(),
         Section::TaskKind(name) => format!("Kind · {name}"),
@@ -396,7 +440,39 @@ fn words(key: &Key) -> (String, String) {
             "Billing",
             format!("How {} is paid for when cahoots runs it.", name(*id)),
         ),
-        Key::Binary(id) => ("Program", format!("Which {} program runs.", name(*id))),
+        Key::Binary(id) => (
+            "Program",
+            format!(
+                "Which {} program runs. It runs only from a program chosen here.",
+                name(*id)
+            ),
+        ),
+        Key::Home(id) => (
+            "Settings folder",
+            match id {
+                HarnessId::Claude => "Where Claude Code keeps its settings and sign-in \
+                                      (CLAUDE_CONFIG_DIR) when a delegated run starts it. Unset, \
+                                      it uses its own default in your home.",
+                HarnessId::Codex => "Where Codex keeps its settings and sign-in (CODEX_HOME) \
+                                     when a delegated run starts it. Unset, it uses its own \
+                                     default in your home.",
+            }
+            .to_string(),
+        ),
+        Key::Tool(id) => (
+            match id {
+                ToolId::Git => "git program",
+                ToolId::Ps => "ps program",
+            },
+            format!("Which {id} cahoots runs. {id} runs only from a program chosen here."),
+        ),
+        Key::ToolsPath => (
+            "Your PATH",
+            "Where the programs cahoots starts, delegated agents included, find the tools they \
+             run, after their own folders and the system's. `cahoots install` records your PATH \
+             here. Nothing an agent sets changes it."
+                .to_string(),
+        ),
         Key::Meter => (
             "Meter",
             "Where cahoots reads how much of each plan is used.".to_string(),
@@ -558,8 +634,19 @@ fn role_work(role: Role) -> &'static str {
     }
 }
 
-/// An unchosen daft, as the page shows it: there is none to run.
+/// An unchosen program, as the page shows it: there is none to run.
 const NOT_CHOSEN: &str = "not chosen";
+
+/// A setting with no value, as the page shows it.
+fn unset(key: &Key) -> &'static str {
+    match key {
+        Key::ForkDaftBinary | Key::Tool(_) | Key::Binary(_) => NOT_CHOSEN,
+        Key::ToolsPath => "not recorded",
+        Key::Home(_) => "default",
+        Key::MeterBinary(_) => "not found",
+        _ => "not set",
+    }
+}
 
 /// A value as the page shows it.
 fn shown(value: Option<&Value>, kind: &Kind) -> String {
@@ -619,6 +706,19 @@ fn note(setting: &Setting) -> String {
         (Origin::Config, Key::ForkDaftBinary, _) => {
             "Set in config.toml. Without it, daft never runs.".to_string()
         }
+        (Origin::Config, Key::Binary(id), _) => {
+            format!("Set in config.toml. Without it, {} never runs.", name(*id))
+        }
+        (Origin::Config, Key::Tool(_), _) => {
+            "Set in config.toml. Without it, agents' runs are refused.".to_string()
+        }
+        (Origin::Config, Key::ToolsPath, _) => {
+            "Recorded in config.toml. `cahoots install` records your PATH again.".to_string()
+        }
+        (Origin::Config, Key::Home(id), _) => format!(
+            "Set in config.toml. Without it, {} uses its own default in your home.",
+            name(*id)
+        ),
         (Origin::Config, _, _) => match &setting.default {
             Some(default) => format!(
                 "Set in config.toml. The default is {}.",
@@ -635,12 +735,25 @@ fn note(setting: &Setting) -> String {
             "Where `cahoots install` found it. Choose another, and it is saved to config.toml."
                 .to_string()
         }
-        (Origin::Default, Key::Binary(_), None) => {
-            "Not on your PATH: runs to it are refused until it is.".to_string()
+        (Origin::Default, Key::Binary(id), _) => format!(
+            "Not chosen: {} runs only from a program chosen here, or by `cahoots enable {id}`.",
+            name(*id)
+        ),
+        (Origin::Default, Key::Tool(_), _) => {
+            "Not chosen: agents' runs are refused until one is. Choose one, and it is saved to \
+             config.toml."
+                .to_string()
         }
-        (Origin::Default, Key::Binary(_), Some(_)) => {
-            "The first on your PATH. Choose another, and it is saved to config.toml.".to_string()
+        (Origin::Default, Key::ToolsPath, _) => {
+            "Not recorded: delegated agents find only their own and the system's tools. \
+             `cahoots install` records your PATH."
+                .to_string()
         }
+        (Origin::Default, Key::Home(id), _) => format!(
+            "Unset: {} uses its own default in your home. Set it with `cahoots settings set \
+             harness.{id}.home <folder>`.",
+            name(*id)
+        ),
         (Origin::Default, Key::MeterBinary(_), None) => {
             "Not found: `cahoots install` looks for it.".to_string()
         }
@@ -884,6 +997,7 @@ mod tests {
                 "Usage meter",
                 "Runs",
                 "Worktrees",
+                "Tools",
                 "Review",
                 "Roles"
             ],

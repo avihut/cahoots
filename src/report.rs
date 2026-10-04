@@ -402,12 +402,27 @@ fn settle(
     if crate::env::in_codex_sandbox() {
         return untouched();
     }
-    let Ok(workspace) = std::env::current_dir().and_then(|cwd| {
-        Workspace::around(&cwd).map_err(|fail| std::io::Error::other(fail.message))
-    }) else {
+    // The located git, or none: a setup that pins none measures nothing, and
+    // its runs stay pending until it does.
+    let Ok(cwd) = std::env::current_dir() else {
         return untouched();
     };
-    survival::catch_up(dirs, stories, superseded, now, &workspace.roots())
+    let Ok(tools) = Registry::load(dirs)
+        .and_then(|registry| crate::tools::locate_around(&registry.tools, &cwd))
+    else {
+        return untouched();
+    };
+    let Ok(workspace) = Workspace::around(&cwd, &tools.git) else {
+        return untouched();
+    };
+    survival::catch_up(
+        dirs,
+        &tools.git,
+        stories,
+        superseded,
+        now,
+        &workspace.roots(),
+    )
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::exit::{Exit, Fail, Res};
 use crate::spawn;
+use crate::tools::Tool;
 
 pub const BRIEF_MAX_BYTES: u64 = 256 * 1024;
 
@@ -22,13 +23,13 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// A `git` planted in the working directory or its repository is refused
-    /// here, so every verb that asks where it is refuses it.
-    pub fn around(cwd: &Path) -> Res<Workspace> {
+    /// The located `git`, pinned in the working directory or its repository,
+    /// is refused here, so every verb that asks where it is refuses it.
+    pub fn around(cwd: &Path, git: &Tool) -> Res<Workspace> {
         let cwd = fs::canonicalize(cwd).map_err(|error| {
             Fail::internal(format!("cannot resolve the working directory: {error}"))
         })?;
-        let roots = spawn::git_roots(&cwd, &[&cwd])?;
+        let roots = spawn::git_roots(git, &cwd, &[&cwd])?;
         Ok(Workspace {
             toplevel: roots.as_ref().map(|(top, _)| top.clone()),
             common_dir: roots.map(|(_, common)| common),
@@ -94,8 +95,9 @@ pub fn read_brief(path: &Path, workspace: &Workspace) -> Res<String> {
 }
 
 /// Where the callee works. Default: the caller's working directory. `--dir`
-/// may only name another worktree of the SAME repository.
-pub fn run_dir(requested: Option<&Path>, workspace: &Workspace) -> Res<PathBuf> {
+/// may only name another worktree of the SAME repository, as the located
+/// `git` reads it.
+pub fn run_dir(requested: Option<&Path>, workspace: &Workspace, git: &Tool) -> Res<PathBuf> {
     let Some(requested) = requested else {
         return Ok(workspace.cwd.clone());
     };
@@ -108,7 +110,7 @@ pub fn run_dir(requested: Option<&Path>, workspace: &Workspace) -> Res<PathBuf> 
     if resolved.starts_with(&workspace.cwd) {
         return Ok(resolved);
     }
-    let theirs = spawn::git_roots(&resolved, &workspace.roots())?.map(|(_, common)| common);
+    let theirs = spawn::git_roots(git, &resolved, &workspace.roots())?.map(|(_, common)| common);
     match (&workspace.common_dir, theirs) {
         (Some(ours), Some(theirs)) if *ours == theirs => Ok(resolved),
         _ => Err(Fail::policy(format!(
@@ -192,14 +194,15 @@ mod tests {
         let there = tempfile::tempdir().unwrap();
         let ws = workspace(here.path());
         fs::create_dir(here.path().join("sub")).unwrap();
-        assert_eq!(run_dir(None, &ws).unwrap(), ws.cwd);
-        assert!(run_dir(Some(&here.path().join("sub")), &ws).is_ok());
+        let git = crate::tools::tests::tests_located().git;
+        assert_eq!(run_dir(None, &ws, &git).unwrap(), ws.cwd);
+        assert!(run_dir(Some(&here.path().join("sub")), &ws, &git).is_ok());
         assert_eq!(
-            run_dir(Some(there.path()), &ws).unwrap_err().exit,
+            run_dir(Some(there.path()), &ws, &git).unwrap_err().exit,
             Exit::Policy
         );
         assert_eq!(
-            run_dir(Some(Path::new("/")), &ws).unwrap_err().exit,
+            run_dir(Some(Path::new("/")), &ws, &git).unwrap_err().exit,
             Exit::Policy
         );
     }

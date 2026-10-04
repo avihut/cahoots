@@ -25,6 +25,7 @@ use crate::model::{Candidate, HarnessId, ModelName, Role, TaskKindName};
 use crate::placement::provider::{self, ProviderId};
 use crate::registry::{self, Registry};
 use crate::spawn;
+use crate::tools::{self, ToolId};
 
 /// A setting, by what it sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,12 @@ pub enum Key {
     /// `fork.daft.binary`: the one daft that may run.
     ForkDaftBinary,
     ForkDaftHooks,
+    /// `tools.<name>.binary`: the one git, or ps, that may run.
+    Tool(ToolId),
+    /// `tools.path`: the PATH a person recorded for every started program.
+    ToolsPath,
+    /// `harness.<id>.home`: its settings folder when a run starts it.
+    Home(HarnessId),
     Review,
     Blind,
     SampleRate,
@@ -79,6 +86,7 @@ pub enum Section {
     Meter,
     Runs,
     Fork,
+    Tools,
     Review,
     Roles,
     TaskKind(TaskKindName),
@@ -97,6 +105,7 @@ impl Key {
                 MaxConcurrent(id),
                 Billing(id),
                 Binary(id),
+                Home(id),
             ]);
         }
         keys.extend([
@@ -119,6 +128,9 @@ impl Key {
             ForkProvider,
             ForkDaftBinary,
             ForkDaftHooks,
+            Tool(ToolId::Git),
+            Tool(ToolId::Ps),
+            ToolsPath,
             Review,
             Blind,
             SampleRate,
@@ -166,6 +178,9 @@ impl Key {
             ForkProvider => "fork.provider".to_string(),
             ForkDaftBinary => "fork.daft.binary".to_string(),
             ForkDaftHooks => "fork.daft.hooks".to_string(),
+            Tool(id) => id.key(),
+            ToolsPath => "tools.path".to_string(),
+            Home(id) => format!("harness.{id}.home"),
             Review => "review.enabled".to_string(),
             Blind => "review.blind".to_string(),
             SampleRate => "review.sample_rate".to_string(),
@@ -203,14 +218,14 @@ impl Key {
     pub fn section(&self) -> Section {
         use Key::*;
         match self {
-            Enabled(id) | Cap(id) | AbortAt(id) | MaxConcurrent(id) | Billing(id) | Binary(id) => {
-                Section::Harness(*id)
-            }
+            Enabled(id) | Cap(id) | AbortAt(id) | MaxConcurrent(id) | Billing(id) | Binary(id)
+            | Home(id) => Section::Harness(*id),
             Meter | MeterBinary(_) | MaxDataAge | ClaudeBlockTokens | CodexDayTokens
             | RunsPerHour | TokensPerDay => Section::Meter,
             MaxActiveRuns | MaxDepth | Timeout | Wait | IntGrace | TermGrace | Watchdog
             | AllowInPlace => Section::Runs,
             ForkProvider | ForkDaftBinary | ForkDaftHooks => Section::Fork,
+            Tool(_) | ToolsPath => Section::Tools,
             Review | Blind | SampleRate | ApplyRouting => Section::Review,
             Candidates(_) | Calibrate(_) | ExploreShare(_) => Section::Roles,
             KindDescription(name)
@@ -330,6 +345,15 @@ pub struct Setting {
     pub locked: bool,
 }
 
+/// The copies of `name` on `path` (a person's PATH) that pass the binary
+/// policy: what the page offers to choose from. Nothing is run.
+fn on_path(name: &str, path: Option<&OsStr>) -> Vec<PathBuf> {
+    spawn::find_all_on_path(name, path)
+        .into_iter()
+        .filter(|binary| spawn::resolve_binary(binary, &[]).is_ok())
+        .collect()
+}
+
 /// Every setting as it is now. `found` is what `install` found
 /// (`meter.json`); `path` is the PATH the harnesses' programs are looked for
 /// on. A role's `calibrate` is there only once its list is the person's own:
@@ -393,21 +417,31 @@ pub fn current(
             Some(Value::Name(billing(base.harness(id).billing))),
             set(|u| u.billing.is_some()),
         ));
-        let name = crate::harness::harness(id).binary_name();
-        let on_path: Vec<PathBuf> = spawn::find_all_on_path(name, path)
-            .into_iter()
-            .filter(|binary| spawn::resolve_binary(name, Some(binary), &[]).is_ok())
-            .collect();
+        // Never "the first on PATH": an unpinned harness never runs. The
+        // copies on PATH are offered to choose from, and nothing is asked of
+        // them here.
         let pinned = user.and_then(|u| u.binary.clone());
-        let programs = programs(pinned.as_deref(), on_path.iter().map(|p| (p, Source::Path)));
-        // What a run takes with none pinned: the first on PATH, as it is.
-        let first = spawn::find_on_path(name, path).map(Value::Program);
+        let programs = programs(
+            pinned.as_deref(),
+            on_path(crate::harness::harness(id).binary_name(), path)
+                .iter()
+                .map(|p| (p, Source::Path)),
+        );
         all.push(Setting::new(
             Key::Binary(id),
             Kind::Program(programs),
-            pinned.clone().map(Value::Program).or(first.clone()),
-            first,
+            pinned.clone().map(Value::Program),
+            None,
             origin(pinned.is_some()),
+        ));
+        let home = user.and_then(|u| u.home.clone());
+        all.push(Setting::new(
+            Key::Home(id),
+            Kind::Text,
+            home.as_ref()
+                .map(|home| Value::Text(home.display().to_string())),
+            None,
+            origin(home.is_some()),
         ));
     }
 
@@ -576,15 +610,11 @@ pub fn current(
     // Never "the first on PATH": an unchosen daft never runs. The copies on
     // PATH are offered to choose from, and nothing is asked of them here.
     let pinned = daft.and_then(|daft| daft.binary.clone());
-    let on_path: Vec<PathBuf> = spawn::find_all_on_path("daft", path)
-        .into_iter()
-        .filter(|binary| spawn::resolve_binary("daft", Some(binary), &[]).is_ok())
-        .collect();
     all.push(Setting::new(
         Key::ForkDaftBinary,
         Kind::Program(programs(
             pinned.as_deref(),
-            on_path.iter().map(|p| (p, Source::Path)),
+            on_path("daft", path).iter().map(|p| (p, Source::Path)),
         )),
         pinned.clone().map(Value::Program),
         None,
@@ -595,6 +625,29 @@ pub fn current(
         now.fork.daft_hooks,
         base.fork.daft_hooks,
         origin(daft.and_then(|daft| daft.hooks).is_some()),
+    ));
+
+    // The same for git and ps: an unpinned tool never runs, and agents' runs
+    // are refused until one is chosen.
+    for id in ToolId::ALL {
+        let pinned = now.tools.of(id).map(Path::to_path_buf);
+        all.push(Setting::new(
+            Key::Tool(id),
+            Kind::Program(programs(
+                pinned.as_deref(),
+                on_path(id.name(), path).iter().map(|p| (p, Source::Path)),
+            )),
+            pinned.clone().map(Value::Program),
+            None,
+            origin(pinned.is_some()),
+        ));
+    }
+    all.push(Setting::new(
+        Key::ToolsPath,
+        Kind::Text,
+        now.tools.path.clone().map(Value::Text),
+        None,
+        origin(now.tools.path.is_some()),
     ));
 
     let review = &config.review;
@@ -838,9 +891,16 @@ impl Setting {
         }
         Ok(match &self.kind {
             Kind::Text => {
-                if let Key::KindDescription(name) = key {
-                    config::validate_kind_description(name, text)
-                        .map_err(|fail| Fail::new(Exit::Usage, fail.message))?;
+                match key {
+                    Key::KindDescription(name) => {
+                        config::validate_kind_description(name, text)
+                            .map_err(|fail| Fail::new(Exit::Usage, fail.message))?;
+                    }
+                    Key::ToolsPath => {
+                        tools::check_path(text, &tools::recording_temp_roots()).map_err(refuse)?;
+                    }
+                    Key::Home(_) => tools::check_home(Path::new(text)).map_err(refuse)?,
+                    _ => {}
                 }
                 Value::Text(text.to_string())
             }
@@ -877,16 +937,10 @@ impl Setting {
                     return Err(refuse("an absolute path".to_string()));
                 }
                 let held = match key {
-                    Key::Binary(id) => spawn::resolve_binary(
-                        crate::harness::harness(*id).binary_name(),
-                        Some(&path),
-                        &[],
-                    )
-                    .map(drop),
-                    Key::MeterBinary(id) => Exe::pin(*id, &path).map(drop),
-                    Key::ForkDaftBinary => {
-                        spawn::resolve_binary("daft", Some(&path), &[]).map(drop)
+                    Key::Binary(_) | Key::ForkDaftBinary | Key::Tool(_) => {
+                        spawn::resolve_binary(&path, &[]).map(drop)
                     }
+                    Key::MeterBinary(_) => Exe::pin(&path).map(drop),
                     _ => Ok(()),
                 };
                 held.map_err(|fail| refuse(fail.message))?;
@@ -982,17 +1036,64 @@ impl fmt::Display for Value {
 
 /// Sets one setting in config.toml, and returns the config it now holds. A
 /// change the config refuses (a cap above where runs stop) is `Usage`, and
-/// the file is left as it was. A daft is asked its version first, and one
-/// that is not daft, or older than cahoots supports, is refused the same
-/// way: the one setting whose saving runs a program.
+/// the file is left as it was. A program — a harness, daft, git or ps — is
+/// held to exactly what a run holds it to first, its version or its answer
+/// included, and one that does not locate is refused the same way: the
+/// settings whose saving runs a program.
 pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
-    if let (Key::ForkDaftBinary, Value::Program(path)) = (key, value) {
-        provider::locate_pinned_daft(path, &[]).map_err(|fail| {
+    if let Value::Program(path) = value {
+        let refuse = |fail: Fail| {
             Fail::new(
                 Exit::Usage,
                 format!("{key} = {}: {}", path.display(), fail.message),
             )
-        })?;
+        };
+        if matches!(key, Key::ForkDaftBinary | Key::Tool(_) | Key::Binary(_)) {
+            // Held to what `install` and `enable` pin from (`tools::pin_unfit`):
+            // never a program in a temp directory, one everyone can write, or
+            // the person's own repository — where it is or where it
+            // resolves — and located with that repository's roots.
+            let workspace = std::env::current_dir()
+                .map(|cwd| tools::repository_around(&cwd))
+                .unwrap_or_default();
+            if let Some(why) = tools::pin_unfit(path, &workspace) {
+                return Err(refuse(Fail::new(Exit::Usage, why)));
+            }
+            let roots: Vec<&Path> = workspace.iter().map(PathBuf::as_path).collect();
+            let now = Registry::effective(&UserConfig::load(file)?);
+            let recorded = now.tools.recorded();
+            if let Key::Tool(id) = key {
+                tools::locate_one(*id, Some(path), recorded.as_deref(), &roots).map_err(refuse)?;
+            } else {
+                // daft and a harness run git of their own: neither is asked
+                // anything until the git it would find first is the located
+                // one.
+                let git = tools::locate_one(
+                    ToolId::Git,
+                    now.tools.git.as_deref(),
+                    recorded.as_deref(),
+                    &roots,
+                )
+                .map_err(refuse)?;
+                match key {
+                    Key::ForkDaftBinary => {
+                        provider::locate_pinned_daft(path, &git, &roots).map_err(refuse)?;
+                    }
+                    Key::Binary(id) => {
+                        crate::pick::locate_pinned(
+                            *id,
+                            path,
+                            now.harness(*id).home.as_deref(),
+                            Some(&git),
+                            recorded.as_deref(),
+                            &roots,
+                        )
+                        .map_err(refuse)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     if let Key::KindDescription(name)
     | Key::KindRole(name)
@@ -1216,16 +1317,41 @@ mod tests {
             [dirs[0].join("codex"), dirs[2].join("codex")],
             "the one anyone could write is not offered"
         );
-        assert_eq!(binary.value, Some(Value::Program(dirs[0].join("codex"))));
+        // With none pinned, none runs: the value and the default are none,
+        // never "the first on PATH".
+        assert_eq!((&binary.value, &binary.default), (&None, &None));
         assert_eq!(binary.origin, Origin::Default);
-        // With none pinned, what is shown is what a run would take: the first
-        // on PATH, even one the policy then refuses.
-        let path = std::env::join_paths(&dirs[1..]).unwrap();
-        let settings = current(&UserConfig::default(), None, Some(&path));
-        assert_eq!(
-            setting(&settings, "harness.codex.binary").value,
-            Some(Value::Program(dirs[1].join("codex")))
+        let pinned = current(
+            &config(&format!(
+                "schema = 1\nharness.codex.binary = {:?}",
+                dirs[2].join("codex")
+            )),
+            None,
+            Some(&path),
         );
+        let binary = setting(&pinned, "harness.codex.binary");
+        assert_eq!(binary.value, Some(Value::Program(dirs[2].join("codex"))));
+        assert_eq!(binary.origin, Origin::Config);
+    }
+
+    #[test]
+    fn the_tool_programs_are_never_one_unpinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let git = root.join("git");
+        fs::write(&git, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = root.clone().into_os_string();
+        let settings = current(&UserConfig::default(), None, Some(&path));
+        let row = setting(&settings, "tools.git.binary");
+        assert_eq!((&row.value, &row.default), (&None, &None));
+        assert_eq!(row.key.section(), Section::Tools);
+        let Kind::Program(programs) = &row.kind else {
+            panic!("{:?}", row.kind);
+        };
+        assert_eq!(programs.len(), 1, "the copy on PATH is offered");
+        assert_eq!(setting(&settings, "tools.path").value, None);
+        assert_eq!(setting(&settings, "harness.codex.home").value, None);
     }
 
     #[test]

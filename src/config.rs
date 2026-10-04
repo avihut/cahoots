@@ -42,6 +42,29 @@ pub struct UserConfig {
     pub explore: ExploreConfig,
     #[serde(default)]
     pub fork: ForkConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+}
+
+/// `[tools]`: the programs cahoots itself runs, each from the one path a
+/// person pinned — never a PATH lookup — and the PATH a person recorded for
+/// every program cahoots starts. `install`, `enable` and `settings` write it;
+/// no agent verb does.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsConfig {
+    pub git: Option<ToolConfig>,
+    pub ps: Option<ToolConfig>,
+    /// A PATH value (`dir:dir`), after the pins' and the system's
+    /// directories: where started programs find the tools they run.
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfig {
+    /// Absolute path to the program. It runs only from here.
+    pub binary: Option<PathBuf>,
 }
 
 /// `[fork]`: what cuts a writer's worktree. A person's choice, here and only
@@ -72,8 +95,13 @@ pub struct HarnessConfig {
     /// Whether cahoots may delegate to it. Off unless a person turns it on
     /// (`cahoots enable`): a run sends repository content to that vendor.
     pub enabled: Option<bool>,
-    /// Absolute path to the harness CLI. Default: found on PATH.
+    /// Absolute path to the harness CLI. Pinned by `enable`, `install` or
+    /// `settings`; never looked up on PATH.
     pub binary: Option<PathBuf>,
+    /// Absolute path to its settings folder (`CODEX_HOME`,
+    /// `CLAUDE_CONFIG_DIR`) when a delegated run starts it. Unset, its own
+    /// default under the passwd home.
+    pub home: Option<PathBuf>,
     /// Percent of the plan cahoots may see used and still delegate.
     pub cap: Option<u8>,
     pub max_concurrent: Option<u32>,
@@ -317,6 +345,32 @@ impl UserConfig {
                     "harness.{id}.binary must be an absolute path"
                 )));
             }
+            if let Some(home) = &harness.home
+                && !home.is_absolute()
+            {
+                return Err(Fail::config(format!(
+                    "harness.{id}.home must be an absolute path"
+                )));
+            }
+        }
+        for (name, tool) in [("git", &self.tools.git), ("ps", &self.tools.ps)] {
+            if let Some(binary) = tool.as_ref().and_then(|tool| tool.binary.as_ref())
+                && !binary.is_absolute()
+            {
+                return Err(Fail::config(format!(
+                    "tools.{name}.binary must be an absolute path"
+                )));
+            }
+        }
+        if let Some(path) = &self.tools.path
+            && (path.is_empty()
+                || path
+                    .split(':')
+                    .any(|dir| dir.is_empty() || !Path::new(dir).is_absolute()))
+        {
+            return Err(Fail::config(
+                "tools.path must list absolute directories, separated by \":\"",
+            ));
         }
         for (role, entry) in &self.roles {
             if entry.candidates.is_empty() {
@@ -587,6 +641,63 @@ mod tests {
             "schema = 1\n[fork.daft]\nargs = [\"-x\"]",
             "schema = 1\n[fork.git]\nbinary = \"/usr/bin/git\"",
             "schema = 1\n[fork.daft]\nhooks = \"yes\"",
+        ] {
+            assert_eq!(
+                UserConfig::parse(text).unwrap_err().exit,
+                Exit::Config,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tools_are_absolute_pins_and_a_path_of_absolute_directories() {
+        let config = UserConfig::parse(
+            "schema = 1\ntools.path = \"/a:/b\"\n[tools.git]\nbinary = \"/usr/bin/git\"\n\
+             [tools.ps]\nbinary = \"/bin/ps\"\n[harness.codex]\nhome = \"/h\"",
+        )
+        .unwrap();
+        let git = config.tools.git.unwrap();
+        assert_eq!(git.binary.as_deref(), Some(Path::new("/usr/bin/git")));
+        assert_eq!(config.tools.path.as_deref(), Some("/a:/b"));
+        assert_eq!(
+            config.harness[&HarnessId::Codex].home.as_deref(),
+            Some(Path::new("/h"))
+        );
+        for (text, says) in [
+            (
+                "schema = 1\n[tools.git]\nbinary = \"git\"",
+                "tools.git.binary must be an absolute path",
+            ),
+            (
+                "schema = 1\n[tools.ps]\nbinary = \"bin/ps\"",
+                "tools.ps.binary must be an absolute path",
+            ),
+            (
+                "schema = 1\ntools.path = \"a::/b\"",
+                "tools.path must list absolute directories, separated by \":\"",
+            ),
+            (
+                "schema = 1\ntools.path = \"/a::/b\"",
+                "tools.path must list absolute directories, separated by \":\"",
+            ),
+            (
+                "schema = 1\nharness.codex.home = \"h\"",
+                "harness.codex.home must be an absolute path",
+            ),
+        ] {
+            let fail = UserConfig::parse(text).unwrap_err();
+            assert_eq!(
+                (fail.exit, fail.message.as_str()),
+                (Exit::Config, says),
+                "{text}"
+            );
+        }
+        // Nothing else is a tool: daft is the fork's, and a command is no key.
+        for text in [
+            "schema = 1\n[tools]\ndaft = \"/opt/homebrew/bin/daft\"",
+            "schema = 1\n[tools.git]\nargs = [\"-c\"]",
+            "schema = 1\n[tools.sh]\nbinary = \"/bin/sh\"",
         ] {
             assert_eq!(
                 UserConfig::parse(text).unwrap_err().exit,

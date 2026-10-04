@@ -29,6 +29,8 @@ pub struct Installed<'a> {
     /// What was written to config.toml, as the settings page says it.
     pub saved: Vec<String>,
     pub still_to_do: Option<&'a str>,
+    /// The programs cahoots runs, and the PATH it gives them, as pinned.
+    pub pins: &'a crate::tools::Chosen,
     /// The rules each harness is still missing.
     pub rules: &'a [(HarnessId, Vec<String>)],
     pub home: &'a Path,
@@ -42,6 +44,7 @@ pub fn installed(done: Installed<'_>) -> Ending {
     if let Some(to_do) = done.still_to_do {
         blocks.push(Block::warning(home_as_tilde(to_do, done.home), Vec::new()));
     }
+    blocks.extend(pinned(done.pins, done.home));
     let paste: Vec<Paste> = done
         .rules
         .iter()
@@ -66,6 +69,117 @@ pub fn installed(done: Installed<'_>) -> Ending {
         last: Last::Said(last.to_string()),
         paste,
     }
+}
+
+/// `install`'s pins: one line for each program cahoots runs and for the PATH
+/// it gives them, and a warning for each tool none of whose copies could be
+/// pinned, since agents' runs are refused until one is.
+fn pinned(pins: &crate::tools::Chosen, home: &Path) -> Vec<Block> {
+    use crate::tools::{Decision, HomeDecision, PathDecision};
+    let path = |p: &Path| home_as_tilde(&p.display().to_string(), home);
+    let program = |name: &str, pin: &crate::tools::Pin| {
+        let at = pin.binary.as_deref().map(path).unwrap_or_default();
+        let version = pin
+            .version
+            .as_ref()
+            .map_or(String::new(), |version| format!(" {version}"));
+        match pin.decision {
+            Decision::Kept => format!("{name}: {at}{version}, as pinned"),
+            Decision::Pinned => format!("{name}: pinned {at}{version}"),
+            Decision::Repinned => format!(
+                "{name}: pinned {at}{version} — {} no longer runs ({})",
+                pin.was.as_deref().map(path).unwrap_or_default(),
+                pin.why.as_deref().unwrap_or_default()
+            ),
+            Decision::NoneFound => format!(
+                "{name}: none pinned — {}",
+                pin.why.as_deref().unwrap_or_default()
+            ),
+            Decision::Unchecked if pin.binary.is_some() => format!(
+                "{name}: {at}, left as pinned — {}",
+                pin.why.as_deref().unwrap_or_default()
+            ),
+            Decision::Unchecked => format!(
+                "{name}: none pinned — {}",
+                pin.why.as_deref().unwrap_or_default()
+            ),
+        }
+    };
+    let mut lines = vec![program("git", &pins.git), program("ps", &pins.ps)];
+    lines.extend(
+        pins.harnesses
+            .iter()
+            .map(|(id, pin)| program(&id.to_string(), pin)),
+    );
+    let folders = |dirs: &[String]| {
+        dirs.iter()
+            .map(|dir| path(Path::new(dir)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(match pins.path.decision {
+        PathDecision::Recorded => {
+            let folders = pins
+                .path
+                .path
+                .as_deref()
+                .map_or(0, |p| p.split(':').count());
+            format!(
+                "Your PATH: recorded, {folders} folder{}",
+                if folders == 1 { "" } else { "s" }
+            )
+        }
+        PathDecision::Rerecorded => {
+            let mut said = "Your PATH: recorded again".to_string();
+            if !pins.path.added.is_empty() {
+                said.push_str(&format!(" — with {}", folders(&pins.path.added)));
+            }
+            if !pins.path.removed.is_empty() {
+                said.push_str(&format!(" — without {}", folders(&pins.path.removed)));
+            }
+            said
+        }
+        PathDecision::Kept => "Your PATH: as recorded".to_string(),
+        PathDecision::Empty => {
+            "Your PATH: nothing in it qualifies, so none is recorded".to_string()
+        }
+    });
+    for (id, pin) in &pins.homes {
+        lines.push(match pin.decision {
+            HomeDecision::Recorded => {
+                format!("{id}'s settings folder: recorded {}", path(&pin.home))
+            }
+            HomeDecision::Kept => format!(
+                "{id}'s settings folder: {}, as set in config.toml",
+                path(&pin.home)
+            ),
+            HomeDecision::Refused => format!(
+                "{id}'s settings folder: {} is not recorded — {}",
+                path(&pin.home),
+                pin.why.as_deref().unwrap_or_default()
+            ),
+        });
+    }
+    let mut blocks = vec![Block::info(
+        "The programs cahoots runs, from your PATH".to_string(),
+        lines,
+    )];
+    for (name, key, pin) in [
+        ("git", "tools.git.binary", &pins.git),
+        ("ps", "tools.ps.binary", &pins.ps),
+    ] {
+        if pin.decision == Decision::NoneFound {
+            blocks.push(Block::warning(
+                format!(
+                    "No {name} is pinned, so agents' runs are refused until one is: put one on \
+                     your PATH and run `cahoots install` again, or choose one with `cahoots \
+                     settings` ({key})"
+                ),
+                Vec::new(),
+            ));
+        }
+    }
+    blocks
 }
 
 /// `uninstall`: what went, what was left alone, and the rules that are the
@@ -809,6 +923,7 @@ mod tests {
             meter: "Usage meter: ccusage (you named it).".into(),
             saved: vec!["Saved to config.toml: [meter] use = \"ccusage\"".into()],
             still_to_do: Some(&to_do),
+            pins: &pins(),
             rules: &rules,
             home: Path::new(HOME),
         });
@@ -831,6 +946,13 @@ mod tests {
              │  Saved to config.toml: [meter] use = \"ccusage\"\n\
              │\n\
              ▲  ccusage counts tokens: set a limit in ~/.config/cahoots/config.toml.\n\
+             │\n\
+             ●  The programs cahoots runs, from your PATH\n\
+             │  git: /usr/bin/git 2.50.1, as pinned\n\
+             │  ps: /bin/ps, as pinned\n\
+             │  claude: pinned ~/bin/claude 2.1.278\n\
+             │  codex: none pinned — no `codex` on your PATH\n\
+             │  Your PATH: recorded, 2 folders\n\
              │\n\
              └  Add the rules below yourself: cahoots never edits a harness's permissions.\n   \
              Then `cahoots enable <harness>` for each target you want, and\n   \
@@ -1203,6 +1325,48 @@ mod tests {
         }
     }
 
+    /// git and ps kept, claude pinned, no codex, and a PATH recorded.
+    fn pins() -> crate::tools::Chosen {
+        use crate::tools::{Chosen, Decision, PathDecision, PathPin, Pin};
+        let pin = |decision, binary: Option<&str>, version: Option<&str>| Pin {
+            decision,
+            binary: binary.map(Into::into),
+            version: version.map(Into::into),
+            was: None,
+            why: None,
+        };
+        Chosen {
+            git: pin(Decision::Kept, Some("/usr/bin/git"), Some("2.50.1")),
+            ps: pin(Decision::Kept, Some("/bin/ps"), None),
+            harnesses: vec![
+                (
+                    HarnessId::Claude,
+                    pin(
+                        Decision::Pinned,
+                        Some(&format!("{HOME}/bin/claude")),
+                        Some("2.1.278"),
+                    ),
+                ),
+                (
+                    HarnessId::Codex,
+                    Pin {
+                        why: Some("no `codex` on your PATH".into()),
+                        ..pin(Decision::NoneFound, None, None)
+                    },
+                ),
+            ],
+            path: PathPin {
+                decision: PathDecision::Recorded,
+                path: Some(format!("{HOME}/bin:/opt/homebrew/bin")),
+                added: Vec::new(),
+                removed: Vec::new(),
+                dropped: Vec::new(),
+            },
+            homes: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
+
     #[test]
     fn codex_rules_are_lines_of_their_own_and_a_dry_run_says_so() {
         let rules = [(
@@ -1221,6 +1385,7 @@ mod tests {
                 .into(),
             saved: Vec::new(),
             still_to_do: None,
+            pins: &pins(),
             rules: &rules,
             home: Path::new(HOME),
         });
@@ -1241,6 +1406,7 @@ mod tests {
             meter: "Usage meter: ccusage.".into(),
             saved: Vec::new(),
             still_to_do: None,
+            pins: &pins(),
             rules: &[(HarnessId::Codex, Vec::new())],
             home: Path::new(HOME),
         });

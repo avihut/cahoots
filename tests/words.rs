@@ -51,6 +51,8 @@ fn install_ends_with_the_rules_to_paste_under_the_file_each_belongs_in() {
         "●  Usage meter: ccusage (you named it).\n\
          │  Saved to config.toml: [meter] use = \"ccusage\"\n│\n",
         "▲  ccusage counts tokens and cannot see a plan's limit",
+        "●  The programs cahoots runs, from your PATH\n│  git: ",
+        "│  Your PATH: recorded, 1 folder\n│\n",
         "└  Add the rules below yourself: cahoots never edits a harness's permissions.\n",
         "\n\nAdd to ~/.claude/settings.json (permissions.allow):\n\"Bash(cahoots pick:*)\",\n",
         "\"Bash(cahoots review:*)\"\n\nAdd to ~/.codex/rules/default.rules:\n\
@@ -100,7 +102,8 @@ fn uninstall_says_what_went_and_what_is_left_to_the_person() {
 #[test]
 fn a_change_to_config_toml_is_said_with_the_line_the_settings_page_shows() {
     let world = World::bare();
-    world.configure("");
+    // A PATH recorded already: `enable` records one only when none is.
+    world.configure(&format!("tools.path = {:?}", world.bin));
     let file = world.config.join("config.toml");
     let before = fs::read_to_string(&file).unwrap();
     for (args, said) in [
@@ -337,12 +340,25 @@ fn doctor_marks_every_check_and_ends_with_the_rules_to_paste() {
 
 #[test]
 fn doctor_without_a_git_fails_and_says_why_in_plain_words() {
-    // Only the world's own bin on PATH, and no git in it.
+    // No git pinned: one on PATH changes nothing.
     let world = World::new();
+    world.pin_tool("git", None);
     let after = world.as_a_person(&["doctor"]).finish();
     assert_eq!(after.code, 34, "{}", after.text());
     let text = after.text();
-    assert!(line(&text, "■  fork ").contains("no git on PATH"), "{text}");
+    assert!(
+        line(&text, "■  tools: git ").contains("cahoots needs `git`: none is pinned"),
+        "{text}"
+    );
+    assert!(
+        line(&text, "■  fork ").contains("without its git"),
+        "{text}"
+    );
+    // Nor is a harness asked its version without it.
+    assert!(
+        line(&text, "■  claude: binary ").contains("until git is pinned"),
+        "{text}"
+    );
     // However the rail wraps it.
     let flat = text
         .split_whitespace()
@@ -351,13 +367,13 @@ fn doctor_without_a_git_fails_and_says_why_in_plain_words() {
         .join(" ");
     assert!(
         flat.contains(
-            "no git on PATH — cahoots cannot see a repository without one, so --fork is \
-             refused until git is there"
+            "run `cahoots install` (it pins the git on your PATH), or choose one with \
+             `cahoots settings` (tools.git.binary)"
         ),
         "{text}"
     );
     let last = line(&text, "└  ");
-    assert!(last.ends_with(", 1 failed"), "{last:?}");
+    assert!(last.ends_with(", 4 failed"), "{last:?}");
     no_json(&after);
 }
 

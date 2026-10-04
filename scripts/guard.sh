@@ -2,7 +2,7 @@
 # Hard-rule tripwires: the rules of AGENTS.md that a grep can hold. Each is a
 # tripwire, not a proof — it catches the careless regression, and its failure
 # message names the rule so a deliberate change is made as one (amend the
-# rule, then the list below, in the same commit). Thirteen rules, numbered
+# rule, then the list below, in the same commit). Fourteen rules, numbered
 # below.
 #
 #   scripts/guard.sh            the working tree (tracked files)
@@ -170,6 +170,28 @@ fi
 #     under .github (the docs name them for the person who sets them up).
 if hits=$("${grep_tree[@]}" -nE 'WHEATLEY_BOT_|environment:[[:space:]]*release' -- .github ':!.github/workflows/release-flow.yml'); then
     fail "the release app's secrets are named outside release-flow.yml (docs/THREAT-MODEL.md → Releases)" "$(where "$hits")"
+fi
+
+# 14. Only a person's verb looks a program up on PATH (hard rule 3; the
+#     threat model's "Binaries"): every program cahoots runs comes from a pin,
+#     and every one it starts gets a PATH cahoots built. The lookups, and the
+#     reads of PATH and of a terminal's settings folders, live where a person's
+#     verb pins or records from them; the old lookups are gone for good; and
+#     the variables that would steer a callee are named only where the
+#     environment is read and where the callee's is built.
+lookups=(':!src/spawn.rs' ':!src/env.rs' ':!src/settings.rs' ':!src/cli.rs' ':!src/cli/settings.rs'
+    ':!src/meter/detect.rs' ':!src/tools.rs' ':!src/doctor.rs')
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])(find_on_path|find_all_on_path|path_var)[[:space:]]*\(' -- src "${lookups[@]}"); then
+    fail "a PATH lookup outside a person's verb (hard rule 3, docs/THREAT-MODEL.md → Binaries: only a pin runs)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])(system_tool|helper_path|path_for_git_users)[[:space:]]*\(' -- src); then
+    fail "a lookup of a program on the caller's PATH came back (hard rule 3, docs/THREAT-MODEL.md → Binaries)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE '(^|[^A-Za-z0-9_])(codex_home|claude_config_dir)[[:space:]]*\(' -- src ':!src/env.rs' ':!src/tools.rs'); then
+    fail "a terminal's settings folder is read outside install and enable (docs/THREAT-MODEL.md → The callee's environment)" "$(where "$hits")"
+fi
+if hits=$("${grep_tree[@]}" -nE '"(CODEX_HOME|CLAUDE_CONFIG_DIR|TMPDIR|SHELL)"' -- src ':!src/env.rs' ':!src/spawn.rs'); then
+    fail "a variable that steers the callee is named outside src/env.rs and src/spawn.rs (hard rule 3, docs/THREAT-MODEL.md → The callee's environment)" "$(where "$hits")"
 fi
 
 if [ "$failures" -gt 0 ]; then

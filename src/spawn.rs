@@ -21,20 +21,16 @@ use crate::config::Billing;
 use crate::env;
 use crate::exit::{Exit, Fail, Res};
 use crate::model::HarnessId;
+use crate::tools::{self, Tool};
 
-/// Finds `name` on PATH, or takes `configured`, and holds the result to the
-/// binary policy: canonical and absolute, not inside the workspace, and not
-/// writable by anyone but its owner. A harness binary an agent could have
-/// just written is not a harness.
-pub fn resolve_binary(name: &str, configured: Option<&Path>, workspace: &[&Path]) -> Res<PathBuf> {
+/// Holds `binary`, a path a person pinned, to the binary policy: canonical
+/// and absolute, not inside the workspace, and not writable by anyone but
+/// its owner. A harness binary an agent could have just written is not a
+/// harness. Nothing is ever looked up on PATH here: the caller sets PATH.
+pub fn resolve_binary(binary: &Path, workspace: &[&Path]) -> Res<PathBuf> {
     let unavailable = |why: String| Fail::new(Exit::TargetUnavailable, why);
-    let found = match configured {
-        Some(path) => path.to_path_buf(),
-        None => find_on_path(name, env::path_var().as_deref())
-            .ok_or_else(|| unavailable(format!("`{name}` is not on PATH")))?,
-    };
-    let canonical = fs::canonicalize(&found)
-        .map_err(|error| unavailable(format!("{}: {error}", found.display())))?;
+    let canonical = fs::canonicalize(binary)
+        .map_err(|error| unavailable(format!("{}: {error}", binary.display())))?;
     if !is_executable_file(&canonical) {
         return Err(unavailable(format!(
             "{} is not an executable file",
@@ -71,7 +67,9 @@ pub fn resolve_binary(name: &str, configured: Option<&Path>, workspace: &[&Path]
 
 /// The first executable `name` in the directories of `path` (a PATH value),
 /// as found — not resolved: a symlink a package manager keeps pointing at
-/// the current version stays a symlink. Relative entries are skipped.
+/// the current version stays a symlink. Relative entries are skipped. Only a
+/// person's verb looks anything up on a PATH, to pin it (`scripts/guard.sh`
+/// holds which).
 pub fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .filter(|dir| dir.is_absolute())
@@ -138,20 +136,10 @@ pub struct Output {
     pub bytes: Vec<u8>,
 }
 
-/// Runs a short-lived helper (`--version`, `git`, `ps`) with a deadline and a
-/// minimal environment, and returns its stdout.
-pub fn run_helper<S: AsRef<OsStr>>(
-    binary: &Path,
-    args: &[S],
-    cwd: Option<&Path>,
-    deadline: Duration,
-) -> Res<Output> {
-    run_helper_with_env(binary, args, cwd, deadline, env::path_var(), &[])
-}
-
-/// [`run_helper`], with the PATH given instead of this process's — for a
-/// usage meter, whose answer the calling agent must not be able to steer
-/// through the interpreter or the tools it finds.
+/// Runs a short-lived helper (`--version`, `git`, `ps`, a usage meter) with
+/// a deadline and a minimal environment, on the PATH given — one cahoots
+/// built (`own_path`), never this process's, which the caller sets — and
+/// returns its stdout.
 pub fn run_helper_with_path<S: AsRef<OsStr>>(
     binary: &Path,
     args: &[S],
@@ -397,18 +385,6 @@ pub fn run_helper_grouped<S: AsRef<OsStr>>(
     }))
 }
 
-/// A system tool cahoots itself needs (`git`, `daft`, `ps`), held to the same
-/// binary policy as a harness. One that is missing is a setup problem (34);
-/// one the policy refuses is a refusal (33), and is never run. So is a `git`
-/// too old to be held to `NO_LAZY_FETCH` (34, `require_git_floor`).
-pub fn system_tool(name: &str, workspace: &[&Path]) -> Res<PathBuf> {
-    let tool = as_system_tool(name, resolve_binary(name, None, workspace))?;
-    if name == "git" {
-        require_git_floor(&tool, workspace)?;
-    }
-    Ok(tool)
-}
-
 /// The gits that `NO_LAZY_FETCH` holds on every path to a fetch: from
 /// 2.46.0, and the May 2024 security releases of the lines before it, which
 /// check it where every lazy fetch starts (promisor-remote.c,
@@ -425,8 +401,10 @@ const NO_LAZY_FETCH_FIXED: [(u32, u32); 7] = [
 ];
 
 /// Whether the git that printed `version` (`git --version`) never fetches
-/// lazily once told so. A version this cannot read is not one.
-fn honours_no_lazy_fetch(version: &str) -> bool {
+/// lazily once told so. A version this cannot read is not one. Part of
+/// git's fingerprint (`tools::locate_one`): a git below it is a setup
+/// problem (34), never run for anything but `--version`.
+pub(crate) fn honours_no_lazy_fetch(version: &str) -> bool {
     let Some(number) = version.trim().strip_prefix("git version ") else {
         return false;
     };
@@ -447,55 +425,13 @@ fn honours_no_lazy_fetch(version: &str) -> bool {
     }
 }
 
-/// Refuses a `git` that would fetch lazily despite `NO_LAZY_FETCH` — a setup
-/// problem (34), never run for anything but `--version`, which it is asked
-/// outside any repository. One that passes is not asked again.
-fn require_git_floor(git: &Path, workspace: &[&Path]) -> Res<()> {
-    static PASSED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-    if PASSED
-        .lock()
-        .is_ok_and(|passed| passed.iter().any(|seen| seen == git))
-    {
-        return Ok(());
-    }
-    let version = run_helper_with_env(
-        git,
-        &["--version"],
-        Some(Path::new("/")),
-        Duration::from_secs(10),
-        helper_path(workspace),
-        &[],
-    )
-    .ok()
-    .filter(|output| output.status == Some(0))
-    .map(|output| output.stdout.trim().to_string())
-    .unwrap_or_default();
-    if !honours_no_lazy_fetch(&version) {
-        let found = if version.is_empty() {
-            "it did not say its version".to_string()
-        } else {
-            format!("found `{version}`")
-        };
-        return Err(Fail::new(
-            Exit::Config,
-            format!(
-                "cahoots needs a git that never fetches lazily — 2.46 or later, or 2.39.4, \
-                 2.40.2, 2.41.1, 2.42.2, 2.43.4, 2.44.1 or 2.45.1 or later in its line — \
-                 refusing to run {} ({found})",
-                git.display()
-            ),
-        ));
-    }
-    if let Ok(mut passed) = PASSED.lock() {
-        passed.push(git.to_path_buf());
-    }
-    Ok(())
-}
-
-/// [`system_tool`] from the one path a person chose for it, never a PATH
-/// lookup: the caller sets PATH, and could put a tool of its own first.
+/// A system tool cahoots itself needs (`git`, `ps`, `daft`), from the one
+/// path a person pinned for it, never a PATH lookup — the caller sets PATH,
+/// and could put a tool of its own first — held to the same binary policy
+/// as a harness. One that is missing is a setup problem (34); one the policy
+/// refuses is a refusal (33), and is never run.
 pub fn pinned_system_tool(name: &str, pinned: &Path, workspace: &[&Path]) -> Res<PathBuf> {
-    as_system_tool(name, resolve_binary(name, Some(pinned), workspace))
+    as_system_tool(name, resolve_binary(pinned, workspace))
 }
 
 fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
@@ -508,47 +444,47 @@ fn as_system_tool(name: &str, resolved: Res<PathBuf>) -> Res<PathBuf> {
     })
 }
 
-/// The PATH a system tool runs with: the caller's, without its relative
-/// entries and without any directory inside `workspace`. cahoots resolves
-/// the tool itself under the binary policy; this holds what the tool then
-/// looks up for itself — the `git` that `daft` runs, git's own helpers and
-/// filter programs — to the same rule.
-pub fn helper_path(workspace: &[&Path]) -> Option<OsString> {
-    helper_path_from(env::path_var().as_deref(), workspace)
-}
-
-/// [`helper_path`], for a tool that runs `git` of its own (`daft`): the
-/// first `git` on it — the one the tool will find, which need not be the one
-/// this process finds, since a workspace entry this PATH drops may have come
-/// first — is held to the binary policy and to the floor
-/// (`require_git_floor`) before the tool starts. A `git` it refuses, or none
-/// at all, is the refusal it would be for cahoots' own.
-pub fn path_for_git_users(workspace: &[&Path]) -> Res<Option<OsString>> {
-    let path = helper_path(workspace);
-    let found = find_on_path("git", path.as_deref())
-        .ok_or_else(|| Fail::new(Exit::TargetUnavailable, "`git` is not on PATH".to_string()));
-    let git = as_system_tool(
-        "git",
-        found.and_then(|git| resolve_binary("git", Some(&git), workspace)),
-    )?;
-    require_git_floor(&git, workspace)?;
-    Ok(path)
-}
-
-fn helper_path_from(path: Option<&OsStr>, workspace: &[&Path]) -> Option<OsString> {
-    let roots: Vec<PathBuf> = workspace
-        .iter()
-        .flat_map(|root| [root.to_path_buf(), canonical_of(root)])
-        .collect();
-    let kept: Vec<PathBuf> = std::env::split_paths(path?)
-        .filter(|dir| dir.is_absolute())
-        .filter(|dir| {
-            let resolved = canonical_of(dir);
-            !roots
-                .iter()
-                .any(|root| dir.starts_with(root) || resolved.starts_with(root))
-        })
-        .collect();
+/// The PATH a program cahoots starts runs with — every one, the callee
+/// included — built here and never taken from the caller: the directories of
+/// `binaries`, in the order given (each as pinned, then where it resolves),
+/// then the system's (`tools::SYSTEM_DIRS`), then the PATH a person recorded
+/// (`tools.path`), each directory once. A pinned program's own directory is
+/// left off when everyone can write it or it is a temp directory
+/// (`tools::holds_programs`): the binary policy lets a program run from a
+/// sticky one, but what others put beside it is no one's choice. A recorded
+/// one is held to `tools::qualifies`, without the caller's `TMPDIR`. Nothing
+/// inside `workspace` is on it, nor a relative entry, nor one a PATH cannot
+/// hold (a `:`). A recorded directory comes last, so it adds tools and never
+/// shadows a pinned or a system one.
+pub fn own_path(
+    binaries: &[&Path],
+    recorded: Option<&OsStr>,
+    workspace: &[&Path],
+) -> Option<OsString> {
+    let temp = tools::fixed_temp_roots();
+    let holds = |dir: &PathBuf| tools::holds_programs(dir, &temp).is_ok();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for binary in binaries {
+        dirs.extend(binary.parent().map(Path::to_path_buf).filter(holds));
+        dirs.extend(
+            fs::canonicalize(binary)
+                .ok()
+                .and_then(|canonical| canonical.parent().map(Path::to_path_buf))
+                .filter(holds),
+        );
+    }
+    dirs.extend(tools::SYSTEM_DIRS.iter().map(PathBuf::from));
+    if let Some(recorded) = recorded {
+        dirs.extend(
+            std::env::split_paths(recorded).filter(|dir| tools::qualifies(dir, &temp).is_ok()),
+        );
+    }
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for dir in drop_workspace(dirs, workspace) {
+        if !kept.contains(&dir) && !dir.as_os_str().as_bytes().contains(&b':') {
+            kept.push(dir);
+        }
+    }
     // Nothing left is no PATH at all, never an empty one: an empty entry
     // means the working directory to a shell's lookup.
     std::env::join_paths(kept)
@@ -556,31 +492,90 @@ fn helper_path_from(path: Option<&OsStr>, workspace: &[&Path]) -> Option<OsStrin
         .filter(|joined| !joined.is_empty())
 }
 
+/// The `git` a program started on `path` finds first when it looks `git`
+/// up, canonical: what `path` makes of the name, as a shell's lookup would.
+pub fn first_git(path: Option<&OsStr>) -> Option<PathBuf> {
+    find_on_path("git", path).and_then(|git| fs::canonicalize(git).ok())
+}
+
+/// The PATH for a program that runs `git` of its own — daft, a harness, and
+/// what either starts, its hooks among them — with `binaries`' directories
+/// after the pinned git's, for a use whose roots are `workspace`
+/// (`own_path`), and proof that the `git` it finds first is the located one:
+/// the file that was fingerprinted and held to the floors. A PATH on which
+/// it would find another `git`, or none, is refused (34) before anything
+/// starts — say, because the pinned git's directory is inside this use's
+/// workspace, or cannot be on a PATH at all. The caller starts the program
+/// with exactly the PATH returned.
+pub fn git_users_path(
+    git: &Tool,
+    binaries: &[&Path],
+    recorded: Option<&OsStr>,
+    workspace: &[&Path],
+) -> Res<Option<OsString>> {
+    let mut all = vec![git.pinned()];
+    all.extend(binaries);
+    let path = own_path(&all, recorded, workspace);
+    match first_git(path.as_deref()) {
+        Some(found) if found == git.canonical() => Ok(path),
+        found => Err(Fail::config(format!(
+            "cahoots needs `git`: a program cahoots starts here would find {} before the pinned \
+             {} — pin a git in a directory a PATH can hold, outside this workspace, with \
+             `cahoots install` or `cahoots settings` (tools.git.binary)",
+            found.map_or("no git".to_string(), |found| found.display().to_string()),
+            git.pinned().display()
+        ))),
+    }
+}
+
+/// `dirs` without the relative ones and without any inside `workspace` —
+/// by name or by where it resolves.
+fn drop_workspace(dirs: Vec<PathBuf>, workspace: &[&Path]) -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = workspace
+        .iter()
+        .flat_map(|root| [root.to_path_buf(), canonical_of(root)])
+        .collect();
+    dirs.into_iter()
+        .filter(|dir| dir.is_absolute())
+        .filter(|dir| {
+            let resolved = canonical_of(dir);
+            !roots
+                .iter()
+                .any(|root| dir.starts_with(root) || resolved.starts_with(root))
+        })
+        .collect()
+}
+
+/// What is known of the workspace around `dir` before any git has run:
+/// `dir` itself, canonical, and every directory above it that holds a
+/// `.git`, up to the top git would find (`repository_tops`). The tools are
+/// located against these: none of them is run from there, not even to ask
+/// its version.
+pub fn around(dir: &Path) -> Vec<PathBuf> {
+    let here = canonical_of(dir);
+    let mut roots = vec![here.clone()];
+    roots.extend(repository_tops(&here));
+    roots
+}
+
 /// `git rev-parse` in `dir`: the toplevel and the common dir (which is what
 /// two worktrees of one repository share), both canonical. `Ok(None)` outside
-/// a repository, or with no `git` at all. A `git` inside `workspace`, `dir`
-/// or the repository around it is refused, and is never run.
-pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBuf)>> {
+/// a repository. The located `git` inside `workspace`, `dir` or the
+/// repository around it is refused, and is never run.
+pub fn git_roots(git: &Tool, dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBuf)>> {
     let here = canonical_of(dir);
     // The repository's top as its `.git` shows it, before any git is run: a
-    // `git` planted at the top of the repository, above `dir`, is refused
+    // `git` pinned at the top of the repository, above `dir`, is refused
     // here, not after it has answered.
     let tops = repository_tops(&here);
     let mut roots = workspace.to_vec();
     roots.push(&here);
     roots.extend(tops.iter().map(PathBuf::as_path));
-    let git = match as_system_tool("git", resolve_binary("git", None, &roots)) {
-        Ok(git) => git,
-        Err(fail) if fail.exit == Exit::Policy => return Err(fail),
-        Err(_) => return Ok(None),
-    };
-    // A git too old to be held to `NO_LAZY_FETCH` is a refusal, never "no
-    // git": that would leave the repository's top out of the workspace.
-    require_git_floor(&git, &roots)?;
-    let path = helper_path(&roots);
+    let binary = git.at(&roots)?;
+    let path = git.path(&roots);
     let ask = |what: &str| {
         let output = run_helper_with_env(
-            &git,
+            &binary,
             &["rev-parse", "--path-format=absolute", what],
             Some(dir),
             Duration::from_secs(10),
@@ -593,11 +588,11 @@ pub fn git_roots(dir: &Path, workspace: &[&Path]) -> Res<Option<(PathBuf, PathBu
     let Some(toplevel) = ask("--show-toplevel") else {
         return Ok(None);
     };
-    if git.starts_with(&toplevel) {
+    if binary.starts_with(&toplevel) {
         return Err(Fail::policy(format!(
             "refusing to run `git`: {} is inside the workspace {} — refusing to run a binary the \
              workspace supplies",
-            git.display(),
+            binary.display(),
             toplevel.display()
         )));
     }
@@ -783,17 +778,17 @@ fn owned(path: &Path) -> bool {
         .is_ok_and(|meta| meta.uid() == nix::unistd::geteuid().as_raw())
 }
 
-/// When a process started, as `ps` tells it — the identity check that stops
-/// reconcile from signalling a recycled pid. A `ps` the policy refuses is not
-/// run, and nothing is known.
-pub fn process_started(pid: i32, workspace: &[&Path]) -> Option<String> {
-    let ps = system_tool("ps", workspace).ok()?;
+/// When a process started, as the located `ps` tells it — the identity
+/// check that stops reconcile from signalling a recycled pid. A `ps` the
+/// policy refuses for these roots is not run, and nothing is known.
+pub fn process_started(ps: &Tool, pid: i32, workspace: &[&Path]) -> Option<String> {
+    let binary = ps.at(workspace).ok()?;
     let output = run_helper_with_env(
-        &ps,
+        &binary,
         &["-o", "lstart=", "-p", &pid.to_string()],
         None,
         Duration::from_secs(5),
-        helper_path(workspace),
+        ps.path(workspace),
         &[],
     )
     .ok()?;
@@ -801,19 +796,19 @@ pub fn process_started(pid: i32, workspace: &[&Path]) -> Option<String> {
     (!started.is_empty()).then(|| started.to_string())
 }
 
-/// Every descendant of `root`, from one `ps` snapshot. Codex runs its tool
-/// commands in their own process groups, so signalling the callee's group
-/// does not reach them (docs/SPIKE.md S3).
-pub fn descendants(root: i32, workspace: &[&Path]) -> Vec<i32> {
-    let Ok(ps) = system_tool("ps", workspace) else {
+/// Every descendant of `root`, from one snapshot of the located `ps`. Codex
+/// runs its tool commands in their own process groups, so signalling the
+/// callee's group does not reach them (docs/SPIKE.md S3).
+pub fn descendants(ps: &Tool, root: i32, workspace: &[&Path]) -> Vec<i32> {
+    let Ok(binary) = ps.at(workspace) else {
         return Vec::new();
     };
     let Ok(output) = run_helper_with_env(
-        &ps,
+        &binary,
         &["-axo", "pid=,ppid="],
         None,
         Duration::from_secs(5),
-        helper_path(workspace),
+        ps.path(workspace),
         &[],
     ) else {
         return Vec::new();
@@ -863,16 +858,49 @@ pub struct Callee<'a> {
     pub run_id: &'a str,
     pub depth: u32,
     pub caller: Option<HarnessId>,
+    /// Its PATH (`own_path`: the pinned git's directories, the harness's,
+    /// the system's, then the recorded PATH) — never the caller's.
+    pub path: Option<OsString>,
+    /// Its `TMPDIR`: the run's own private directory, never the caller's.
+    pub tmpdir: &'a Path,
+    /// Its settings folder (`harness.<id>.home`), when a person set one.
+    pub home: Option<&'a Path>,
 }
 
-/// The callee's environment: cleared, then rebuilt from an allowlist, with
-/// HOME from passwd — and, as every process here gets, `NO_LAZY_FETCH`: the
-/// harness runs git of its own outside its tool sandbox. The caller's harness
-/// markers, tokens and proxies never reach it — and a vendor API key only
-/// when billing says so.
+/// The variable that names a harness's settings folder, set to `home` when
+/// a person configured one (`harness.<id>.home`), and absent otherwise — so
+/// the harness uses its default under the passwd home. Never the caller's:
+/// it would be the callee's whole configuration, its hooks and its MCP
+/// servers among it. The callee and its `--version` get the same.
+pub fn home_vars(harness: HarnessId, home: Option<&Path>) -> Vec<(OsString, OsString)> {
+    let name = match harness {
+        HarnessId::Claude => "CLAUDE_CONFIG_DIR",
+        HarnessId::Codex => "CODEX_HOME",
+    };
+    home.map(|home| (OsString::from(name), home.as_os_str().to_os_string()))
+        .into_iter()
+        .collect()
+}
+
+/// The callee's environment: cleared, then rebuilt. From the caller, only
+/// what cannot steer anything (`env::callee_passthrough`); the rest is
+/// cahoots' own — PATH built from pins (`own_path`), HOME and SHELL from
+/// passwd, a TMPDIR of the run's own, the settings folder config.toml names —
+/// and, as every process here gets, `NO_LAZY_FETCH`: the harness runs git of
+/// its own outside its tool sandbox. The caller's harness markers, tokens
+/// and proxies never reach it — and a vendor API key only when billing says
+/// so.
 pub fn callee_environment(callee: &Callee<'_>) -> Res<Vec<(OsString, OsString)>> {
-    let mut vars = env::callee_passthrough(callee.harness);
+    let mut vars = env::callee_passthrough();
+    if let Some(path) = &callee.path {
+        vars.push(("PATH".into(), path.clone()));
+    }
     vars.push(("HOME".into(), crate::dirs::passwd_home()?.into_os_string()));
+    vars.push(("TMPDIR".into(), callee.tmpdir.as_os_str().to_os_string()));
+    if let Some(shell) = crate::dirs::passwd_shell() {
+        vars.push(("SHELL".into(), shell.into_os_string()));
+    }
+    vars.extend(home_vars(callee.harness, callee.home));
     vars.push(("CAHOOTS_DEPTH".into(), callee.depth.to_string().into()));
     vars.push(("CAHOOTS_RUN_ID".into(), callee.run_id.into()));
     if let Some(caller) = callee.caller {
@@ -1019,26 +1047,21 @@ pub(crate) mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(workspace.path()).unwrap();
         let binary = executable(&root, "codex", 0o755);
-        let fail = resolve_binary("codex", Some(&binary), &[&root]).unwrap_err();
+        let fail = resolve_binary(&binary, &[&root]).unwrap_err();
         assert_eq!(fail.exit, Exit::Policy);
-        assert!(resolve_binary("codex", Some(&binary), &[]).is_ok());
+        assert!(resolve_binary(&binary, &[]).is_ok());
     }
 
     #[test]
     fn a_binary_others_can_write_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let binary = executable(dir.path(), "codex", 0o775);
-        assert_eq!(
-            resolve_binary("codex", Some(&binary), &[])
-                .unwrap_err()
-                .exit,
-            Exit::Policy
-        );
+        assert_eq!(resolve_binary(&binary, &[]).unwrap_err().exit, Exit::Policy);
     }
 
     #[test]
     fn a_missing_binary_is_target_unavailable() {
-        let fail = resolve_binary("codex", Some(Path::new("/nonexistent/codex")), &[]).unwrap_err();
+        let fail = resolve_binary(Path::new("/nonexistent/codex"), &[]).unwrap_err();
         assert_eq!(fail.exit, Exit::TargetUnavailable);
     }
 
@@ -1051,9 +1074,7 @@ pub(crate) mod tests {
         let link = outside.path().join("codex");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_eq!(
-            resolve_binary("codex", Some(&link), &[&root])
-                .unwrap_err()
-                .exit,
+            resolve_binary(&link, &[&root]).unwrap_err().exit,
             Exit::Policy
         );
     }
@@ -1063,8 +1084,7 @@ pub(crate) mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(workspace.path()).unwrap();
         let planted = executable(&root, "git", 0o755);
-        let fail =
-            as_system_tool("git", resolve_binary("git", Some(&planted), &[&root])).unwrap_err();
+        let fail = as_system_tool("git", resolve_binary(&planted, &[&root])).unwrap_err();
         assert_eq!(fail.exit, Exit::Policy);
         assert!(
             fail.message.contains("refusing to run `git`"),
@@ -1073,12 +1093,12 @@ pub(crate) mod tests {
         );
 
         let open = executable(&root, "daft", 0o777);
-        let fail = as_system_tool("daft", resolve_binary("daft", Some(&open), &[])).unwrap_err();
+        let fail = as_system_tool("daft", resolve_binary(&open, &[])).unwrap_err();
         assert_eq!(fail.exit, Exit::Policy);
 
         // Missing is not a refusal: it is something to install.
         let missing = Path::new("/nonexistent/git");
-        let fail = as_system_tool("git", resolve_binary("git", Some(missing), &[])).unwrap_err();
+        let fail = as_system_tool("git", resolve_binary(missing, &[])).unwrap_err();
         assert_eq!(fail.exit, Exit::Config);
         assert!(
             fail.message.contains("cahoots needs `git`"),
@@ -1088,37 +1108,81 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn helper_path_drops_workspace_and_relative_entries() {
+    fn own_path_puts_each_binary_s_dirs_first_then_the_system_s() {
         let workspace = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(workspace.path()).unwrap();
-        let inside = root.join("bin");
-        fs::create_dir(&inside).unwrap();
-        let path = std::env::join_paths([
-            Path::new("/usr/bin"),
-            &inside,
-            Path::new("relative/bin"),
-            Path::new("/bin"),
-            // Not there yet, and still inside: judged by its name.
-            &root.join("later"),
+        // Not under a temp directory: a recorded directory there never counts.
+        let outside = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let out = fs::canonicalize(outside.path()).unwrap();
+        let (git_dir, harness_dir, real_dir) = (out.join("g"), out.join("h"), out.join("real"));
+        for dir in [&git_dir, &harness_dir, &real_dir] {
+            fs::create_dir(dir).unwrap();
+        }
+        let git = executable(&git_dir, "git", 0o755);
+        // A harness pinned through a link: the link's directory, then where
+        // it resolves.
+        let real = executable(&real_dir, "claude", 0o755);
+        let harness = harness_dir.join("claude");
+        std::os::unix::fs::symlink(&real, &harness).unwrap();
+        let path = own_path(&[&git, &harness, &git], None, &[&root]).unwrap();
+        let expected = std::env::join_paths([
+            git_dir.clone(),
+            harness_dir.clone(),
+            real_dir.clone(),
+            "/usr/bin".into(),
+            "/bin".into(),
+            "/usr/sbin".into(),
+            "/sbin".into(),
         ])
         .unwrap();
-        let kept = helper_path_from(Some(&path), &[&root]).unwrap();
-        assert_eq!(kept, OsString::from("/usr/bin:/bin"));
+        assert_eq!(path, expected);
 
-        // The same directory by another name is still inside.
-        let other = tempfile::tempdir().unwrap();
-        let link = other.path().join("link");
-        std::os::unix::fs::symlink(&root, &link).unwrap();
-        let path = std::env::join_paths([link.join("bin"), PathBuf::from("/bin")]).unwrap();
-        assert_eq!(
-            helper_path_from(Some(&path), &[&root]).unwrap(),
-            OsString::from("/bin")
-        );
+        // A binary inside the workspace adds no directory; a relative one
+        // none either; nor does one in a temp directory, or in one others
+        // can write: what else is there is no one's choice.
+        let inside = executable(&root, "git", 0o755);
+        let open_dir = out.join("shared");
+        fs::create_dir(&open_dir).unwrap();
+        let shared = executable(&open_dir, "codex", 0o755);
+        fs::set_permissions(&open_dir, fs::Permissions::from_mode(0o1777)).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let in_temp = executable(&fs::canonicalize(temp.path()).unwrap(), "daft", 0o755);
+        let path = own_path(
+            &[&inside, Path::new("relative/git"), &shared, &in_temp],
+            None,
+            &[&root],
+        )
+        .unwrap();
+        assert_eq!(path, OsString::from("/usr/bin:/bin:/usr/sbin:/sbin"));
+        fs::set_permissions(&open_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // Nothing left is no PATH, not an empty one.
-        let path = std::env::join_paths([&inside]).unwrap();
-        assert_eq!(helper_path_from(Some(&path), &[&root]), None);
-        assert_eq!(helper_path_from(None, &[&root]), None);
+        // The recorded PATH comes last, without what no longer qualifies or
+        // lies inside the workspace, and never shadows what came first.
+        let mine = out.join("mine");
+        fs::create_dir(&mine).unwrap();
+        let open = out.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let recorded = std::env::join_paths([
+            mine.clone(),
+            out.join("gone"),
+            open.clone(),
+            root.clone(),
+            git_dir.clone(),
+            "/tmp".into(),
+        ])
+        .unwrap();
+        let path = own_path(&[&git], Some(&recorded), &[&root]).unwrap();
+        let expected = std::env::join_paths([
+            git_dir,
+            "/usr/bin".into(),
+            "/bin".into(),
+            "/usr/sbin".into(),
+            "/sbin".into(),
+            mine,
+        ])
+        .unwrap();
+        assert_eq!(path, expected);
     }
 
     #[test]
@@ -1238,8 +1302,8 @@ pub(crate) mod tests {
         let env = Path::new("/usr/bin/env");
         let once = vec!["GIT_NO_LAZY_FETCH=1".to_string()];
         let deadline = Duration::from_secs(10);
-        let plain = run_helper(env, &[] as &[&str], None, deadline).unwrap();
-        assert_eq!(lazy_fetch_lines(&plain), once, "run_helper");
+        let plain = run_helper_with_path(env, &[] as &[&str], None, deadline, None).unwrap();
+        assert_eq!(lazy_fetch_lines(&plain), once, "run_helper_with_path");
         let empty = run_helper_with_env(env, &[] as &[&str], None, deadline, None, &[]).unwrap();
         assert_eq!(
             lazy_fetch_lines(&empty),
@@ -1299,31 +1363,6 @@ pub(crate) mod tests {
         ] {
             assert_eq!(honours_no_lazy_fetch(version), honours, "{version:?}");
         }
-    }
-
-    #[test]
-    fn a_git_below_the_floor_is_refused_and_never_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let ran = dir.path().join("ran");
-        let git = dir.path().join("git");
-        fs::write(
-            &git,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version 2.45.0'; exit 0; fi\n\
-                 echo \"$@\" >> '{}'\n",
-                ran.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
-        let fail = require_git_floor(&git, &[]).unwrap_err();
-        assert_eq!(fail.exit, Exit::Config);
-        assert!(
-            fail.message.contains("found `git version 2.45.0`"),
-            "{}",
-            fail.message
-        );
-        assert!(!ran.exists(), "the old git ran for more than its version");
     }
 
     /// Waits until `pid` is gone: killed, and reaped by whoever inherited it.
@@ -1425,9 +1464,13 @@ pub(crate) mod tests {
 
     #[test]
     fn helpers_run_with_a_deadline() {
-        let sleep = resolve_binary("sleep", None, &[]).unwrap();
-        assert!(run_helper(&sleep, &["5"], None, Duration::from_millis(100)).is_err());
-        let output = run_helper(&sleep, &["0"], None, Duration::from_secs(5)).unwrap();
+        let sleep = resolve_binary(Path::new("/bin/sleep"), &[]).unwrap();
+        let path = || own_path(&[&sleep], None, &[]);
+        assert!(
+            run_helper_with_path(&sleep, &["5"], None, Duration::from_millis(100), path()).is_err()
+        );
+        let output =
+            run_helper_with_path(&sleep, &["0"], None, Duration::from_secs(5), path()).unwrap();
         assert_eq!(output.status, Some(0));
     }
 }

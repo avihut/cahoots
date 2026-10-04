@@ -31,7 +31,11 @@ pub struct HarnessEntry {
     /// `cahoots enable <harness>` writes): a run sends repository content to
     /// that vendor.
     pub enabled: bool,
+    /// The pinned program: the only one that runs. Unpinned, the harness is
+    /// not a candidate.
     pub binary: Option<PathBuf>,
+    /// Its settings folder, when a person set one (`harness.<id>.home`).
+    pub home: Option<PathBuf>,
     pub cap: u8,
     /// Where a run that is already going gets stopped. Always above `cap`.
     pub abort_at: u8,
@@ -131,6 +135,8 @@ pub struct Registry {
     pub review: Review,
     pub explore: Explore,
     pub fork: Fork,
+    /// The pinned `git` and `ps`, and the recorded PATH (`[tools]`).
+    pub tools: crate::tools::Pins,
 }
 
 pub const DEFAULT_CAP: u8 = 75;
@@ -179,25 +185,122 @@ fn default_candidates(role: Role) -> Vec<Candidate> {
     }
 }
 
+/// What `enable` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enabled {
+    /// The targets now on.
+    pub enabled: Vec<HarnessId>,
+    /// The program pinned for the target, the one a run uses.
+    pub binary: Option<PathBuf>,
+    /// Whether this call pinned it.
+    pub pinned: bool,
+    /// Whether this call recorded the person's PATH (`tools.path`).
+    pub path_recorded: bool,
+    /// Whether this call recorded the target's settings folder.
+    pub home_recorded: bool,
+}
+
 /// Turns a target on or off, in config.toml: `enabled = true`, or no
 /// `enabled` at all, which is off. Only human verbs call this, and those only
 /// run from a terminal: sending a repository's content to another vendor is
-/// a person's decision. Returns the targets now on.
-pub fn set_enabled(dirs: &Dirs, harness: HarnessId, on: bool) -> Res<Vec<HarnessId>> {
+/// a person's decision. Turning one on pins its program if none is pinned:
+/// the first copy on the person's PATH that a run would take (`terminal`),
+/// in the same write as `enabled` — or, with none, nothing is written at all
+/// (34). With it go the person's PATH, if none is recorded, and the
+/// target's settings folder their terminal names, if config.toml names
+/// none. Off keeps the pin.
+pub fn set_enabled(
+    dirs: &Dirs,
+    harness: HarnessId,
+    on: bool,
+    terminal: &crate::tools::Terminal,
+) -> Res<Enabled> {
     let path = KeyPath::of(&format!("harness.{harness}.enabled"));
-    let change = if on {
-        Change::Set {
+    let file = dirs.config_file();
+    let now = Registry::effective(&UserConfig::load(&file)?);
+    let entry = now.harness(harness);
+    let set = |key: String, value: String| Change::Set {
+        path: KeyPath::of(&key),
+        value: value.into(),
+    };
+    let mut done = Enabled {
+        enabled: Vec::new(),
+        binary: entry.binary.clone(),
+        pinned: false,
+        path_recorded: false,
+        home_recorded: false,
+    };
+    let mut changes = Vec::new();
+    if on {
+        let mut home = entry.home.clone();
+        if home.is_none()
+            && let Some(theirs) = terminal.home(harness)
+            && crate::tools::check_home(theirs).is_ok()
+        {
+            changes.push(set(
+                format!("harness.{harness}.home"),
+                theirs.display().to_string(),
+            ));
+            home = Some(theirs.to_path_buf());
+            done.home_recorded = true;
+        }
+        let mut pins = now.tools.clone();
+        if pins.path.is_none()
+            && let Some(recorded) =
+                crate::tools::decide_path(terminal.path.as_deref(), None, &terminal.workspace).path
+        {
+            changes.push(set("tools.path".to_string(), recorded.clone()));
+            pins.path = Some(recorded);
+            done.path_recorded = true;
+        }
+        if entry.binary.is_none() {
+            let name = crate::harness::harness(harness).binary_name();
+            // A harness runs git of its own: none is asked anything until the
+            // git it would find first is the located one.
+            let roots: Vec<&std::path::Path> =
+                terminal.workspace.iter().map(PathBuf::as_path).collect();
+            let recorded = pins.recorded();
+            let git = crate::tools::locate_one(
+                crate::tools::ToolId::Git,
+                pins.git.as_deref(),
+                recorded.as_deref(),
+                &roots,
+            )?;
+            let (found, _) = crate::tools::discover_harness(
+                harness,
+                terminal.path.as_deref(),
+                home.as_deref(),
+                Some(&git),
+                recorded.as_deref(),
+                &terminal.workspace,
+            )
+            .map_err(|why| {
+                Fail::config(format!(
+                    "no `{name}` on your PATH that cahoots can run ({}) — choose its program \
+                     with `cahoots settings` (harness.{harness}.binary), then enable it",
+                    why.unwrap_or_else(|| "none found".to_string())
+                ))
+            })?;
+            changes.push(set(
+                format!("harness.{harness}.binary"),
+                found.display().to_string(),
+            ));
+            done.binary = Some(found);
+            done.pinned = true;
+        }
+        changes.push(Change::Set {
             path,
             value: true.into(),
-        }
+        });
     } else {
-        Change::Remove { path }
-    };
-    let config = edit::apply(&dirs.config_file(), &[change])?;
-    Ok(HarnessId::ALL
+        changes.push(Change::Remove { path });
+    }
+    let config = edit::apply(&file, &changes)?;
+    done.enabled = HarnessId::ALL
         .into_iter()
         .filter(|id| config.harness.get(id).and_then(|h| h.enabled) == Some(true))
-        .collect())
+        .collect();
+    Ok(done)
 }
 
 impl Registry {
@@ -312,6 +415,7 @@ impl Registry {
             pick("enabled", user.is_some_and(|u| u.enabled.is_some()));
             pick("cap", user.is_some_and(|u| u.cap.is_some()));
             pick("binary", user.is_some_and(|u| u.binary.is_some()));
+            pick("home", user.is_some_and(|u| u.home.is_some()));
             pick(
                 "max_concurrent",
                 user.is_some_and(|u| u.max_concurrent.is_some()),
@@ -324,6 +428,7 @@ impl Registry {
                 HarnessEntry {
                     enabled: user.and_then(|u| u.enabled).unwrap_or(false),
                     binary: user.and_then(|u| u.binary.clone()),
+                    home: user.and_then(|u| u.home.clone()),
                     cap,
                     abort_at: user
                         .and_then(|u| u.abort_at)
@@ -409,6 +514,11 @@ impl Registry {
                 ledger_max_runs_per_hour: ledger.max_runs_per_hour.unwrap_or(12),
                 ledger_max_tokens_per_day: ledger.max_tokens_per_day,
             },
+            tools: crate::tools::Pins {
+                git: config.tools.git.as_ref().and_then(|t| t.binary.clone()),
+                ps: config.tools.ps.as_ref().and_then(|t| t.binary.clone()),
+                path: config.tools.path.clone(),
+            },
             fork: Fork {
                 provider: config.fork.provider.unwrap_or(ProviderId::Git),
                 daft_binary: config.fork.daft.as_ref().and_then(|d| d.binary.clone()),
@@ -432,21 +542,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabling_writes_config_toml_and_is_idempotent_and_reversible() {
-        let tmp = tempfile::tempdir().unwrap();
+    fn enabling_pins_what_it_finds_and_is_idempotent_and_reversible() {
+        use std::os::unix::fs::PermissionsExt;
+        // Not under a temp directory, where no PATH is recorded from.
+        let tmp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
         let dirs = Dirs {
-            home: tmp.path().to_path_buf(),
-            config: tmp.path().join("config"),
-            state: tmp.path().join("state"),
-            data: tmp.path().join("data"),
+            home: root.clone(),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
             overridden: true,
         };
-        let enabled = |on| set_enabled(&dirs, HarnessId::Codex, on).unwrap();
-        assert_eq!(enabled(true), [HarnessId::Codex]);
-        assert_eq!(enabled(true), [HarnessId::Codex]);
+        // A codex on the person's PATH, and nothing else there.
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\necho 'codex-cli 0.155.1'\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A harness is asked its version only with the located git first on
+        // its PATH: the suite's own, pinned.
+        let git = crate::tools::tests::tests_located()
+            .git
+            .pinned()
+            .to_path_buf();
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        std::fs::write(
+            dirs.config_file(),
+            format!("schema = 1\ntools.git.binary = {git:?}\n"),
+        )
+        .unwrap();
+        let terminal = crate::tools::Terminal {
+            path: Some(bin.clone().into_os_string()),
+            homes: Vec::new(),
+            workspace: Vec::new(),
+        };
+        let enabled = |on| set_enabled(&dirs, HarnessId::Codex, on, &terminal).unwrap();
+
+        let first = enabled(true);
+        assert_eq!(first.enabled, [HarnessId::Codex]);
+        assert_eq!(
+            (first.binary.as_deref(), first.pinned),
+            (Some(&*codex), true)
+        );
+        assert!(first.path_recorded, "no PATH was recorded, so this one is");
+        let written = std::fs::read_to_string(dirs.config_file()).unwrap();
+        assert!(
+            written.contains(&format!("binary = \"{}\"", codex.display()))
+                && written.contains("enabled = true")
+                && written.contains(&format!("path = \"{}\"", bin.display())),
+            "{written}"
+        );
+        // Again: the pin is kept, and nothing is pinned or recorded now.
+        let again = enabled(true);
+        assert_eq!(again.enabled, [HarnessId::Codex]);
+        assert_eq!(
+            (again.binary.as_deref(), again.pinned),
+            (Some(&*codex), false)
+        );
+        assert!(!again.path_recorded);
         assert_eq!(
             std::fs::read_to_string(dirs.config_file()).unwrap(),
-            "schema = 1\n\n[harness.codex]\nenabled = true\n"
+            written
         );
         assert!(
             Registry::load(&dirs)
@@ -454,18 +611,31 @@ mod tests {
                 .harness(HarnessId::Codex)
                 .enabled
         );
-        assert!(enabled(false).is_empty());
-        assert!(
-            !Registry::load(&dirs)
-                .unwrap()
-                .harness(HarnessId::Codex)
-                .enabled
-        );
+        // Off keeps the pin.
+        assert!(enabled(false).enabled.is_empty());
+        let off = Registry::load(&dirs).unwrap();
+        assert!(!off.harness(HarnessId::Codex).enabled);
         assert_eq!(
-            std::fs::read_to_string(dirs.config_file()).unwrap(),
-            "schema = 1\n",
-            "off is the default, so it is written as nothing at all"
+            off.harness(HarnessId::Codex).binary.as_deref(),
+            Some(&*codex)
         );
+
+        // Nothing on the PATH to pin: refused, and nothing written.
+        let before = std::fs::read_to_string(dirs.config_file()).unwrap();
+        let empty = crate::tools::Terminal {
+            path: Some(root.join("nothing").into_os_string()),
+            homes: Vec::new(),
+            workspace: Vec::new(),
+        };
+        let fail = set_enabled(&dirs, HarnessId::Claude, true, &empty).unwrap_err();
+        assert_eq!(fail.exit, Exit::Config);
+        assert!(fail.message.contains("none found"), "{}", fail.message);
+        assert!(
+            fail.message.contains("cahoots settings"),
+            "{}",
+            fail.message
+        );
+        assert_eq!(std::fs::read_to_string(dirs.config_file()).unwrap(), before);
     }
 
     #[test]

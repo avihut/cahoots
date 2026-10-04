@@ -33,6 +33,7 @@ use crate::placement::{self, Placement};
 use crate::run::client;
 use crate::run::record::{RunDir, RunRecord, now, validate_id, write_private};
 use crate::spawn;
+use crate::tools::{Tool, Tools};
 
 const GIT_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -98,9 +99,9 @@ fn refused(message: String) -> Fail {
 /// `evals add <run>`: an accepted writer's run becomes a task. Each check in
 /// turn, and the first that fails decides; nothing is written until all
 /// have passed, and then all of it or nothing.
-pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
+pub fn add(dirs: &Dirs, tools: &Tools, run: &str, invoker: &[&Path]) -> Res<Added> {
     validate_id(run)?;
-    client::reconcile(dirs, invoker);
+    client::reconcile(dirs, tools, invoker);
     let stories = history::stories(&history::read(dirs));
     let story = stories.iter().find(|story| story.run == run);
     let dir = match RunDir::open(dirs, run) {
@@ -204,9 +205,9 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
             repo.display()
         ))
     };
-    let git_common_dir = common_dir(dirs, &record, &roots)?.ok_or_else(gone)?;
+    let git_common_dir = common_dir(dirs, &tools.git, &record, &roots)?.ok_or_else(gone)?;
     roots.push(&git_common_dir);
-    match check(dirs, &git_common_dir, base_commit, &roots)? {
+    match check(dirs, &tools.git, &git_common_dir, base_commit, &roots)? {
         (Rot::None, _) => {}
         (Rot::CommitGone, _) => {
             return Err(refused(format!(
@@ -288,11 +289,11 @@ pub fn add(dirs: &Dirs, run: &str, invoker: &[&Path]) -> Res<Added> {
 
 /// `evals list`: every task, oldest first, each with its rot check. What is
 /// not a task — a name `list` skips, a link, a task file that does not load —
-/// is left out, and one task that cannot be checked fails nothing. `invoker`
-/// is the asking process's workspace, or why it could not be found: then no
-/// git is run, since none would be held to it, and every task is `Unknown`
-/// with that reason.
-pub fn list(dirs: &Dirs, invoker: Result<&[&Path], &Fail>) -> Vec<Listed> {
+/// is left out, and one task that cannot be checked fails nothing. `located`
+/// is the located git and the asking process's workspace, or why either
+/// could not be found: then no git is run, and every task is `Unknown` with
+/// that reason.
+pub fn list(dirs: &Dirs, located: Result<(&Tool, &[&Path]), &Fail>) -> Vec<Listed> {
     let tasks = dirs.evals_tasks();
     let Ok(entries) = fs::read_dir(&tasks) else {
         return Vec::new();
@@ -308,8 +309,8 @@ pub fn list(dirs: &Dirs, invoker: Result<&[&Path], &Fail>) -> Vec<Listed> {
         .filter_map(|name| {
             let path = tasks.join(&name);
             let task = load(&path, &name)?;
-            let (rot, rot_error) = match invoker {
-                Ok(invoker) => rot(dirs, &task, invoker),
+            let (rot, rot_error) = match located {
+                Ok((git, invoker)) => rot(dirs, git, &task, invoker),
                 Err(fail) => (Rot::Unknown, Some(fail.message.clone())),
             };
             Some(Listed {
@@ -361,8 +362,14 @@ pub fn remove(dirs: &Dirs, task: &str) -> Res<String> {
 /// against the git directory pinned when the fork was cut, or, once that is
 /// gone, from what the fork was cut from. `None` when neither can say. A
 /// `git` the binary policy refuses is a refusal.
-fn common_dir(dirs: &Dirs, record: &RunRecord, roots: &[&Path]) -> Res<Option<PathBuf>> {
-    let git = spawn::system_tool("git", roots)?;
+fn common_dir(
+    dirs: &Dirs,
+    git: &Tool,
+    record: &RunRecord,
+    roots: &[&Path],
+) -> Res<Option<PathBuf>> {
+    let path = git.path(roots);
+    let git = git.at(roots)?;
     let quiet = placement::quiet_git_args(dirs)?;
     let ask = |git_dir: Option<&Path>, cwd: &Path| -> Option<PathBuf> {
         let mut args = quiet.clone();
@@ -374,15 +381,9 @@ fn common_dir(dirs: &Dirs, record: &RunRecord, roots: &[&Path]) -> Res<Option<Pa
         args.extend(
             ["rev-parse", "--path-format=absolute", "--git-common-dir"].map(OsString::from),
         );
-        let output = spawn::run_helper_with_env(
-            &git,
-            &args,
-            Some(cwd),
-            GIT_DEADLINE,
-            spawn::helper_path(roots),
-            &[],
-        )
-        .ok()?;
+        let output =
+            spawn::run_helper_with_env(&git, &args, Some(cwd), GIT_DEADLINE, path.clone(), &[])
+                .ok()?;
         if output.status != Some(0) {
             return None;
         }
@@ -407,16 +408,17 @@ fn common_dir(dirs: &Dirs, record: &RunRecord, roots: &[&Path]) -> Res<Option<Pa
 /// Whether `task` can still be replayed: its base commit checked in its
 /// repository's common git directory, which outlives a linked worktree.
 /// Anything that stops the check is `Unknown`, with why.
-pub fn rot(dirs: &Dirs, task: &Task, invoker: &[&Path]) -> (Rot, Option<String>) {
+pub fn rot(dirs: &Dirs, git: &Tool, task: &Task, invoker: &[&Path]) -> (Rot, Option<String>) {
     let mut roots = invoker.to_vec();
     roots.extend([task.repo.as_path(), task.git_common_dir.as_path()]);
-    check(dirs, &task.git_common_dir, &task.base_commit, &roots)
+    check(dirs, git, &task.git_common_dir, &task.base_commit, &roots)
         .unwrap_or_else(|fail| (Rot::Unknown, Some(fail.message)))
 }
 
 /// The rot check itself. An `Err` is a `git` that may not be run at all.
 fn check(
     dirs: &Dirs,
+    git: &Tool,
     common: &Path,
     commit: &Commit,
     roots: &[&Path],
@@ -424,21 +426,15 @@ fn check(
     if !common.is_dir() {
         return Ok((Rot::RepositoryGone, None));
     }
-    let git = spawn::system_tool("git", roots)?;
+    let path = git.path(roots);
+    let git = git.at(roots)?;
     let mut args = placement::quiet_git_args(dirs)?;
     let mut flag = OsString::from("--git-dir=");
     flag.push(common);
     args.push(flag);
     args.extend(["rev-parse", "--verify", "--quiet", "--end-of-options"].map(OsString::from));
     args.push(OsString::from(format!("{}^{{commit}}", commit.as_str())));
-    let output = spawn::run_helper_with_env(
-        &git,
-        &args,
-        Some(common),
-        GIT_DEADLINE,
-        spawn::helper_path(roots),
-        &[],
-    );
+    let output = spawn::run_helper_with_env(&git, &args, Some(common), GIT_DEADLINE, path, &[]);
     Ok(match output {
         Ok(output) => match output.status {
             Some(0) => (Rot::None, None),

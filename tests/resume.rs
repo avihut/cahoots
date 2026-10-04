@@ -478,6 +478,23 @@ fn a_resume_from_another_worktree_keeps_both_workspaces_out_of_its_tools() {
             workspace.display()
         );
     }
+
+    // Pinned in the worktree it is resumed from, a git is refused, and never
+    // run: no new run.
+    let git_marker = world.root.join("pinned-git-ran");
+    world.script_at(
+        &second.join("bin/git"),
+        &format!("#!/bin/sh\ntouch '{}'\n", git_marker.display()),
+    );
+    world.pin_tool("git", Some(&second.join("bin/git")));
+    let runs = fs::read_dir(world.state.join("runs")).unwrap().count();
+    let refused = common::answer(&mut command);
+    assert_eq!(refused.code, 33, "{}", refused.json);
+    assert!(!git_marker.exists(), "the pinned git in the workspace ran");
+    assert_eq!(
+        fs::read_dir(world.state.join("runs")).unwrap().count(),
+        runs
+    );
 }
 
 #[test]

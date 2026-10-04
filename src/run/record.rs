@@ -120,6 +120,12 @@ pub struct RunRecord {
     pub int_grace_secs: u64,
     pub term_grace_secs: u64,
     pub binary: PathBuf,
+    /// The callee's settings folder (`harness.<id>.home`), canonical, as the
+    /// launching client checked it: the one the supervisor checks again and
+    /// hands the callee — never the name a person wrote. Internal: never in
+    /// the envelope.
+    #[serde(default)]
+    pub home: Option<PathBuf>,
     pub harness_version: Option<Version>,
     pub created_at: u64,
     pub started_at: Option<u64>,
@@ -165,6 +171,46 @@ impl RunRecord {
         roots.push(&self.cwd);
         roots.extend(self.base.as_deref());
         roots
+    }
+}
+
+/// The callee's `TMPDIR`: `<state>/agent-tmp/<id>`, a tree of cahoots' own
+/// state that holds nothing else — never the caller's `TMPDIR`, and never
+/// inside the run's directory, since a Codex writer may write wherever
+/// `TMPDIR` points: never beside `run.json` or the git configuration a run
+/// recorded. Made private just before the callee starts, refused if
+/// anything is there already, and removed once the run is over.
+pub fn callee_tmpdir(dirs: &Dirs, id: &str) -> PathBuf {
+    dirs.agent_tmp().join(id)
+}
+
+/// Makes the run's `callee_tmpdir`, private, where nothing was.
+pub fn make_callee_tmpdir(dirs: &Dirs, id: &str) -> Res<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    ensure_private_dir(&dirs.agent_tmp())?;
+    let path = callee_tmpdir(dirs, id);
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .map_err(|error| {
+            Fail::internal(format!(
+                "cannot make the run's temp directory {}: {error}",
+                path.display()
+            ))
+        })?;
+    Ok(path)
+}
+
+/// Removes the run's `callee_tmpdir` and what the callee left in it — only
+/// a real directory of this user's, never what a link points at.
+pub fn remove_callee_tmpdir(dirs: &Dirs, id: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let path = callee_tmpdir(dirs, id);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.is_dir() && meta.uid() == nix::unistd::geteuid().as_raw())
+    {
+        let _ = fs::remove_dir_all(&path);
     }
 }
 

@@ -42,6 +42,12 @@ pub struct World {
     /// What cuts a writer's worktree: dotted `fork.*` keys, written before
     /// `extra` so that neither a `configure` nor a table in it can take them.
     fork: RefCell<String>,
+    /// The pinned `git` and `ps`, by name: the suite's own, unless a test
+    /// pins another or none (`pin_tool`). Written as dotted keys before
+    /// `extra`, as `fork` is.
+    tools: RefCell<Vec<(String, Option<PathBuf>)>>,
+    /// The harnesses whose program is not pinned (`unpin_harness`).
+    unpinned: RefCell<Vec<String>>,
     /// Directories put before the inherited PATH, first one first: `daft`
     /// puts `bin` there, `prefix_path` anything else.
     path_prefix: RefCell<Vec<PathBuf>>,
@@ -87,6 +93,46 @@ pub fn fake_at(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The suite's own `name` (`git`, `ps`), as the test process's PATH finds
+/// it: what `World` pins, as a person's `install` would. That is the test
+/// looking, not cahoots.
+pub fn real(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|path| {
+            fs::metadata(path)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap_or_else(|| panic!("no {name} on the suite's PATH"))
+}
+
+/// The PATH cahoots gives a program it starts beside `binaries`: each
+/// one's directory as pinned, then where it resolves, then the system's,
+/// then `tail` (the recorded PATH, as it qualifies), each directory once.
+pub fn own_path(binaries: &[&Path], tail: &[&Path]) -> String {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for binary in binaries {
+        dirs.push(binary.parent().unwrap().to_path_buf());
+        dirs.push(
+            fs::canonicalize(binary)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+        );
+    }
+    dirs.extend(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from));
+    dirs.extend(tail.iter().map(|dir| dir.to_path_buf()));
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        if !kept.contains(&dir) {
+            kept.push(dir);
+        }
+    }
+    std::env::join_paths(kept).unwrap().into_string().unwrap()
+}
+
 pub struct Answer {
     pub code: i32,
     pub json: Value,
@@ -130,6 +176,11 @@ impl World {
             enabled: RefCell::new(Vec::new()),
             extra: RefCell::new(String::new()),
             fork: RefCell::new(String::new()),
+            tools: RefCell::new(vec![
+                ("git".to_string(), Some(real("git"))),
+                ("ps".to_string(), Some(real("ps"))),
+            ]),
+            unpinned: RefCell::new(Vec::new()),
             path_prefix: RefCell::new(Vec::new()),
             _root: root,
         };
@@ -388,6 +439,7 @@ impl World {
 
     fn write_config(&self) {
         let enabled = self.enabled.borrow();
+        let unpinned = self.unpinned.borrow();
         let harness: String = ["claude", "codex"]
             .iter()
             .map(|id| {
@@ -396,15 +448,99 @@ impl World {
                 } else {
                     String::new()
                 };
-                format!("harness.{id}.binary = {:?}\n{on}", self.bin.join(id))
+                let pinned = if unpinned.iter().any(|u| u == id) {
+                    String::new()
+                } else {
+                    format!("harness.{id}.binary = {:?}\n", self.bin.join(id))
+                };
+                format!("{pinned}{on}")
             })
             .collect();
         let text = format!(
-            "schema = 1\n{harness}limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n{}\n",
+            "schema = 1\n{harness}limits.int_grace_secs = 1\nlimits.term_grace_secs = 1\n{}\n{}{}\n",
             self.fork.borrow(),
+            self.tools_toml(),
             self.extra.borrow(),
         );
         fs::write(self.config.join("config.toml"), text).unwrap();
+    }
+
+    /// The pinned `git` and `ps` as dotted keys, one to a line: what a test
+    /// that writes config.toml by hand puts first, or every agent verb that
+    /// starts a tool refuses (34).
+    pub fn tools_toml(&self) -> String {
+        self.tools
+            .borrow()
+            .iter()
+            .filter_map(|(name, pin)| Some(format!("tools.{name}.binary = {:?}\n", pin.as_ref()?)))
+            .collect()
+    }
+
+    /// Pins `name` (`git` or `ps`) at `binary`, or unpins it with `None`.
+    pub fn pin_tool(&self, name: &str, binary: Option<&Path>) {
+        for (tool, pin) in self.tools.borrow_mut().iter_mut() {
+            if tool == name {
+                *pin = binary.map(Path::to_path_buf);
+            }
+        }
+        self.write_config();
+    }
+
+    /// Leaves `id`'s program unpinned in config.toml: it is no candidate.
+    pub fn unpin_harness(&self, id: &str) {
+        self.unpinned.borrow_mut().push(id.to_string());
+        self.write_config();
+    }
+
+    /// A `#!/bin/sh` stand-in for the real `name` at `<dir>/<name>`, owner-only
+    /// and runnable: it appends its PATH and working directory to
+    /// `<dir>/<name>.log`, touches the returned marker, then runs the real
+    /// `name` with its arguments.
+    pub fn wrapper(&self, dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        let marker = dir.join(format!("{name}.ran"));
+        let log = dir.join(format!("{name}.log"));
+        self.script_at(
+            &path,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\t%s\\n' \"$PATH\" \"$(pwd)\" >> '{}'\ntouch '{}'\nexec '{}' \"$@\"\n",
+                log.display(),
+                marker.display(),
+                real(name).display()
+            ),
+        );
+        (path, marker)
+    }
+
+    /// Every line `wrapper`'s `name` in `dir` logged: its PATH and working
+    /// directory, each time it ran.
+    pub fn wrapper_log(&self, dir: &Path, name: &str) -> Vec<(String, String)> {
+        fs::read_to_string(dir.join(format!("{name}.log")))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let (path, cwd) = line.split_once('\t').unwrap_or((line, ""));
+                (path.to_string(), cwd.to_string())
+            })
+            .collect()
+    }
+
+    /// A `name` an agent could plant: a script in `<root>/planted`, outside
+    /// the workspace and fit for the binary policy, put first on PATH, that
+    /// only touches the returned marker. It never runs: nothing cahoots
+    /// starts is looked up on PATH.
+    pub fn planted(&self, name: &str) -> PathBuf {
+        let dir = self.root.join("planted");
+        let marker = dir.join(format!("{name}.ran"));
+        self.script_at(
+            &dir.join(name),
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
+        if !self.path_prefix.borrow().contains(&dir) {
+            self.prefix_path(&dir);
+        }
+        marker
     }
 
     /// Installs a fake `usage-cli`, chooses it as the meter and points the
@@ -737,6 +873,13 @@ impl World {
 
     pub fn run_file(&self, run: &str, name: &str) -> PathBuf {
         self.state.join("runs").join(run).join(name)
+    }
+
+    /// Where cahoots puts run `id`'s callee's TMPDIR: a tree of its state of
+    /// its own, never inside the run's directory, and gone once the run is
+    /// over.
+    pub fn callee_tmpdir(&self, id: &str) -> PathBuf {
+        self.state.join("agent-tmp").join(id)
     }
 }
 

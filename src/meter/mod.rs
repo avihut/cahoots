@@ -239,7 +239,7 @@ impl UsageMeter {
                 id.binary_name()
             ))
         })?;
-        Exe::pin(id, pinned)
+        Exe::pin(pinned)
     }
 
     /// Whether this meter says anything about `harness` at all. When it says
@@ -325,29 +325,19 @@ pub struct Exe {
 }
 
 impl Exe {
-    pub fn pin(id: MeterId, pinned: &Path) -> Res<Exe> {
+    pub fn pin(pinned: &Path) -> Res<Exe> {
         Ok(Exe {
-            resolved: spawn::resolve_binary(id.binary_name(), Some(pinned), &[])?,
+            resolved: spawn::resolve_binary(pinned, &[])?,
             pinned: pinned.to_path_buf(),
         })
     }
 
     /// The meter's PATH: its own directories — where a package manager puts
-    /// the interpreter a script meter runs on — then the system's. Never the
-    /// caller's, which would choose that interpreter for it.
+    /// the interpreter a script meter runs on — then the system's, as every
+    /// started program's (`spawn::own_path`), and no recorded PATH. Never
+    /// the caller's, which would choose that interpreter for it.
     fn path(&self) -> Option<std::ffi::OsString> {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        for dir in [self.pinned.parent(), self.resolved.parent()]
-            .into_iter()
-            .flatten()
-            .map(Path::to_path_buf)
-            .chain(["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from))
-        {
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
-        }
-        std::env::join_paths(dirs).ok()
+        spawn::own_path(&[&self.pinned], None, &[])
     }
 }
 

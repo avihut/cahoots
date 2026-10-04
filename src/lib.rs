@@ -32,4 +32,5 @@ pub mod run;
 pub mod settings;
 pub mod spawn;
 pub mod survival;
+pub mod tools;
 pub mod tui;

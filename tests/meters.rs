@@ -611,6 +611,16 @@ fn two_meters(world: &World) {
     .unwrap();
 }
 
+/// `MINE` once `install` chose ccusage at a terminal whose PATH is the
+/// world's `bin`: the meter, and that PATH recorded. No git or ps is there to
+/// pin, so no harness is asked its version, and none is pinned.
+fn chosen_and_pinned(world: &World) -> String {
+    format!(
+        "{MINE}\n[meter]\nuse = \"ccusage\"\n\n[tools]\npath = {:?}\n",
+        world.bin,
+    )
+}
+
 /// The terminal is as it was before the question: line by line and echoed,
 /// the cursor shown, lines wrapping.
 fn given_back(after: &Finished) {
@@ -662,7 +672,7 @@ fn install_asks_at_the_terminal_and_the_arrow_keys_answer() {
     // The answer is the person's, so it goes in their config; what was
     // found goes in cahoots' own record.
     let text = fs::read_to_string(world.config.join("config.toml")).unwrap();
-    assert_eq!(text, format!("{MINE}\n[meter]\nuse = \"ccusage\"\n"));
+    assert_eq!(text, chosen_and_pinned(&world));
     let found: Value =
         serde_json::from_str(&fs::read_to_string(world.config.join("meter.json")).unwrap())
             .unwrap();
@@ -738,7 +748,7 @@ fn as_a_person_the_question_and_installs_words_share_one_rail() {
         "{text}"
     );
     let config = fs::read_to_string(world.config.join("config.toml")).unwrap();
-    assert_eq!(config, format!("{MINE}\n[meter]\nuse = \"ccusage\"\n"));
+    assert_eq!(config, chosen_and_pinned(&world));
     given_back(&after);
 }
 

@@ -500,12 +500,9 @@ fn a_daft_that_hangs_is_stopped() {
 #[test]
 fn a_git_cut_that_fails_its_pin_is_refused_and_left_where_it_is() {
     let world = World::new();
-    // A git, outside the workspace, that cuts as git does but says the new
-    // worktree's git directory is not where git's layout puts it.
-    let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|dir| dir.join("git"))
-        .find(|git| git.is_file())
-        .expect("git on PATH");
+    // A git, pinned outside the workspace, that cuts as git does but says
+    // the new worktree's git directory is not where git's layout puts it.
+    let real = common::real("git");
     let wrap = world.root.join("wrap");
     world.script_at(
         &wrap.join("git"),
@@ -515,7 +512,7 @@ fn a_git_cut_that_fails_its_pin_is_refused_and_left_where_it_is() {
             real.display()
         ),
     );
-    world.prefix_path(&wrap);
+    world.pin_tool("git", Some(&wrap.join("git")));
     let answer = fork(&world, &[]);
     assert_eq!(answer.code, 33, "{}", answer.json);
     let left = world.state.join("worktrees").join(answer.run_id());
@@ -601,7 +598,7 @@ fn a_daft_inside_the_workspace_is_not_run() {
 }
 
 #[test]
-fn a_git_inside_the_workspace_is_not_run() {
+fn a_git_inside_the_workspace_on_path_is_never_run() {
     let world = World::new();
     let marker = world.root.join("planted-git-ran");
     world.script_at(
@@ -609,26 +606,21 @@ fn a_git_inside_the_workspace_is_not_run() {
         &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
     world.prefix_path(&world.work.join("bin"));
+    // First on PATH is nothing: the pinned git runs, and this one never.
     let answer = world.run("hello", &[]);
-    assert_eq!(answer.code, 33, "{}", answer.json);
-    assert!(
-        answer.message().contains("inside the workspace"),
-        "{}",
-        answer.json
-    );
+    assert_eq!(answer.code, 0, "{}", answer.json);
     assert!(!marker.exists(), "the planted git ran");
-    assert!(!world.state.join("runs").exists(), "a run was created");
 }
 
-/// A `git` planted at the top of the repository, first on PATH, that leaves
-/// a mark when it runs.
+/// A `git` planted at the top of the repository, and pinned there, that
+/// leaves a mark when it runs.
 fn plant_git(world: &World) -> PathBuf {
     let marker = world.root.join("planted-git-ran");
     world.script_at(
         &world.work.join("bin/git"),
         &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
-    world.prefix_path(&world.work.join("bin"));
+    world.pin_tool("git", Some(&world.work.join("bin/git")));
     marker
 }
 
@@ -730,7 +722,7 @@ fn a_dot_git_that_git_looks_past_does_not_hide_the_repository_around_it() {
 }
 
 #[test]
-fn a_ps_inside_the_workspace_is_not_run() {
+fn a_ps_in_the_workspace_on_path_is_never_run() {
     let world = World::new();
     let marker = world.root.join("planted-ps-ran");
     world.script_at(
@@ -741,8 +733,8 @@ fn a_ps_inside_the_workspace_is_not_run() {
     let answer = world.run("hello", &[]);
     assert_eq!(answer.code, 0, "{}", answer.json);
     assert!(!marker.exists(), "the planted ps ran");
-    // Without a ps it may run, nothing is known of when the callee started.
-    assert!(world.record(&answer.run_id())["callee_started"].is_null());
+    // The pinned ps ran instead, and said when the callee started.
+    assert!(!world.record(&answer.run_id())["callee_started"].is_null());
 }
 
 #[test]
@@ -774,8 +766,8 @@ fn a_harness_asked_its_version_finds_nothing_in_the_workspace() {
 fn daft_gets_no_workspace_directory_on_its_path() {
     let world = World::new();
     world.daft(json!({"make": "worktree", "print": world.root.join("forks/f")}));
-    // Something harmless in the workspace's bin, so cahoots' own lookups
-    // still find the real git, and PATH = <bin>:<work>/bin:<inherited>.
+    // A directory of the workspace's, and the world's bin, first on the
+    // caller's PATH: neither is daft's for being there.
     let work_bin = world.work.join("bin");
     fs::create_dir_all(&work_bin).unwrap();
     fs::write(work_bin.join("README"), "not a tool\n").unwrap();
@@ -786,22 +778,14 @@ fn daft_gets_no_workspace_directory_on_its_path() {
     assert_eq!(answer.code, 0, "{}", answer.json);
     let calls = world.daft_calls();
     let path = calls[0]["path"].as_str().expect("daft was given a PATH");
-    let entries: Vec<&Path> = path.split(':').map(Path::new).collect();
-    assert!(
-        !entries.iter().any(|entry| entry.starts_with(&world.work)),
+    // The pinned git's directories, then daft's own, then the system's:
+    // nothing of the caller's PATH.
+    let git = common::real("git");
+    assert_eq!(
+        path,
+        common::own_path(&[&git, &world.bin.join("daft")], &[]),
         "{path}"
     );
-    assert!(entries.contains(&world.bin.as_path()), "{path}");
-    let inherited = std::env::var("PATH").unwrap();
-    for entry in inherited.split(':').map(Path::new) {
-        if entry.is_absolute() {
-            assert!(
-                entries.contains(&entry),
-                "{} went missing: {path}",
-                entry.display()
-            );
-        }
-    }
 }
 
 // ── No filter runs during the cut ───────────────────────────────────────────

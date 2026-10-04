@@ -588,14 +588,20 @@ fn run_verb(verb: Verb, reader: Reader, title: String) -> Result<Said, Stopped> 
         Verb::Settings { action } => Ok(settings::settings(action, person, title)?),
         Verb::Enable { harness, off } => {
             let dirs = Dirs::resolve()?;
-            let enabled = crate::registry::set_enabled(&dirs, harness, !off)?;
+            let terminal = crate::tools::Terminal::here();
+            let done = crate::registry::set_enabled(&dirs, harness, !off, &terminal)?;
             let words = match person {
-                true => Some(settings::enabled(&dirs, harness, !off, title)?),
+                true => Some(settings::enabled(&dirs, harness, !off, &done, title)?),
                 false => None,
             };
             Ok(Said {
-                envelope: Envelope::new(Exit::Ok, None)
-                    .with_data(serde_json::json!({ "enabled": enabled })),
+                envelope: Envelope::new(Exit::Ok, None).with_data(serde_json::json!({
+                    "enabled": done.enabled,
+                    "binary": done.binary,
+                    "pinned": done.pinned,
+                    "path_recorded": done.path_recorded,
+                    "home_recorded": done.home_recorded,
+                })),
                 words,
             })
         }
@@ -707,15 +713,25 @@ fn evals(action: EvalsAction, person: bool, title: String) -> Result<Said, Stopp
     // starts none.
     let (data, words) = match action {
         EvalsAction::Add { run } => {
-            let invoker = client::invoker_roots()?;
-            let added = crate::evals::add(&dirs, &run, &client::borrowed(&invoker))?;
+            let (_, tools, invoker) = client::looking_up(&dirs)?;
+            let added = crate::evals::add(&dirs, &tools, &run, &client::borrowed(&invoker))?;
             let words = person.then(|| endings::evals_added(title, &added, &dirs.home));
             (encode(serde_json::to_value(&added))?, words)
         }
         EvalsAction::List => {
-            let invoker = client::invoker_roots();
-            let roots = invoker.as_ref().map(|roots| client::borrowed(roots));
-            let tasks = crate::evals::list(&dirs, roots.as_deref().map_err(|fail| *fail));
+            // Without its git or the asking workspace, each task's rot is
+            // unknown, and says why.
+            let looked = client::looking_up(&dirs);
+            let located = looked
+                .as_ref()
+                .map(|(_, tools, invoker)| (&tools.git, client::borrowed(invoker)));
+            let tasks = crate::evals::list(
+                &dirs,
+                located
+                    .as_ref()
+                    .map(|(git, invoker)| (*git, invoker.as_slice()))
+                    .map_err(|fail| *fail),
+            );
             let words = person.then(|| endings::evals_listed(title, &tasks, &dirs.home));
             (
                 serde_json::json!({ "tasks": encode(serde_json::to_value(&tasks))? }),
@@ -785,6 +801,10 @@ fn install(
     )?;
     let rail_open = asked && close == questions::Close::InWords;
     let stopped = |fail: Fail| Stopped { fail, rail_open };
+    // The programs cahoots runs, pinned from the person's own PATH: decided
+    // here, on the terminal's side, beside the meter — and never by
+    // anything that rewrites the files alone.
+    let pins = crate::tools::choose_pins(&config, harness, &crate::tools::Terminal::here());
     let kinds = Registry::effective(&config).kinds;
     let files = crate::install::files::install(&dirs, &kinds, harness, dry_run).map_err(stopped)?;
     let mut config = config;
@@ -793,10 +813,14 @@ fn install(
         // What was found is cahoots' own record; a choice is the
         // person's, and goes where their other settings are.
         MeterFile::of(&found).save(&dirs).map_err(stopped)?;
-        let changes = decision.config_changes(meter_binary.is_some());
+        // One write for the meter and the pins; the pins say their own
+        // words (`endings::installed`), so only the meter's are said here.
+        let meter_changes = decision.config_changes(meter_binary.is_some());
+        let mut changes = meter_changes.clone();
+        changes.extend(pins.changes.iter().cloned());
         if !changes.is_empty() {
             config = crate::config::edit::apply(&dirs.config_file(), &changes).map_err(stopped)?;
-            saved = changes.iter().map(settings::said_change).collect();
+            saved = meter_changes.iter().map(settings::said_change).collect();
         }
     }
     let in_effect = decision.in_effect();
@@ -843,6 +867,7 @@ fn install(
         "files": files,
         "rules_to_add": rules_to_add,
         "meter": meter,
+        "pins": pins.to_json(),
     }));
     let words = (reader == Reader::Person).then(|| {
         endings::installed(endings::Installed {
@@ -852,6 +877,7 @@ fn install(
             meter: decision.sentence(),
             saved,
             still_to_do: still_to_do.as_deref(),
+            pins: &pins,
             rules: &rules,
             home: &dirs.home,
         })

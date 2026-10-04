@@ -141,22 +141,26 @@ fn doctor_names_a_git_below_the_floor_rather_than_a_missing_one() {
             ran.display()
         ),
     );
-    world.prefix_path(old.parent().unwrap());
+    world.pin_tool("git", Some(&old));
     let doctor = world.ask(&["doctor"]);
     assert_eq!(doctor.code, 34, "{}", doctor.json);
-    let fork = doctor.data()["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["check"] == "fork")
-        .unwrap()
-        .clone();
-    assert_eq!(fork["status"], "fail", "{fork}");
-    let detail = fork["detail"].as_str().unwrap();
+    let check = |name: &str| {
+        doctor.data()["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == name)
+            .unwrap()
+            .clone()
+    };
+    let git = check("tools: git");
+    assert_eq!(git["status"], "fail", "{git}");
+    let detail = git["detail"].as_str().unwrap();
     assert!(
-        detail.contains("found `git version 2.45.0`") && !detail.contains("no git on PATH"),
+        detail.contains("found `git version 2.45.0`") && detail.contains("tools.git.binary"),
         "{detail}"
     );
+    assert_eq!(check("fork")["status"], "fail");
     assert!(!ran.exists(), "the old git ran for more than its version");
 }
 
@@ -287,7 +291,7 @@ fn a_git_below_the_floor_is_never_run() {
             ran.display()
         ),
     );
-    world.prefix_path(old.parent().unwrap());
+    world.pin_tool("git", Some(&old));
     let answer = world.run("hello", &[]);
     assert_eq!(answer.code, 34, "{}", answer.json);
     assert!(
@@ -297,25 +301,17 @@ fn a_git_below_the_floor_is_never_run() {
         answer.json
     );
     assert!(!ran.exists(), "the old git ran for more than its version");
-}
-
-/// The `git` first on this test's own PATH, as found.
-fn installed_git() -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|dir| dir.join("git"))
-        .find(|candidate| candidate.is_file())
-        .expect("git on PATH")
+    assert!(!world.state.join("runs").exists(), "a run was created");
 }
 
 #[test]
-fn the_git_daft_finds_is_held_to_the_floor_too() {
+fn the_git_daft_starts_is_the_pinned_one_and_held_to_the_floor_too() {
     let world = World::new();
     let f1 = world.root.join("forks/f1");
     world.daft(json!({"print": f1}));
-    // An old git daft would find, and never cahoots: before it on PATH, a
-    // directory inside the workspace whose `git` links to the installed one.
-    // The policy judges that link by where it points, so cahoots takes it;
-    // daft's PATH drops workspace directories, so daft would not.
+    // daft finds its git on the PATH cahoots gives it, whose first
+    // directories are the pinned git's: an old git pinned is refused before
+    // daft starts, whatever else is on any PATH.
     let ran = world.root.join("old-git-ran");
     let old = world.root.join("old-git/git");
     world.script_at(
@@ -326,15 +322,7 @@ fn the_git_daft_finds_is_held_to_the_floor_too() {
             ran.display()
         ),
     );
-    world.prefix_path(old.parent().unwrap());
-    let tools = world.work.join("tools");
-    fs::create_dir_all(&tools).unwrap();
-    std::os::unix::fs::symlink(
-        fs::canonicalize(installed_git()).unwrap(),
-        tools.join("git"),
-    )
-    .unwrap();
-    world.prefix_path(&tools);
+    world.pin_tool("git", Some(&old));
     let answer = fork(&world, "FAKE: write=x.txt");
     assert_eq!(answer.code, 34, "{}", answer.json);
     assert!(
@@ -344,7 +332,7 @@ fn the_git_daft_finds_is_held_to_the_floor_too() {
     );
     assert!(!ran.exists(), "the old git ran for more than its version");
     assert!(world.daft_calls().is_empty(), "daft started");
-    assert!(world.record(&answer.run_id())["callee_pid"].is_null());
+    assert!(!world.state.join("runs").exists(), "a run was created");
     assert!(!f1.exists(), "a worktree was cut");
 }
 

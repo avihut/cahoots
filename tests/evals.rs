@@ -611,8 +611,16 @@ fn a_task_that_is_not_what_it_says_is_not_listed_and_remove_still_clears_it() {
 
 /// A `git` planted in the asking workspace, first on PATH: finding that
 /// workspace is refused.
+/// A `git` in the workspace that leaves a mark when it runs, first on the
+/// PATH this returns.
 fn planted_git_path(world: &World) -> String {
-    world.script_at(&world.work.join("planted/git"), "#!/bin/sh\nexit 0\n");
+    world.script_at(
+        &world.work.join("planted/git"),
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nexit 0\n",
+            world.root.join("planted-git.ran").display()
+        ),
+    );
     format!(
         "{}:{}",
         world.work.join("planted").display(),
@@ -629,7 +637,19 @@ fn a_planted_git_leaves_list_standing_and_remove_needs_no_git() {
     let path = planted_git_path(&world);
     let poisoned = |args: &[&str]| world.at_terminal_with(args, &[("PATH", &path)]).finish();
 
-    // The task is listed, its check unknown, with why; no git ran.
+    // First on PATH, it is never run: only the pinned git is.
+    let listed = poisoned(&["evals", "list"]);
+    assert_eq!(listed.code, 0, "{}", listed.json);
+    assert_eq!(
+        listed.json["data"]["tasks"][0]["rot"], "none",
+        "{}",
+        listed.json
+    );
+    assert!(!world.root.join("planted-git.ran").exists());
+
+    // Pinned there, it is refused, and still never run. The task is listed,
+    // its check unknown, with why.
+    world.pin_tool("git", Some(&world.work.join("planted/git")));
     let listed = poisoned(&["evals", "list"]);
     assert_eq!(listed.code, 0, "{}", listed.json);
     let task = &listed.json["data"]["tasks"][0];
@@ -648,6 +668,7 @@ fn a_planted_git_leaves_list_standing_and_remove_needs_no_git() {
     let removed = poisoned(&["evals", "remove", &id]);
     assert_eq!(removed.code, 0, "{}", removed.json);
     assert!(!task_dir(&world, &id).exists());
+    assert!(!world.root.join("planted-git.ran").exists());
 }
 
 /// Commits `files` (`path`, contents) in the world's repository.

@@ -55,7 +55,7 @@ pub fn probe(meter: MeterId, binary: &Path) -> Found {
         note: None,
         unusable: None,
     };
-    let exe = match Exe::pin(meter, binary) {
+    let exe = match Exe::pin(binary) {
         Ok(exe) => exe,
         Err(fail) => {
             found.unusable = Some(fail.message);

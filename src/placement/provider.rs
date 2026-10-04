@@ -29,6 +29,7 @@ use crate::harness::Version;
 use crate::patch::Commit;
 use crate::registry;
 use crate::spawn;
+use crate::tools::Tool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -180,13 +181,23 @@ pub fn command_line(provider: &dyn Provider, spec: &CutSpec) -> Res<Vec<OsString
 }
 
 /// The provider's binary, held to the binary policy and to its fingerprint.
-/// git is found on PATH; daft runs only from the path a person chose
-/// (`fork.daft.binary`), never from a PATH lookup. Missing, unfingerprinted
-/// or too old is the person's setup to fix (34); a binary the policy refuses
-/// is a refusal (33).
-pub fn locate(id: ProviderId, fork: &registry::Fork, roots: &[&Path]) -> Res<(PathBuf, Version)> {
+/// Each runs only from the path a person pinned, never from a PATH lookup:
+/// git is the located `tools.git`, daft is `fork.daft.binary`. Missing,
+/// unfingerprinted or too old is the person's setup to fix (34); a binary
+/// the policy refuses is a refusal (33).
+pub fn locate(
+    id: ProviderId,
+    fork: &registry::Fork,
+    git: &Tool,
+    roots: &[&Path],
+) -> Res<(PathBuf, Version)> {
     match id {
-        ProviderId::Git => fingerprinted(&Git, spawn::system_tool("git", roots)?, roots),
+        ProviderId::Git => {
+            let version = git
+                .version()
+                .ok_or_else(|| Fail::internal("the located git has no version"))?;
+            Ok((git.at(roots)?, version))
+        }
         ProviderId::Daft => {
             let pinned = fork.daft_binary.as_deref().ok_or_else(|| {
                 Fail::config(
@@ -195,36 +206,41 @@ pub fn locate(id: ProviderId, fork: &registry::Fork, roots: &[&Path]) -> Res<(Pa
                      settings`)",
                 )
             })?;
-            locate_pinned_daft(pinned, roots)
+            locate_pinned_daft(pinned, git, roots)
         }
     }
 }
 
 /// The daft at `path`, held to the binary policy and to its fingerprint: what
-/// a cut runs, and what a person is held to when they choose one.
-pub fn locate_pinned_daft(path: &Path, roots: &[&Path]) -> Res<(PathBuf, Version)> {
-    fingerprinted(
-        &Daft,
-        spawn::pinned_system_tool("daft", path, roots)?,
-        roots,
-    )
+/// a cut runs, and what a person is held to when they choose one. It is
+/// asked on the PATH a cut runs it with (`daft_path`).
+pub fn locate_pinned_daft(path: &Path, git: &Tool, roots: &[&Path]) -> Res<(PathBuf, Version)> {
+    let binary = spawn::pinned_system_tool("daft", path, roots)?;
+    fingerprinted(&Daft, binary, daft_path(path, git, roots)?)
 }
 
-/// Asks `binary` its version, from `/` and on a PATH without the workspace's
-/// directories, and holds it to the provider's fingerprint and tested floor.
+/// The PATH daft runs with: the pinned git's directories first, then
+/// daft's own, the system's, and the recorded PATH — refused (34) unless the
+/// `git` daft would find first on it is the located one
+/// (`spawn::git_users_path`).
+pub fn daft_path(daft: &Path, git: &Tool, roots: &[&Path]) -> Res<Option<OsString>> {
+    spawn::git_users_path(git, &[daft], git.recorded(), roots)
+}
+
+/// Asks `binary` its version, from `/` and on `path`, and holds it to the
+/// provider's fingerprint and tested floor.
 fn fingerprinted(
     provider: &dyn Provider,
     binary: PathBuf,
-    roots: &[&Path],
+    path: Option<OsString>,
 ) -> Res<(PathBuf, Version)> {
     let name = provider.binary_name();
-    let version = spawn::run_helper_with_env(
+    let version = spawn::run_helper_with_path(
         &binary,
         &["--version"],
         Some(Path::new("/")),
         Duration::from_secs(10),
-        spawn::helper_path(roots),
-        &[],
+        path,
     )
     .ok()
     .and_then(|output| provider.fingerprint(&output.stdout))
