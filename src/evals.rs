@@ -521,14 +521,29 @@ fn decoded(path: &str) -> Vec<u8> {
 
 /// Whether two names, one component of a path each, may be one file on a
 /// filesystem that does not tell case apart. ASCII names are compared
-/// exactly, without case. Where either is not ASCII, std alone cannot rule
+/// exactly, without case. Where both are not ASCII, std alone cannot rule
 /// it out — Unicode case folding (a Kelvin sign is a `k`), and composed or
 /// decomposed forms of one letter, which std cannot normalise — so they may.
+/// Against an ASCII name, a name that is not ASCII keeps its ASCII bytes, in
+/// order and but for case, through any folding or normalising; those can only
+/// add bytes between them. So the two may be one only where the ASCII bytes of
+/// the one that is not ASCII are found, in order, in the other.
 fn may_be_one(a: &[u8], b: &[u8]) -> bool {
-    if a.is_ascii() && b.is_ascii() {
-        return a.eq_ignore_ascii_case(b);
+    match (a.is_ascii(), b.is_ascii()) {
+        (true, true) => a.eq_ignore_ascii_case(b),
+        (false, true) => keeps_ascii_in_order(a, b),
+        (true, false) => keeps_ascii_in_order(b, a),
+        (false, false) => true,
     }
-    true
+}
+
+/// Whether the ASCII bytes of `name`, lowercased, are found in order (not
+/// necessarily together) in `ascii`, lowercased.
+fn keeps_ascii_in_order(name: &[u8], ascii: &[u8]) -> bool {
+    let mut rest = ascii.iter().map(u8::to_ascii_lowercase);
+    name.iter()
+        .filter(|byte| byte.is_ascii())
+        .all(|byte| rest.any(|other| other == byte.to_ascii_lowercase()))
 }
 
 /// A hidden test and a file of the rest that collide: one under the other (a
@@ -539,8 +554,9 @@ fn may_be_one(a: &[u8], b: &[u8]) -> bool {
 /// a run makes no task. A change like that wholly on one side applies, in
 /// git's order, within its one diff. Paths are compared as the bytes they
 /// name, component by component (`may_be_one`): where a name is not ASCII,
-/// a collision that cannot be ruled out counts as one, and the run is
-/// refused rather than kept as a task that might not apply.
+/// a collision that cannot be ruled out counts as one (`may_be_one` says when
+/// it can be), and the run is refused rather than kept as a task that might
+/// not apply.
 fn straddling<'a>(sections: &'a [patch::Section<'_>]) -> Option<(&'a str, &'a str)> {
     struct Named<'a> {
         path: &'a str,
@@ -818,6 +834,45 @@ mod tests {
         );
         assert_eq!(collision(&["tests/a.rs", r#""src/\303\244.rs""#]), None);
         assert_eq!(collision(&[r#""\303\204/x_test.go""#, "b/x.go"]), None);
+    }
+
+    #[test]
+    fn a_name_that_is_not_ascii_is_told_apart_from_an_ascii_one_that_cannot_be_it() {
+        let pair = |test: &str, other: &str| Some((test.to_string(), other.to_string()));
+        let cafe = r#""caf\303\251.md""#;
+        // café.md cannot be tests/, either way round.
+        assert_eq!(collision(&["tests/a.rs", cafe]), None);
+        assert_eq!(collision(&[cafe, "tests/a.rs"]), None);
+        assert_eq!(collision(&["foo_test.go", cafe]), None);
+        // But it may be cafe.md: a test and a file of the rest, one name.
+        let test = r#""caf\303\251Test.java""#;
+        assert_eq!(
+            collision(&[test, "cafetest.java"]),
+            pair(test, "cafetest.java")
+        );
+        assert_eq!(collision(&["cafeTest.java", cafe]), None);
+        // A Kelvin sign directory is a k, under which a test is.
+        let kelvin = r#""\342\204\252/tests/a.rs""#;
+        assert_eq!(collision(&[kelvin, "k"]), pair(kelvin, "k"));
+        // Two names that are not ASCII still may be one.
+        assert_eq!(
+            collision(&[test, r#""CAF\303\211test.java""#]),
+            pair(test, r#""CAF\303\211test.java""#)
+        );
+    }
+
+    #[test]
+    fn may_be_one_keeps_the_ascii_of_a_name_in_order() {
+        let cafe = "café.md".as_bytes();
+        assert!(!may_be_one(cafe, b"tests"));
+        assert!(!may_be_one(b"tests", cafe));
+        assert!(!may_be_one(cafe, b"fac.md"));
+        assert!(may_be_one(cafe, b"cafe.md"));
+        assert!(may_be_one(b"CAFE.MD", cafe));
+        assert!(may_be_one("é".as_bytes(), b"anything"));
+        assert!(may_be_one(cafe, "CAFÉ.md".as_bytes()));
+        assert!(may_be_one(b"A.rs", b"a.RS"));
+        assert!(!may_be_one(b"a.rs", b"b.rs"));
     }
 
     #[test]
