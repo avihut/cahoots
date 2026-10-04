@@ -77,8 +77,9 @@ title is held to the commit grammar by the `pr-title` check.
   `release-pr` branch. No admin bypass.
 
 `mise run release-rulesets-audit`, with the maintainer's credentials, checks
-that the two release rulesets are live and that only the app bypasses them;
-the release workflow can check only their coverage.
+that the three release rulesets are live, that only the app bypasses the two
+that reserve a ref for it, and that nobody bypasses `release tags are
+immutable`; the release workflow can check only their coverage.
 
 The **`release` environment** deploys from `main` only and holds the app's
 key, `WHEATLEY_BOT_APP_ID` and `WHEATLEY_BOT_PRIVATE_KEY`. Only

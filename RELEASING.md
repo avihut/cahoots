@@ -87,9 +87,11 @@ and again right before every merge of a release PR:
 mise run release-rulesets-audit
 ```
 
-It fails unless both rulesets are active, cover their refs (inclusions minus
-exclusions) with the rules their records name, and let exactly the Wheatley
-app (integration 2607344) bypass them.
+It fails unless the three release rulesets are active, cover their refs
+(inclusions minus exclusions) with the rules their records name, and let
+exactly the Wheatley app (integration 2607344) bypass the two that reserve a
+ref for it. `release tags are immutable` must have no bypass at all: a bypass
+covers every rule of its ruleset, so the app there could move or delete a tag.
 
 Before clicking, check the Homebrew formula dist would publish:
 
@@ -195,7 +197,9 @@ red runs, and no harm.
    `WHEATLEY_BOT_APP_ID` and `WHEATLEY_BOT_PRIVATE_KEY` are **environment
    secrets** of `release`, never repository secrets — otherwise any workflow
    on any pushed branch could mint the token and create tags.
-3. **The two rulesets** that reserve the release refs for the app:
+3. **The rulesets** that reserve the release refs for the app (and the one
+   that keeps a pushed tag where it is, `release-tags.json`, which has no
+   bypass and is applied the same way):
 
    ```sh
    gh api -X POST repos/avihut/cahoots/rulesets --input .github/rulesets/release-tags-by-workflow.json
@@ -203,7 +207,7 @@ red runs, and no harm.
    ```
 
    Confirm that 2607344 is the Wheatley app's id first, then run
-   `mise run release-rulesets-audit`: both must hold.
+   `mise run release-rulesets-audit`: all three must hold.
 4. **Keep Actions' default workflow permissions `read`.** With `write`, any
    branch's workflow could push a `v*` tag before the rulesets existed.
 - **`HOMEBREW_TAP_TOKEN`** — a repository secret on `avihut/cahoots`: a

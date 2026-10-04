@@ -533,7 +533,7 @@ merge.
 | a push to `release-pr` by anyone else | the `release-pr is the release workflow's` ruleset, whose only bypass is the app. The maintain job refuses to push unless an active ruleset covers `release-pr`; its token can't see bypass lists, so that the app alone bypasses it is the driver's audit (`release-rulesets-audit`), run with the maintainer's credentials when the rulesets are applied and before every release merge. |
 | a `v*` tag created by anyone else, an agent using the maintainer's credentials included | the `release tags are made by the release workflow` ruleset, whose only bypass is the app; the tag job refuses to tag unless an active ruleset covers every `v*` tag (coverage only, as above; the driver's audit checks the bypass list); `release-check` (pre-push) says so first. |
 | the tag job on a commit that isn't the release commit | `release.sh tag` checks the subject, the version there and before, ancestry, the merged PR's head ref, repository, author and number, an existing tag, and the CHANGELOG section — and refuses on the first that fails. |
-| a moved or re-made tag | `release tags are immutable`: no bypass, the app included. |
+| a moved or re-made tag | `release tags are immutable`: no bypass, the app included. Its token can't see bypass lists, so that the list stays empty is the driver's audit (`release-rulesets-audit`, mode `sealed`), run with the maintainer's credentials. |
 | a fork PR | no secrets, and never a release PR: that is this repository's `release-pr` by definition. |
 | an unpinned action | `guard` rule 7. |
 | a version smuggled into an ordinary PR | `pr-title` (an ordinary PR may not move the version), `commit-msg` and `release-check`. |

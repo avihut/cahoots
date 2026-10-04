@@ -42,8 +42,9 @@ gh api -X POST repos/{owner}/{repo}/rulesets --input .github/rulesets/main-integ
   unless an active ruleset covers `release-pr` with these rules.
 
 The app's token can't see bypass lists, so the jobs check coverage only. That
-these two rulesets let the app and nobody else bypass them is the driver's
-audit with the maintainer's credentials, `mise run release-rulesets-audit`
+the two rulesets above let the app and nobody else bypass them, and that
+`release tags are immutable` lets nobody, is the driver's audit with the
+maintainer's credentials, `mise run release-rulesets-audit`
 (`scripts/release-rulesets-audit.sh`), run when they are applied and before
 every merge of a release PR.
 

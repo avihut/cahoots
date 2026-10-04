@@ -878,6 +878,7 @@ git checkout -q main
 audit="$scripts/release-rulesets-audit.sh"
 tags_record="$root/.github/rulesets/release-tags-by-workflow.json"
 pr_record="$root/.github/rulesets/release-pr-by-workflow.json"
+imm_record="$root/.github/rulesets/release-tags.json"
 variant() { # <record> <jq filter> → a changed copy, its path on stdout
     local file
     file="$tmp/ruleset-$checks-$RANDOM.json"
@@ -889,10 +890,15 @@ passes "$audit" coverage tag "$tags_record"
 passes "$audit" exclusive tag "$tags_record"
 passes "$audit" coverage release-pr "$pr_record"
 passes "$audit" exclusive release-pr "$pr_record"
+# pass:immutable-record — `release tags are immutable` covers every v* tag
+# with its three rules and nobody bypasses it.
+passes "$audit" coverage tag-immutable "$imm_record"
+passes "$audit" sealed tag-immutable "$imm_record"
 # refuse:usage
 exits 2 "$audit" coverage tag
 exits 2 "$audit" covers tag "$tags_record"
 exits 2 "$audit" coverage main "$tags_record"
+exits 2 "$audit" sealed tag-immutable
 # refuse:exclusion-cancels — whole, in part, or by ~ALL; one elsewhere is fine.
 fails "$audit" coverage tag "$(variant "$tags_record" '.conditions.ref_name.exclude = ["refs/tags/v*"]')"
 said 'its exclusions cancel part of refs/tags/v'
@@ -927,6 +933,26 @@ fails "$audit" exclusive release-pr "$(variant "$pr_record" "$admin")"
 fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].actor_id = 1')"
 fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors[0].bypass_mode = "pull_request"')"
 fails "$audit" exclusive tag "$(variant "$tags_record" '.bypass_actors = []')"
+# refuse:immutable-bypassed — the app beside nobody is the risk: a bypass
+# covers every rule of its ruleset, so the app could move or delete a tag.
+# Coverage can't see it; sealing fails on any actor, the app first.
+app='.bypass_actors = [{"actor_id": 2607344, "actor_type": "Integration", "bypass_mode": "always"}]'
+passes "$audit" coverage tag-immutable "$(variant "$imm_record" "$app")"
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" "$app")"
+said 'its bypass list is not empty (Integration 2607344 always)'
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" "$admin")"
+said 'its bypass list is not empty'
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" 'del(.bypass_actors)')"
+said 'its bypass list is not visible to these credentials'
+# refuse:immutable-coverage — the sealed check is coverage first.
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" '.rules |= map(select(.type != "update"))')"
+said 'it lacks the rules update'
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" '.conditions.ref_name.exclude = ["refs/tags/v*"]')"
+said 'its exclusions cancel part of refs/tags/v'
+fails "$audit" sealed tag-immutable "$(variant "$imm_record" '.enforcement = "evaluate"')"
+said 'it is not active'
+fails "$audit" sealed tag-immutable "$tags_record"
+said 'it lacks the rules deletion'
 # refuse:bypass-list-unseen — what a token without ruleset write access gets:
 # coverage holds, exclusivity is unknown, so it fails.
 passes "$audit" coverage tag "$(variant "$tags_record" 'del(.bypass_actors)')"
@@ -941,20 +967,21 @@ printf ' \n\t\n' >"$tmp/blank.json"
 printf '[]\n' >"$tmp/array.json"
 printf 'not json\n' >"$tmp/not-json.json"
 cat "$tags_record" "$tags_record" >"$tmp/two.json"
-for mode in coverage exclusive; do
-    for kind in tag release-pr; do
+for mode in coverage exclusive sealed; do
+    for kind in tag release-pr tag-immutable; do
         fails "$audit" "$mode" "$kind" "$tmp/empty.json"
         said 'not exactly one ruleset object (0 JSON values)'
         fails "$audit" "$mode" "$kind" "$tmp/blank.json"
         said 'not exactly one ruleset object (0 JSON values)'
     done
     fails "$audit" "$mode" tag "$tmp/array.json"
+    fails "$audit" "$mode" tag-immutable "$tmp/two.json"
     fails "$audit" "$mode" tag "$tmp/two.json"
     fails "$audit" "$mode" tag "$tmp/not-json.json"
 done
 
 # The complete audit, with gh replaced by canned responses: the list names
-# both rulesets, and each detail response is a file in $FAKE_GH.
+# the three rulesets, and each detail response is a file in $FAKE_GH.
 mkdir -p "$tmp/fake-gh-bin" "$tmp/fake-gh"
 cat >"$tmp/fake-gh-bin/gh" <<'GH'
 #!/bin/sh
@@ -966,14 +993,15 @@ repos/avihut/cahoots/rulesets/*) cat "$FAKE_GH/${2##*/}.json" ;;
 esac
 GH
 chmod +x "$tmp/fake-gh-bin/gh"
-jq -n --slurpfile t "$tags_record" --slurpfile p "$pr_record" \
-    '[{id: 11, name: $t[0].name}, {id: 12, name: $p[0].name}, {id: 13, name: "main: integrity"}]' >"$tmp/fake-gh/list.json"
+jq -n --slurpfile t "$tags_record" --slurpfile p "$pr_record" --slurpfile i "$imm_record" \
+    '[{id: 11, name: $t[0].name}, {id: 12, name: $p[0].name}, {id: 13, name: $i[0].name}, {id: 14, name: "main: integrity"}]' >"$tmp/fake-gh/list.json"
 live_audit() { env PATH="$tmp/fake-gh-bin:$PATH" FAKE_GH="$tmp/fake-gh" "$audit"; }
 # pass:audit-live — the records as GitHub would return them.
 cp "$tags_record" "$tmp/fake-gh/11.json"
 cp "$pr_record" "$tmp/fake-gh/12.json"
+cp "$imm_record" "$tmp/fake-gh/13.json"
 passes live_audit
-said 'both release rulesets hold'
+said 'all three release rulesets hold'
 # refuse:audit-empty-details, refuse:audit-blank-details
 : >"$tmp/fake-gh/11.json"
 : >"$tmp/fake-gh/12.json"
@@ -983,6 +1011,14 @@ printf '\n  \n' >"$tmp/fake-gh/11.json"
 cp "$pr_record" "$tmp/fake-gh/12.json"
 fails live_audit
 said 'not exactly one ruleset object'
+# refuse:audit-immutable-bypassed — the app on `release tags are immutable`.
+jq "$app" "$imm_record" >"$tmp/fake-gh/13.json"
+fails live_audit
+said 'its bypass list is not empty (Integration 2607344 always)'
+jq 'del(.bypass_actors)' "$imm_record" >"$tmp/fake-gh/13.json"
+fails live_audit
+said 'not visible to these credentials'
+cp "$imm_record" "$tmp/fake-gh/13.json"
 # refuse:audit-extra-actor, refuse:audit-unseen-bypass, refuse:audit-missing
 cp "$tags_record" "$tmp/fake-gh/11.json"
 jq "$admin" "$pr_record" >"$tmp/fake-gh/12.json"
@@ -997,6 +1033,10 @@ jq 'map(select(.id != 12))' "$tmp/fake-gh/list.json" >"$tmp/fake-gh/short.json"
 mv "$tmp/fake-gh/short.json" "$tmp/fake-gh/list.json"
 fails live_audit
 said "has no single ruleset named"
+jq -n --slurpfile t "$tags_record" --slurpfile p "$pr_record" \
+    '[{id: 11, name: $t[0].name}, {id: 12, name: $p[0].name}]' >"$tmp/fake-gh/list.json"
+fails live_audit
+said "has no single ruleset named 'release tags are immutable'"
 : >"$tmp/fake-gh/list.json"
 fails live_audit
 
