@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -861,6 +862,8 @@ pub enum Stdout {
 /// where its cursor is (`ESC [ 6 n`): at its far corner, which is its size.
 pub struct AtTerminal {
     child: std::process::Child,
+    /// Leads the command's process group; see `GroupAnchor`.
+    anchor: GroupAnchor,
     stdout: Stdout,
     master: Arc<OwnedFd>,
     /// Kept open, to read the terminal's mode once the command is gone.
@@ -932,11 +935,24 @@ impl AtTerminal {
 
     /// `start`, with stdin on the terminal or on nothing at all.
     pub fn start_with(
-        mut command: StdCommand,
+        command: StdCommand,
         delay: Duration,
         stdin: Stdin,
         stdout: Stdout,
     ) -> AtTerminal {
+        AtTerminal::start_in(GroupAnchor::spawn(), command, delay, stdin, stdout)
+            .expect("cahoots starts")
+    }
+
+    /// `start_with`, in the process group `anchor` leads. The anchor is owned
+    /// from the start: when this fails, or unwinds, its group is ended.
+    pub fn start_in(
+        anchor: GroupAnchor,
+        mut command: StdCommand,
+        delay: Duration,
+        stdin: Stdin,
+        stdout: Stdout,
+    ) -> std::io::Result<AtTerminal> {
         let size = Winsize {
             ws_row: 24,
             ws_col: 100,
@@ -954,7 +970,10 @@ impl AtTerminal {
                 Stdout::Piped => Stdio::piped(),
                 Stdout::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
             });
-        let child = command.spawn().expect("cahoots starts");
+        // A group of its own, so that ending the session can end everything
+        // the command started, not only the command.
+        command.process_group(anchor.id());
+        let child = command.spawn()?;
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
         let size = Arc::new(Mutex::new((size.ws_row, size.ws_col)));
@@ -982,8 +1001,9 @@ impl AtTerminal {
                 }
             })
         };
-        AtTerminal {
+        Ok(AtTerminal {
             child,
+            anchor,
             stdout,
             master,
             slave: pty.slave,
@@ -991,7 +1011,12 @@ impl AtTerminal {
             size,
             done,
             reader: Some(reader),
-        }
+        })
+    }
+
+    /// Ends the command's group and everything in it, once.
+    fn end_group(&mut self) {
+        self.anchor.end();
     }
 
     /// The terminal is `rows` by `cols` now: it says so the way a terminal
@@ -1024,6 +1049,8 @@ impl AtTerminal {
             self.child.try_wait().unwrap().is_some()
         });
         let code = self.child.wait().unwrap().code().expect("an exit code");
+        // What it started may hold its output open: end it before reading.
+        self.end_group();
         let mut stdout = String::new();
         if let Some(mut piped) = self.child.stdout.take() {
             piped.read_to_string(&mut stdout).unwrap();
@@ -1044,6 +1071,72 @@ impl AtTerminal {
             json,
             screen,
             mode: tcgetattr(self.slave.as_fd()).expect("the terminal's mode"),
+        }
+    }
+}
+
+/// A process that leads a process group and is not reaped until the group is
+/// ended, so the group's id stays its pid, and ours: signalling it cannot
+/// reach anyone else's, whenever the group's members are reaped. It gives up
+/// by itself when the test process is gone. Dropping it ends the group.
+pub struct GroupAnchor {
+    leader: std::process::Child,
+    ended: bool,
+}
+
+impl GroupAnchor {
+    pub fn spawn() -> GroupAnchor {
+        let leader = StdCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "while kill -0 \"$PPID\" 2>/dev/null; do sleep 1; done",
+            ])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a process group");
+        GroupAnchor {
+            leader,
+            ended: false,
+        }
+    }
+
+    /// The group's id.
+    pub fn id(&self) -> i32 {
+        self.leader.id() as i32
+    }
+
+    /// Kills the group and reaps its leader, once; the id is never signalled
+    /// again.
+    pub fn end(&mut self) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let group = nix::unistd::Pid::from_raw(self.id());
+        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        let _ = self.leader.wait();
+    }
+}
+
+impl Drop for GroupAnchor {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// However the session ends (`finish`, a failed assertion, a panic in
+/// `wait_for`, or no `finish` at all), the command and its group are gone with
+/// it: a `Child` that is dropped is left running (#85).
+impl Drop for AtTerminal {
+    fn drop(&mut self) {
+        self.end_group();
+        // Everything in the group is gone; this only reaps the command.
+        let _ = self.child.wait();
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
         }
     }
 }
