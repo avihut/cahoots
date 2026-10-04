@@ -13,6 +13,8 @@
 //! FAKE: sleep=<secs>   think for a while first
 //! FAKE: fail           report a failed run and exit 1
 //! FAKE: fail=<text>    the same, with <text> as the stream's reason
+//! FAKE: hold=<path>   wait until <path> exists before `said`, `step`
+//!                      and `warn` (so a test, not the clock, says when)
 //! FAKE: said=<text>    say <text> along the way, as a progress line
 //! FAKE: step=<text>    call a tool on <text>: Claude reads it, Codex
 //!                      starts it as a command (its output says otherwise)
@@ -41,7 +43,7 @@
 //!
 //! In this order: `child`, `leak`, `remove`, `rmdir`, `mkdir`, `rename`,
 //! `write`, every `append`, then `commit`, `bytes`, `link`, `hardlink`,
-//! `said`, `step`, `warn`, and last `sleep`.
+//! `hold`, `said`, `step`, `warn`, and last `sleep`.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -549,6 +551,12 @@ fn main() {
     if let Some(spec) = directive("hardlink") {
         let (name, target) = spec.split_once('=').expect("hardlink=<name>=<target>");
         std::fs::hard_link(target, name).expect("a hard link in cwd");
+    }
+    if let Some(path) = directive("hold") {
+        let started = std::time::Instant::now();
+        while !Path::new(&path).exists() && started.elapsed() < Duration::from_secs(300) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     let unescape = |text: String| text.replace("\\n", "\n").replace("\\e", "\u{1b}");
     if let Some(text) = directive("said").map(unescape) {

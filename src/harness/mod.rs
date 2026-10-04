@@ -66,8 +66,9 @@ pub struct Progress {
     /// read-only fence was leaned on.
     pub permission_denials: u32,
     /// Warnings worth keeping, never failures: the callee's words, bounded,
-    /// at most [`MAX_NOTES`] of them.
-    pub notes: Vec<CalleeText>,
+    /// at most [`MAX_NOTES`] of them. Strings, as older cahoots wrote them
+    /// and still reads them; an envelope builds the marked objects.
+    pub notes: Vec<String>,
     /// What the run did last: the callee's own text or its own tool call,
     /// never a tool's result. Presentation only — nothing decides on it.
     #[serde(default)]
@@ -75,12 +76,14 @@ pub struct Progress {
 }
 
 impl Progress {
-    /// Keeps a warning the stream printed, bounded, while there is room.
+    /// Keeps a warning the stream printed, bounded, while there is room. It
+    /// is kept one character past the bound, so that when it is shown,
+    /// bounded again, it still says it was cut.
     pub fn note(&mut self, text: &str) {
         if self.notes.len() < MAX_NOTES
-            && let Some(note) = CalleeText::bound(text, NOTE_CHARS, Keep::Start)
+            && let Some(note) = CalleeText::bound(text, NOTE_CHARS + 1, Keep::Start)
         {
-            self.notes.push(note);
+            self.notes.push(note.text().to_string());
         }
     }
 }

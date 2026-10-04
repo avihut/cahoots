@@ -34,31 +34,9 @@ pub enum Keep {
 /// bounded again whenever it is shown, so a record edited on disk is held to
 /// the same bound as one the supervisor wrote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "OnDisk")]
 pub struct CalleeText {
     text: String,
     truncated: bool,
-}
-
-/// What a record may hold: bounded text, or a plain string from a record
-/// written before notes were bounded. Either is bounded again when shown.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum OnDisk {
-    Bounded { text: String, truncated: bool },
-    Plain(String),
-}
-
-impl From<OnDisk> for CalleeText {
-    fn from(on_disk: OnDisk) -> CalleeText {
-        match on_disk {
-            OnDisk::Bounded { text, truncated } => CalleeText { text, truncated },
-            OnDisk::Plain(text) => CalleeText {
-                text,
-                truncated: false,
-            },
-        }
-    }
 }
 
 impl CalleeText {
@@ -330,13 +308,6 @@ mod tests {
         assert!(!text.contains('\u{1b}') && !text.contains('\n'));
         assert_eq!(shown["truncated"], true);
         assert_eq!(shown["untrusted"], true);
-
-        // A note from before notes were bounded was a plain string.
-        let old: CalleeText = serde_json::from_value(json!("an old note\u{1b}[2J")).unwrap();
-        assert_eq!(
-            old.shown(NOTE_CHARS),
-            json!({"untrusted": true, "text": "an old note [2J", "truncated": false})
-        );
 
         let fine = first_line("fine").unwrap().shown(ACTIVITY_CHARS);
         assert_eq!(

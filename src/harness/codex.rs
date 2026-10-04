@@ -304,12 +304,21 @@ mod tests {
             );
         }
         assert_eq!(progress.notes.len(), crate::harness::MAX_NOTES);
-        assert!(progress.notes[0].text().starts_with("retry 0 "));
+        assert!(progress.notes[0].starts_with("retry 0 "));
         for note in &progress.notes {
-            assert!(note.text().chars().count() <= crate::harness::NOTE_CHARS);
-            assert!(!note.text().contains('\u{1b}'));
-            assert!(note.truncated());
+            // A string on disk, one past the bound, so it shows as cut.
+            assert_eq!(note.chars().count(), crate::harness::NOTE_CHARS + 1);
+            assert!(!note.contains('\u{1b}'));
+            let shown = crate::harness::CalleeText::bound(
+                note,
+                crate::harness::NOTE_CHARS,
+                crate::harness::Keep::Start,
+            )
+            .unwrap();
+            assert!(shown.truncated());
         }
+        let on_disk = serde_json::to_value(&progress).unwrap();
+        assert!(on_disk["notes"][0].is_string(), "{on_disk}");
     }
 
     #[test]

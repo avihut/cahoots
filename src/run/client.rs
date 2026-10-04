@@ -15,7 +15,7 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
 use crate::explore;
-use crate::harness::{FAILURE_CHARS, MAX_NOTES, NOTE_CHARS, Progress};
+use crate::harness::{CalleeText, FAILURE_CHARS, Keep, MAX_NOTES, NOTE_CHARS, Progress};
 use crate::model::{HarnessId, Role, TaskKindName};
 use crate::patch::{self, Commit};
 use crate::paths::{self, Workspace};
@@ -293,6 +293,7 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         progress,
         activity_at: None,
         callee_failure: None,
+        words_apart: true,
     };
     let dir = RunDir::create(dirs, &record, &launch.brief)?;
     spawn::spawn_supervisor(&record.id, &dir.log_path())?;
@@ -632,9 +633,10 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
             .notes
             .iter()
             .take(MAX_NOTES)
+            .filter_map(|note| CalleeText::bound(note, NOTE_CHARS, Keep::Start))
             .map(|note| note.shown(NOTE_CHARS))
             .collect::<Vec<_>>(),
-        "failure": record.callee_failure.as_ref().map(|said| said.shown(FAILURE_CHARS)),
+        "failure": record.account().1.map(|said| said.shown(FAILURE_CHARS)),
         "gate_notes": record.admission.notes,
     });
     if !identity.blind {
@@ -736,7 +738,8 @@ fn report(
         .find(|exit| exit.code() == record.exit())
         .unwrap_or(Exit::Internal);
     let message = match record.state.is_terminal() {
-        true => record.message.clone(),
+        // cahoots' own words: an older record's callee words are read apart.
+        true => record.account().0,
         false => Some(format!(
             "not finished yet — ask again with `cahoots wait {}`",
             record.id

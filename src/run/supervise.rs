@@ -22,7 +22,8 @@ use crate::patch;
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
 use crate::run::record::{
-    RunDir, RunRecord, State, now, try_lock_file, write_private, write_private_atomic,
+    FAILED_BY_ITSELF, RunDir, RunRecord, STOPPED_BY_ITS_BUDGET, STOPPED_BY_ITS_BUDGET_SAID, State,
+    now, try_lock_file, write_private, write_private_atomic,
 };
 use crate::spawn::{self, Callee};
 
@@ -255,9 +256,6 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         Some(said) => CalleeText::bound(said, FAILURE_CHARS, Keep::Start),
         None => CalleeText::bound(&stderr_tail, FAILURE_CHARS, Keep::End),
     };
-    let failure = account
-        .as_ref()
-        .map(|_| "the callee's own account is in data.failure".to_string());
     let stopped = stop.is_some();
     let (state, exit, message) = match stop {
         Some(Stop::Cancelled) => (State::Cancelled, Exit::Cancelled, None),
@@ -280,9 +278,9 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         None if record.progress.budget_stop => (
             State::Budget,
             Exit::Budget,
-            Some(match failure {
-                Some(failure) => format!("stopped by the callee's own budget limit — {failure}"),
-                None => "stopped by the callee's own budget limit".to_string(),
+            Some(match account {
+                Some(_) => STOPPED_BY_ITS_BUDGET_SAID.to_string(),
+                None => STOPPED_BY_ITS_BUDGET.to_string(),
             }),
         ),
         None if record.callee_exit == Some(0) && record.progress.failure.is_none() => {
@@ -291,7 +289,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         None => (
             State::Failed,
             Exit::RunFailed,
-            failure.map(|failure| format!("the run failed — {failure}")),
+            account.as_ref().map(|_| FAILED_BY_ITSELF.to_string()),
         ),
     };
     if !stopped && state != State::Done {
@@ -471,11 +469,20 @@ fn attend(
                 }
             }
         }
+        // A save that fails keeps the update pending: it is tried again a
+        // second later, and every second after, until one lands.
         if activity_unsaved && saved_at.elapsed() >= ACTIVITY_SAVE_EVERY {
-            if let Err(fail) = dir.save(record) {
-                let _ = writeln!(log, "[supervisor] activity not saved: {}", fail.message);
+            saved_at = Instant::now();
+            match dir.save(record) {
+                Ok(()) => activity_unsaved = false,
+                Err(fail) => {
+                    let _ = writeln!(
+                        log,
+                        "[supervisor] activity not saved, trying again: {}",
+                        fail.message
+                    );
+                }
             }
-            (activity_unsaved, saved_at) = (false, Instant::now());
         }
 
         if !exited {

@@ -91,7 +91,10 @@ supervisor, and there is no second, foreground path to keep honest.
   callee's last text, or the last tool it called and on what. It never comes
   from a tool's result. The supervisor saves `run.json` when the activity
   changes, at most once a second, also while the callee is silent. A save
-  that fails is logged, and the run goes on. Only `status` shows it, as
+  that fails is logged and tried again a second later, until one lands, and
+  the run goes on. Notes stay strings in `run.json`, so an older cahoots
+  still reads a newer record. The marked objects are built only in the
+  envelope. Only `status` shows it, as
   `activity`. It, the notes, and the callee's own account of a failure
   (`failure`, which `message` points at) are the callee's words: bounded
   (`src/harness/words.rs`) and marked `untrusted` (THREAT-MODEL, "A run's
