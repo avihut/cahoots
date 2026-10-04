@@ -12,6 +12,12 @@
 //! FAKE: say=<text>     the answer (default: pong)
 //! FAKE: sleep=<secs>   think for a while first
 //! FAKE: fail           report a failed run and exit 1
+//! FAKE: fail=<text>    the same, with <text> as the stream's reason
+//! FAKE: said=<text>    say <text> along the way, as a progress line
+//! FAKE: step=<text>    call a tool on <text>: Claude reads it, Codex
+//!                      starts it as a command (its output says otherwise)
+//! FAKE: warn=<text>    print <text> as a warning (Codex's `error` event)
+//!                      — in all three, `\n` is a newline and `\e` an ESC
 //! FAKE: dump           answer with this process's argv, cwd and environment
 //! FAKE: child          leave a long-lived child in its own process group
 //! FAKE: write=<name>   "edit": create <name> in the working directory
@@ -34,8 +40,8 @@
 //! ```
 //!
 //! In this order: `child`, `leak`, `remove`, `rmdir`, `mkdir`, `rename`,
-//! `write`, every `append`, then `commit`, `bytes`, `link`, `hardlink`, and
-//! last `sleep`.
+//! `write`, every `append`, then `commit`, `bytes`, `link`, `hardlink`,
+//! `said`, `step`, `warn`, and last `sleep`.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -544,6 +550,35 @@ fn main() {
         let (name, target) = spec.split_once('=').expect("hardlink=<name>=<target>");
         std::fs::hard_link(target, name).expect("a hard link in cwd");
     }
+    let unescape = |text: String| text.replace("\\n", "\n").replace("\\e", "\u{1b}");
+    if let Some(text) = directive("said").map(unescape) {
+        if flavor == "claude" {
+            emit(json!({"type": "assistant", "session_id": session,
+                "message": {"model": "claude-fake", "content": [{"type": "text", "text": text}]}}));
+        } else {
+            emit(json!({"type": "item.completed",
+                "item": {"id": "item_s", "type": "agent_message", "text": text}}));
+        }
+    }
+    if let Some(text) = directive("step").map(unescape) {
+        if flavor == "claude" {
+            emit(json!({"type": "assistant", "session_id": session,
+                "message": {"model": "claude-fake", "content": [{"type": "tool_use",
+                    "id": "toolu_fake", "name": "Read", "input": {"file_path": text}}]}}));
+            emit(json!({"type": "user", "session_id": session,
+                "message": {"role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "toolu_fake", "content": "the tool's output, not the fake's"}]}}));
+        } else {
+            emit(json!({"type": "item.started", "item": {"id": "item_t",
+                "type": "command_execution", "command": text,
+                "aggregated_output": "the tool's output, not the fake's", "status": "in_progress"}}));
+        }
+    }
+    if let Some(text) = directive("warn").map(unescape)
+        && flavor != "claude"
+    {
+        emit(json!({"type": "error", "message": text}));
+    }
     if let Some(secs) = directive("sleep").and_then(|s| s.parse::<u64>().ok()) {
         std::thread::sleep(Duration::from_secs(secs));
     }
@@ -559,18 +594,22 @@ fn main() {
         directive("say").unwrap_or_else(|| "pong".to_string())
     };
     let failed = directive("fail").is_some();
+    let reason = directive("fail")
+        .filter(|text| !text.is_empty())
+        .map(unescape)
+        .unwrap_or_else(|| "the fake was told to fail".to_string());
 
     if flavor == "claude" {
         emit(json!({"type": "assistant", "session_id": session,
             "message": {"model": "claude-fake", "content": [{"type": "text", "text": answer}]}}));
         emit(
             json!({"type": "result", "subtype": if failed { "error_during_execution" } else { "success" },
-            "is_error": failed, "result": if failed { "the fake was told to fail".to_string() } else { answer },
+            "is_error": failed, "result": if failed { reason } else { answer },
             "session_id": session, "total_cost_usd": 0.01,
             "usage": {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 7}}),
         );
     } else if failed {
-        emit(json!({"type": "turn.failed", "error": {"message": "the fake was told to fail"}}));
+        emit(json!({"type": "turn.failed", "error": {"message": reason}}));
     } else {
         emit(
             json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": answer}}),

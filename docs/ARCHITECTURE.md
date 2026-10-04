@@ -86,6 +86,16 @@ supervisor, and there is no second, foreground path to keep honest.
   process's start time and command still match.
 - Synchronous: `std::process`, reader threads feeding one `mpsc` channel
   (`recv_timeout` + `try_wait`, never an undeadlined `join`).
+- **What a run is doing now.** The harness's parser folds each stdout line
+  into the run's progress, and that includes its latest activity: the
+  callee's last text, or the last tool it called and on what. It never comes
+  from a tool's result. The supervisor saves `run.json` when the activity
+  changes, at most once a second, also while the callee is silent. A save
+  that fails is logged, and the run goes on. Only `status` shows it, as
+  `activity`. It, the notes, and the callee's own account of a failure
+  (`failure`, which `message` points at) are the callee's words: bounded
+  (`src/harness/words.rs`) and marked `untrusted` (THREAT-MODEL, "A run's
+  words are the callee's").
 - **Resume** (M4): `cahoots resume <run> --brief <file>` is a new, gated run
   on the same harness, model, role and place, with the harness's own session
   picked up (`claude --resume <id>`; `codex exec resume <id>`). Claude's

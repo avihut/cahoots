@@ -199,6 +199,54 @@ config.toml.
 content `untrusted`; the skill tells the caller to treat it as a colleague's
 claim, not as instructions.
 
+**A run's words are the callee's.** Besides the answer, a run's own words
+reach agent verbs in three places:
+
+- what it is doing now, `activity`, on `status` only;
+- the warnings its stream printed, `notes`;
+- its own account of a failure, `failure`.
+
+`notes` and `failure` appear on every verb that shows a run: `status`, `run`,
+`wait`, `result` and `cancel`. Each of the three is an object marked
+`untrusted: true`, as the answer is.
+
+Each is held to a bound when it is recorded, and again when it is read back
+and shown, so a record edited on disk is held to the same bound:
+
+- every control character becomes a space, and so does every line separator
+  and every character that is invisible or reorders text: every format
+  character (zero-width characters, bidi controls, a soft hyphen, a BOM, and
+  the tag characters, invisible ASCII a model still reads), variation
+  selectors, and blank fillers;
+- whitespace runs collapse to one space;
+- the text is cut, with `truncated` saying so. `activity` keeps its first
+  line, up to 200 characters. A note keeps 300 characters, and a run keeps
+  at most 20 notes. A failure keeps 500 characters: the start of the
+  stream's reason, or the end of stderr, where an error comes.
+
+The envelope's `message` is cahoots' own words. For a run that failed by
+itself, it points at `data.failure` and never carries the callee's text.
+
+`activity` comes only from the callee's own text and its own tool calls,
+never from a tool's result. Otherwise the repository's text, or the web's,
+would reach the caller as the callee's words. A tool step is named by
+cahoots' own closed set of labels (`read`, `search`, `edit`, `command`,
+`web`, `mcp`, `other`), never by the callee's name for its tool. Only the
+text the tool was called on is the callee's. The run's reasoning is never
+shown.
+
+None of these is data anything decides on (rule 6). No route, gate, cap,
+fence, command line, history line or learned note reads them, and they age
+out with the run's directory.
+
+What remains:
+
+- `model_reported` on `status` is still the stream's string, unbounded.
+- The answer is size-capped but not rewritten.
+
+The skill tells the caller to read all of it as claims, never as
+instructions.
+
 **Blind runs change presentation, not authority.** When a person sets
 `[review] blind = true`, each new run records that choice. Until an outcome
 is recorded for that run, its run envelopes and `review next` omit the
@@ -216,8 +264,8 @@ gates, command lines and sandbox fences are unchanged. The harness remains
 visible: with two harnesses, an agent caller already knows its target is
 the other one. This supports judging an answer before its attribution;
 it is not anonymity or an access-control boundary. `pick`, aggregate
-reports, configuration, and the answer's text can still reveal or suggest
-identity, as can briefs, diagnostic text and related runs. Nothing in the
+reports, configuration, and the answer's text and the run's activity can
+still reveal or suggest identity, as can briefs, diagnostic text and related runs. Nothing in the
 returned content is rewritten to conceal its author.
 
 **Recursion and loops.** `CAHOOTS_DEPTH` is exported to every callee, but it

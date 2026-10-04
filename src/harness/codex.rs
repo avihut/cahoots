@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::{Harness, Progress, RunSpec, Version, value_of};
+use super::{Activity, Harness, Progress, RunSpec, ToolLabel, Version, value_of};
 use crate::model::{Effort, HarnessId, Role};
 
 pub struct Codex;
@@ -158,8 +158,16 @@ impl Harness for Codex {
                     progress.session_id = Some(thread.to_string());
                 }
             }
+            Some("item.started") => {
+                if let Some(activity) = activity_of(&event["item"]) {
+                    progress.activity = Some(activity);
+                }
+            }
             Some("item.completed") => {
                 let item = &event["item"];
+                if let Some(activity) = activity_of(item) {
+                    progress.activity = Some(activity);
+                }
                 match item["type"].as_str() {
                     // The last message is the answer; earlier ones are narration.
                     Some("agent_message") => {
@@ -171,7 +179,7 @@ impl Harness for Codex {
                     // the run's failure.
                     Some("error") => {
                         if let Some(message) = item["message"].as_str() {
-                            progress.notes.push(message.to_string());
+                            progress.note(message);
                         }
                     }
                     _ => {}
@@ -196,7 +204,7 @@ impl Harness for Codex {
             // the exit status are what decide failure.
             Some("error") => {
                 if let Some(message) = event["message"].as_str() {
-                    progress.notes.push(message.to_string());
+                    progress.note(message);
                 }
             }
             _ => {}
@@ -204,9 +212,28 @@ impl Harness for Codex {
     }
 }
 
+/// One item as a step: a message it wrote, or a tool it called, under
+/// cahoots' label, with what it was called on. Never an item's output
+/// (`aggregated_output` and the like), which is the tool's, not the callee's,
+/// and never its reasoning.
+fn activity_of(item: &Value) -> Option<Activity> {
+    match item["type"].as_str()? {
+        "agent_message" => Activity::said(item["text"].as_str()?),
+        "command_execution" => Some(Activity::tool(ToolLabel::Command, item["command"].as_str())),
+        "file_change" => Some(Activity::tool(
+            ToolLabel::Edit,
+            item["changes"][0]["path"].as_str(),
+        )),
+        "web_search" => Some(Activity::tool(ToolLabel::Web, item["query"].as_str())),
+        "mcp_tool_call" => Some(Activity::tool(ToolLabel::Mcp, None)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn read(stream: &str) -> Progress {
         let mut progress = Progress::default();
@@ -236,6 +263,53 @@ mod tests {
             "a warning item is not a failure"
         );
         assert_eq!(progress.notes.len(), 1);
+    }
+
+    #[test]
+    fn the_latest_step_is_the_callees_own_message_or_tool_call() {
+        let stream = include_str!("../../tests/fixtures/streams/codex-ok.jsonl");
+        let at = |n: usize| {
+            let cut: String = stream.lines().take(n).collect::<Vec<_>>().join("\n");
+            read(&cut).activity.map(|a| a.shown(None))
+        };
+        assert_eq!(at(4).unwrap()["text"], "Looking at the module first.");
+        // Started: the command is what it is doing now.
+        let running = at(5).unwrap();
+        assert_eq!(running["tool"], "command");
+        assert_eq!(running["text"], "/bin/zsh -lc 'rg -n gate src'");
+        // Its output is the repository's text, never the callee's step.
+        let done = at(6).unwrap();
+        assert_eq!(done, running);
+        assert!(!done.to_string().contains("IGNORE"), "{done}");
+        // Reasoning is not shown; a file change is, by its first path.
+        assert_eq!(at(7), at(6));
+        assert_eq!(at(8).unwrap()["tool"], "edit");
+        assert_eq!(at(8).unwrap()["text"], "src/gate.rs");
+        let last = read(stream).activity.unwrap().shown(None);
+        assert_eq!(
+            (last["kind"].clone(), last["text"].clone()),
+            ("said".into(), "The gate is sound.".into())
+        );
+        assert_eq!(last["truncated"], true);
+    }
+
+    #[test]
+    fn notes_are_bounded_and_few() {
+        let mut progress = Progress::default();
+        for n in 0..100 {
+            Codex.parse_line(
+                &json!({"type": "error", "message": format!("retry {n}\u{1b}[2J {}", "z".repeat(1000))})
+                    .to_string(),
+                &mut progress,
+            );
+        }
+        assert_eq!(progress.notes.len(), crate::harness::MAX_NOTES);
+        assert!(progress.notes[0].text().starts_with("retry 0 "));
+        for note in &progress.notes {
+            assert!(note.text().chars().count() <= crate::harness::NOTE_CHARS);
+            assert!(!note.text().contains('\u{1b}'));
+            assert!(note.truncated());
+        }
     }
 
     #[test]

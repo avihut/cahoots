@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::gate::Admission;
-use crate::harness::{Progress, Version};
+use crate::harness::{CalleeText, Progress, Version};
 use crate::model::{Candidate, HarnessId, Role, TaskKindName};
 use crate::patch::{Commit, PatchSummary};
 use crate::placement::Placement;
@@ -136,6 +136,14 @@ pub struct RunRecord {
     #[serde(default)]
     pub resume_session: Option<String>,
     pub progress: Progress,
+    /// When the supervisor saw `progress.activity` last change.
+    #[serde(default)]
+    pub activity_at: Option<u64>,
+    /// The callee's own account of how its run failed — what its stream
+    /// said, or the end of its stderr — bounded. `message` is cahoots' own
+    /// words and points here.
+    #[serde(default)]
+    pub callee_failure: Option<CalleeText>,
     /// Why the gate let this run in.
     #[serde(default)]
     pub admission: Admission,

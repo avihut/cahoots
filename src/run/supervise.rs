@@ -17,7 +17,7 @@ use nix::sys::signal::Signal;
 use crate::dirs::{Dirs, ensure_private_dir};
 use crate::exit::{Exit, Fail, Res};
 use crate::gate::{self, Watch};
-use crate::harness::{self, RunSpec};
+use crate::harness::{self, CalleeText, FAILURE_CHARS, Keep, RunSpec};
 use crate::patch;
 use crate::placement::{self, Placement};
 use crate::registry::Registry;
@@ -32,6 +32,8 @@ const EVENTS_CAP: u64 = 64 * 1024 * 1024;
 const STDERR_TAIL: usize = 4 * 1024;
 /// How long the pipes may stay open after the callee itself has exited.
 const DRAIN: Duration = Duration::from_secs(5);
+/// How often, at most, a change in the run's activity is saved for `status`.
+const ACTIVITY_SAVE_EVERY: Duration = Duration::from_secs(1);
 
 enum Line {
     Out(String),
@@ -244,7 +246,19 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
     drop(group);
     keep_patch(dirs, dir, record);
 
-    let failure = record.progress.failure.clone();
+    // What the callee said of its failure is its words, not cahoots': it is
+    // kept bounded, apart from the message, which only points at it — and
+    // only for a run that failed by itself. A stopped run's reason is
+    // cahoots', and a run that succeeded has no failure to account for,
+    // whatever its stderr said.
+    let account = match &record.progress.failure {
+        Some(said) => CalleeText::bound(said, FAILURE_CHARS, Keep::Start),
+        None => CalleeText::bound(&stderr_tail, FAILURE_CHARS, Keep::End),
+    };
+    let failure = account
+        .as_ref()
+        .map(|_| "the callee's own account is in data.failure".to_string());
+    let stopped = stop.is_some();
     let (state, exit, message) = match stop {
         Some(Stop::Cancelled) => (State::Cancelled, Exit::Cancelled, None),
         Some(Stop::TimedOut) => (
@@ -263,15 +277,26 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
                 percent.map_or(String::new(), |p| format!(" ({p:.0}% used)")),
             )),
         ),
-        None if record.progress.budget_stop => (State::Budget, Exit::Budget, failure),
-        None if record.callee_exit == Some(0) && failure.is_none() => (State::Done, Exit::Ok, None),
+        None if record.progress.budget_stop => (
+            State::Budget,
+            Exit::Budget,
+            Some(match failure {
+                Some(failure) => format!("stopped by the callee's own budget limit — {failure}"),
+                None => "stopped by the callee's own budget limit".to_string(),
+            }),
+        ),
+        None if record.callee_exit == Some(0) && record.progress.failure.is_none() => {
+            (State::Done, Exit::Ok, None)
+        }
         None => (
             State::Failed,
             Exit::RunFailed,
-            failure
-                .or_else(|| Some(stderr_tail.trim().to_string()).filter(|tail| !tail.is_empty())),
+            failure.map(|failure| format!("the run failed — {failure}")),
         ),
     };
+    if !stopped && state != State::Done {
+        record.callee_failure = account;
+    }
     record.finish(state, exit, message);
     Ok(())
 }
@@ -381,6 +406,11 @@ fn attend(
     let mut exited = false;
     let mut exited_at: Option<Instant> = None;
     let mut streams_open = open_streams > 0;
+    // What it is doing now reaches `status` within a second, also while the
+    // callee is silent. Presentation only: a save that fails is logged, and
+    // the run goes on.
+    let mut activity_unsaved = false;
+    let mut saved_at = Instant::now();
 
     while !exited || streams_open {
         match lines.recv_timeout(TICK) {
@@ -389,12 +419,18 @@ fn attend(
                     let _ = writeln!(events, "{line}");
                     events_written += line.len() as u64 + 1;
                 }
+                let before = record.progress.activity.clone();
                 harness.parse_line(&line, &mut record.progress);
+                if record.progress.activity != before {
+                    record.activity_at = Some(now());
+                    activity_unsaved = true;
+                }
                 // The session id is what makes a killed run resumable: on disk
                 // the moment it is known, not at the end.
                 if record.progress.session_id != known_session {
                     known_session = record.progress.session_id.clone();
                     dir.save(record)?;
+                    (activity_unsaved, saved_at) = (false, Instant::now());
                 }
             }
             Ok(Line::Err(line)) => {
@@ -434,6 +470,12 @@ fn attend(
                     thread::sleep(TICK);
                 }
             }
+        }
+        if activity_unsaved && saved_at.elapsed() >= ACTIVITY_SAVE_EVERY {
+            if let Err(fail) = dir.save(record) {
+                let _ = writeln!(log, "[supervisor] activity not saved: {}", fail.message);
+            }
+            (activity_unsaved, saved_at) = (false, Instant::now());
         }
 
         if !exited {

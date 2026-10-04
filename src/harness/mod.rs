@@ -9,6 +9,12 @@
 
 mod claude;
 mod codex;
+mod words;
+
+pub use words::{
+    ACTIVITY_CHARS, Activity, ActivityKind, CalleeText, FAILURE_CHARS, Keep, MAX_NOTES, NOTE_CHARS,
+    ToolLabel,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +65,24 @@ pub struct Progress {
     /// Tool calls the callee's permission mode refused — evidence that the
     /// read-only fence was leaned on.
     pub permission_denials: u32,
-    /// Warnings worth keeping, never failures.
-    pub notes: Vec<String>,
+    /// Warnings worth keeping, never failures: the callee's words, bounded,
+    /// at most [`MAX_NOTES`] of them.
+    pub notes: Vec<CalleeText>,
+    /// What the run did last: the callee's own text or its own tool call,
+    /// never a tool's result. Presentation only — nothing decides on it.
+    #[serde(default)]
+    pub activity: Option<Activity>,
+}
+
+impl Progress {
+    /// Keeps a warning the stream printed, bounded, while there is room.
+    pub fn note(&mut self, text: &str) {
+        if self.notes.len() < MAX_NOTES
+            && let Some(note) = CalleeText::bound(text, NOTE_CHARS, Keep::Start)
+        {
+            self.notes.push(note);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

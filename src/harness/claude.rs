@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use super::{Harness, Progress, RunSpec, Version, value_of};
+use super::{Activity, Harness, Progress, RunSpec, ToolLabel, Version, value_of};
 use crate::model::{HarnessId, Role};
 
 pub struct Claude;
@@ -141,6 +141,18 @@ impl Harness for Claude {
                     // killed run never prints one.
                     progress.final_text = Some(text.join("\n"));
                 }
+                // The last thing it said or called, in this message. Only its
+                // own blocks: a tool's result comes back in a `user` event,
+                // which is never read for this.
+                if let Some(activity) = event["message"]["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find_map(activity_of)
+                {
+                    progress.activity = Some(activity);
+                }
             }
             Some("result") => {
                 if let Some(text) = event["result"].as_str() {
@@ -173,6 +185,32 @@ impl Harness for Claude {
             }
             _ => {}
         }
+    }
+}
+
+/// One content block as a step: a `text` block, or a `tool_use` block under
+/// cahoots' label for its tool, with the one input that says what it was
+/// called on. A `thinking` block is not shown.
+fn activity_of(block: &Value) -> Option<Activity> {
+    match block["type"].as_str()? {
+        "text" => Activity::said(block["text"].as_str()?),
+        "tool_use" => {
+            let name = block["name"].as_str().unwrap_or_default();
+            let (label, on) = match name {
+                "Read" => (ToolLabel::Read, Some("file_path")),
+                "Grep" | "Glob" => (ToolLabel::Search, Some("pattern")),
+                "Edit" | "Write" | "MultiEdit" => (ToolLabel::Edit, Some("file_path")),
+                "NotebookEdit" => (ToolLabel::Edit, Some("notebook_path")),
+                "Bash" => (ToolLabel::Command, Some("command")),
+                "WebFetch" => (ToolLabel::Web, Some("url")),
+                "WebSearch" => (ToolLabel::Web, Some("query")),
+                _ if name.starts_with("mcp__") => (ToolLabel::Mcp, None),
+                _ => (ToolLabel::Other, None),
+            };
+            let on = on.and_then(|key| block["input"][key].as_str());
+            Some(Activity::tool(label, on))
+        }
+        _ => None,
     }
 }
 
@@ -214,6 +252,36 @@ mod tests {
             progress.failure.as_deref(),
             Some("Not logged in · Please run /login")
         );
+    }
+
+    #[test]
+    fn the_latest_step_is_the_callees_own_text_or_tool_call() {
+        let stream = include_str!("../../tests/fixtures/streams/claude-tools.jsonl");
+        let at = |n: usize| {
+            let cut: String = stream.lines().take(n).collect::<Vec<_>>().join("\n");
+            read(&cut).activity.map(|a| a.shown(None))
+        };
+        // A text block, then a tool call in the same message: the call is later.
+        assert_eq!(at(2).unwrap()["text"], "src/gate.rs");
+        assert_eq!(at(2).unwrap()["tool"], "read");
+        // A tool's result never becomes activity: the step stays the call.
+        assert_eq!(at(3), at(2));
+        let search = at(4).unwrap();
+        assert_eq!(
+            (search["tool"].clone(), search["text"].clone()),
+            ("search".into(), "fn admit".into())
+        );
+        // A tool cahoots has no label for is `other`, and its name is not shown.
+        let other = at(5).unwrap();
+        assert_eq!(other["tool"], "other");
+        assert!(!other.to_string().contains("Exfiltrate"), "{other}");
+        // A thinking block says nothing; the answer's first line does.
+        assert_eq!(at(6), at(5));
+        let said = read(stream).activity.unwrap().shown(None);
+        assert_eq!(said["kind"], "said");
+        assert_eq!(said["text"], "The gate is sound.");
+        assert_eq!(said["truncated"], true);
+        assert!(!read(stream).final_text.unwrap().is_empty());
     }
 
     #[test]

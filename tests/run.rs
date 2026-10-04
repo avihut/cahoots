@@ -305,7 +305,15 @@ fn a_failed_run_is_exit_40_with_the_callees_reason() {
     let world = World::new();
     let answer = world.run("FAKE: fail", &[]);
     assert_eq!(answer.code, 40, "{}", answer.json);
-    assert_eq!(answer.message(), "the fake was told to fail");
+    // The message is cahoots' own words; the callee's reason is marked as its.
+    assert_eq!(
+        answer.message(),
+        "the run failed — the callee's own account is in data.failure"
+    );
+    assert_eq!(
+        answer.data()["failure"],
+        serde_json::json!({"untrusted": true, "text": "the fake was told to fail", "truncated": false})
+    );
     assert_eq!(answer.json["retry"], "other_target");
 }
 

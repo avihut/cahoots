@@ -15,7 +15,7 @@ use crate::dirs::Dirs;
 use crate::env;
 use crate::exit::{Envelope, Exit, Fail, Res};
 use crate::explore;
-use crate::harness::Progress;
+use crate::harness::{FAILURE_CHARS, MAX_NOTES, NOTE_CHARS, Progress};
 use crate::model::{HarnessId, Role, TaskKindName};
 use crate::patch::{self, Commit};
 use crate::paths::{self, Workspace};
@@ -291,6 +291,8 @@ fn launch(dirs: &Dirs, registry: &Registry, launch: Launch) -> Res<Envelope> {
         resumed_from: launch.resumed_from,
         resume_session: launch.resume_session,
         progress,
+        activity_at: None,
+        callee_failure: None,
     };
     let dir = RunDir::create(dirs, &record, &launch.brief)?;
     spawn::spawn_supervisor(&record.id, &dir.log_path())?;
@@ -505,7 +507,7 @@ pub fn status(id: Option<&str>) -> Res<Envelope> {
         // `status` answers "how is it going", so it succeeds whatever the
         // run's own fate; `result` and `wait` carry the run's exit code.
         return Ok(Envelope::new(Exit::Ok, None)
-            .with_data(summary(&record, outcomes.contains(&record.id))));
+            .with_data(status_of(&record, outcomes.contains(&record.id))));
     }
     let here = std::env::current_dir()
         .ok()
@@ -515,9 +517,22 @@ pub fn status(id: Option<&str>) -> Res<Envelope> {
         .rev()
         .filter(|(_, r)| here.as_ref().is_none_or(|here| r.cwd.starts_with(here)))
         .take(20)
-        .map(|(_, r)| summary(r, outcomes.contains(&r.id)))
+        .map(|(_, r)| status_of(r, outcomes.contains(&r.id)))
         .collect();
     Ok(Envelope::new(Exit::Ok, None).with_data(json!({ "runs": runs })))
+}
+
+/// A run as `status` shows it: its summary, and what it did last — the
+/// callee's words, bounded and marked, for whoever watches the run. Only
+/// `status` carries it: the answer is what `wait` and `result` are for.
+fn status_of(record: &RunRecord, has_outcome: bool) -> Value {
+    let mut data = summary(record, has_outcome);
+    data["activity"] = record
+        .progress
+        .activity
+        .as_ref()
+        .map_or(Value::Null, |activity| activity.shown(record.activity_at));
+    data
 }
 
 pub fn cancel(id: &str) -> Res<Envelope> {
@@ -611,7 +626,15 @@ fn summary(record: &RunRecord, has_outcome: bool) -> Value {
         "base_commit": record.base_commit,
         "patch": record.patch,
         "worktree_owner": worktree_owner(record),
-        "notes": record.progress.notes,
+        // The callee's words, each bounded again and marked as its own.
+        "notes": record
+            .progress
+            .notes
+            .iter()
+            .take(MAX_NOTES)
+            .map(|note| note.shown(NOTE_CHARS))
+            .collect::<Vec<_>>(),
+        "failure": record.callee_failure.as_ref().map(|said| said.shown(FAILURE_CHARS)),
         "gate_notes": record.admission.notes,
     });
     if !identity.blind {

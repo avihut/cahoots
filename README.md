@@ -97,7 +97,7 @@ From a terminal:
 ```sh
 cahoots pick --role advise --caller claude    # who would get it; nothing runs
 cahoots run --role advise --caller claude --brief brief.md
-cahoots status                                # the runs started here
+cahoots status                                # the runs started here, and what each is doing
 cahoots result <run>
 cahoots outcome <run> accepted                # or reworked, or discarded
 ```
