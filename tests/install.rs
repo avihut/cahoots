@@ -146,6 +146,15 @@ fn install_writes_stamped_files_and_is_idempotent() {
                 "aggregate reports",
                 "diagnostic text",
                 "off by default",
+                "In Claude Code, in an interactive session",
+                "run the wait as a background command",
+                "act\n   when the harness reports that it exited",
+                "wait <run> --timeout 1800",
+                "On 51, start it again in the background",
+                "`data.state` is there and is not `starting` or `running`",
+                "`wait` itself failed",
+                "do not call the run done",
+                "keep the loop above",
             ] {
                 assert!(text.contains(words), "{path} lacks {words:?}");
             }

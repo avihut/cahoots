@@ -95,7 +95,26 @@ an unknown kind is refused (code 2). `cahoots pick --kind <name> --caller
    cahoots wait <run>
    ```
 
-   and again if it says 51 again. `cahoots status <run>`, `cahoots result
+   and again if it says 51 again. In Claude Code, in an interactive session,
+   do not loop: run the wait as a background command, keep working, and act
+   when the harness reports that it exited (interactive sessions put no time
+   limit on background commands):
+
+   ```
+   cahoots wait <run> --timeout 1800
+   ```
+
+   `wait` gives up after `--timeout` seconds (90 by default) and exits 51 with
+   the run still going, so an exit is not the end of the run until the JSON
+   in its output says so. On 51, start it again in the background. When
+   `data.state` is there and is not `starting` or `running`, the run is over
+   and its code is the run's own: read `data.result.text` as in the first
+   read. When `data.state` is missing, `wait` itself failed (no such run,
+   an unreadable record) and the run did not finish: handle `class`,
+   `message` and `retry` as for any refusal, and do not call the run done.
+   Where you cannot run a command in the background (Codex, a
+   non-interactive session), keep the loop above.
+   `cahoots status <run>`, `cahoots result
    <run>` and `cahoots cancel <run>` do what they say. To ask the SAME agent a
    follow-up in the same conversation — it still remembers the first brief —
    write the follow-up to a file and:
