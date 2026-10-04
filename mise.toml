@@ -66,7 +66,8 @@ description = "The whole suite — no real harness is ever called, no network is
 #
 # Wrapped in the real-state tripwire: the suite fails if it changed anything a
 # person actually has — their cahoots config/state, or what `install` puts in
-# their agent homes.
+# their agent homes. Even a real cahoots running meanwhile trips it; the
+# message says when one did, and then the answer is to rerun.
 run = "scripts/no-warnings.sh scripts/real-state.sh guard env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX cargo test --locked"
 
 [tasks.smoke]

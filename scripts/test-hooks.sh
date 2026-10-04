@@ -120,6 +120,152 @@ passes env REAL_STATE_HOME="$fake_home" "$scripts/real-state.sh" guard \
     /bin/sh -c "echo x >'$fake_home/.claude/agents/mine.md'"
 fails "$scripts/real-state.sh" guard
 
+# A real cahoots running meanwhile (#75) excuses nothing: the guard still
+# fails, and its words say so, to tell a rerun from a test that touched real
+# state. A stand-in is a `sleep` whose argv[0] says otherwise, started beside
+# the guard, not by the command it runs. Under REAL_STATE_HOME only one in
+# that home counts — and every stand-in is inside this repository, which a
+# real guard ignores, so a suite running alongside never reads one as real.
+fake_state="$fake_home/.local/state/cahoots"
+mkdir -p "$fake_state/runs/old" "$fake_home/.config/cahoots"
+echo '{"event":"old"}' >"$fake_state/history.jsonl"
+echo '{}' >"$fake_state/runs/old/run.json"
+echo 'schema = 1' >"$fake_home/.config/cahoots/config.toml"
+standin=""
+outside=""
+trap '[ -z "$standin" ] || kill "$standin" 2>/dev/null; rm -rf "$tmp" ${outside:+"$outside"}' EXIT
+real_running() {
+    (exec -a "$1" sleep 60) &
+    standin=$!
+    local tries=0
+    until ps -o args= -p "$standin" | grep -qF -- "$1"; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 100 ] || { echo "test-hooks: the stand-in $1 never showed in ps" >&2; exit 1; }
+        sleep 0.05
+    done
+}
+real_stopped() {
+    kill "$standin"
+    wait "$standin" 2>/dev/null || true
+    standin=""
+}
+guard() {
+    env REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+        "$scripts/real-state.sh" guard "$@"
+}
+new_run() {
+    echo "mkdir -p '$fake_state/runs/$1' && echo '{}' >'$fake_state/runs/$1/run.json'"
+}
+appended="echo '{\"event\":\"new\"}' >>'$fake_state/history.jsonl'"
+rerun="A real cahoots ran meanwhile; rerun when it is idle"
+likely="a test likely touched real state"
+
+# A real one running, and nothing changed: the guard passes.
+real_running "$fake_home/.local/bin/cahoots"
+passes guard /bin/sh -c 'echo harmless'
+# What a run writes changed while it ran: still a failure, and it says rerun.
+fails guard /bin/sh -c "$(new_run during) && $appended"
+said "$rerun"
+said "What a run writes:"
+said "$fake_state/runs/during/run.json"
+said "$fake_state/history.jsonl"
+said "$fake_home/.local/bin/cahoots"
+# What no run writes changed while it ran: it fails, names it, and says a test
+# likely did it.
+fails guard /bin/sh -c "echo 'schema = 2' >'$fake_home/.config/cahoots/config.toml'"
+said "Paths normal runs do not write:"
+said "$fake_home/.config/cahoots/config.toml"
+said "But no run writes the second list: $likely"
+real_stopped
+# With none running, it says a test likely touched real state.
+fails guard /bin/sh -c "$(new_run alone)"
+said "No real cahoots was seen running meanwhile: $likely"
+# A build is never a real cahoots: the supervisor a test left behind, or any
+# binary of this repository's own, or one outside the watched home.
+for build in "$fake_home/src/target/debug/cahoots" "$fake_home/project/feat/x/bin/cahoots" "$tmp/elsewhere/cahoots"; do
+    real_running "$build"
+    fails guard /bin/sh -c "$(new_run "${build//\//_}")"
+    said "No real cahoots was seen running meanwhile"
+    real_stopped
+done
+
+# The sampler dying mid-look, by a TERM (how it was once stopped, #87),
+# neither breaks the guard nor lets a change through: nothing changed still
+# passes, and a change still fails, in words. The helper runs directly under
+# the guard, so its sibling there is the sampler: it kills it, records how
+# many it saw die, and only then makes its change, if it was given one.
+cat >"$tmp/kill-sampler" <<EOF
+#!/bin/sh
+dead=0
+for pid in \$(ps -A -o pid=,ppid= | awk -v guard="\$PPID" -v me="\$\$" '\$2 == guard && \$1 != me { print \$1 }'); do
+    kill -TERM "\$pid" 2>/dev/null || continue
+    tries=0
+    while ps -o stat= -p "\$pid" | grep -qv '^Z'; do
+        tries=\$((tries + 1))
+        [ "\$tries" -lt 50 ] || exit 1
+        sleep 0.05
+    done
+    dead=\$((dead + 1))
+done
+echo "\$dead" >'$tmp/sampler-dead'
+[ \$# -eq 0 ] || { mkdir -p "\$1" && echo '{}' >"\$1/run.json"; }
+EOF
+chmod +x "$tmp/kill-sampler"
+sampler_died() {
+    [ "$(cat "$tmp/sampler-dead")" = 1 ] || { echo "test-hooks: kill-sampler killed $(cat "$tmp/sampler-dead") samplers, not 1" >&2; exit 1; }
+    rm "$tmp/sampler-dead"
+}
+real_running "$fake_home/.local/bin/cahoots"
+passes guard "$tmp/kill-sampler"
+sampler_died
+fails guard "$tmp/kill-sampler" "$fake_state/runs/killed"
+sampler_died
+said "What a run writes:"
+said "$fake_state/runs/killed/run.json"
+real_stopped
+# Quick commands, back to back: each one's sampler is gone before it ends.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    passes guard /bin/sh -c true
+done
+
+# The installed cahoots, run by name, fails the suite — even when the test
+# swallows its refusal. Merely finding it on PATH is no failure. (A harmless
+# `cahoots` is next on PATH, so a guard that lost its own still never reaches
+# the real one from here.)
+mkdir -p "$tmp/harmless"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/harmless/cahoots"
+chmod +x "$tmp/harmless/cahoots"
+passes env PATH="$tmp/harmless:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'command -v cahoots'
+fails env PATH="$tmp/harmless:$PATH" REAL_STATE_HOME="$fake_home" REAL_STATE_OWN_ROOT="$fake_home/project" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'cahoots run || true'
+said "ran \`cahoots\` by name"
+
+# Which repository's builds are never real is found from the script, whatever
+# a hook exported: a GIT_DIR naming another repository, absolute or relative,
+# changes nothing. So a stand-in inside this repository (where test-hooks
+# runs) is never read as real, even with git's variables pointing elsewhere.
+other_repo="$tmp/other-repo"
+git init -q "$other_repo"
+project=$(dirname "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)")
+stdout_is "$project" env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" \
+    "$scripts/real-state.sh" project
+stdout_is "$project" /bin/sh -c "cd '$other_repo' && GIT_DIR=.git GIT_INDEX_FILE=.git/index exec '$scripts/real-state.sh' project"
+real_running "$fake_home/.local/bin/cahoots"
+passes env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
+    "$scripts/real-state.sh" guard /bin/sh -c 'echo harmless'
+fails env GIT_DIR="$other_repo/.git" GIT_WORK_TREE="$other_repo" REAL_STATE_HOME="$fake_home" \
+    "$scripts/real-state.sh" guard /bin/sh -c "$(new_run hooked)"
+said "No real cahoots was seen running meanwhile"
+real_stopped
+# Outside any repository there is no answer, and the guard refuses.
+outside=$(mktemp -d "${TMPDIR:-/tmp}/real-state-outside.XXXXXX")
+cp "$scripts/real-state.sh" "$outside/"
+outside_env=(env GIT_CEILING_DIRECTORIES="$(dirname "$outside")" REAL_STATE_HOME="$fake_home")
+fails "${outside_env[@]}" "$outside/real-state.sh" project
+fails "${outside_env[@]}" "$outside/real-state.sh" guard /bin/sh -c true
+said "cannot find the repository"
+
 # ── a fixture shaped like this repository ───────────────────────────────────
 repo="$tmp/repo"
 mkdir -p "$repo" "$tmp/no-hooks"
