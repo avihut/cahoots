@@ -37,7 +37,8 @@ pub enum Role {
     Advise,
     /// Find what is wrong with a change or a piece of code.
     Review,
-    /// Read the codebase and report what is there.
+    /// Explore with another vendor's eyes, or on another plan's budget: read
+    /// the codebase and report what is there.
     Explore,
     /// Make a change. The only role that may write.
     Implement,

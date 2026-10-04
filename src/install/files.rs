@@ -35,6 +35,9 @@ const CLAUDE_KIND_AGENT: &str = include_str!("assets/claude-kind-agent.md");
 const CODEX_KIND_AGENT: &str = include_str!("assets/codex-kind-agent.toml");
 /// A kind's subagent description: the person's words, then what it does.
 const KIND_DESCRIPTION: &str = include_str!("assets/kind-description.txt");
+/// What an `explore` kind adds over the caller's own subagents, said in its
+/// description so a session delegates to it for that reason.
+const EXPLORE_PURPOSE: &str = "Explores with another vendor's eyes, or on another plan's budget.";
 const STAMP: &str = "cahoots_version";
 
 fn render(template: &str) -> String {
@@ -65,10 +68,13 @@ fn render_kind(harness: HarnessId, name: &TaskKindName, entry: &KindEntry) -> St
     } else {
         ""
     };
-    let description = KIND_DESCRIPTION
+    let mut description = KIND_DESCRIPTION
         .trim_end()
         .replace("{{kind}}", name.as_str())
         .replace("{{description}}", &entry.description);
+    if entry.role == Role::Explore {
+        description = format!("{description} {EXPLORE_PURPOSE}");
+    }
     let (template, quoted) = match harness {
         // A JSON string is a YAML double-quoted scalar.
         HarnessId::Claude => (
@@ -965,11 +971,19 @@ mod tests {
             assert_eq!(stamp_of(&codex).as_deref(), Some(env!("CARGO_PKG_VERSION")));
             let agent: toml::Value = toml::from_str(&codex).unwrap();
             assert_eq!(agent["name"].as_str(), Some("cahoots-kind-rust-review"));
+            let purpose = if role == Role::Explore {
+                " Explores with another vendor's eyes, or on another plan's budget."
+            } else {
+                ""
+            };
             assert_eq!(
                 agent["description"].as_str(),
                 Some(
-                    "Review Rust. Hands it to another coding agent through cahoots (task kind \
-                     rust-review) and reports back what it said."
+                    format!(
+                        "Review Rust. Hands it to another coding agent through cahoots (task kind \
+                         rust-review) and reports back what it said.{purpose}"
+                    )
+                    .as_str()
                 )
             );
             let instructions = agent["developer_instructions"].as_str().unwrap();

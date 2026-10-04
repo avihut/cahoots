@@ -756,7 +756,9 @@ fn choice_hint(key: &Key, choice: &str) -> &'static str {
         }
         (Key::KindRole(_), "advise") => "a second opinion; read-only",
         (Key::KindRole(_), "review") => "find problems; read-only",
-        (Key::KindRole(_), "explore") => "read the codebase; read-only",
+        (Key::KindRole(_), "explore") => {
+            "explore with another vendor's eyes, or on another plan's budget; read-only"
+        }
         (Key::KindRole(_), "implement") => {
             "make a change; writes in its own worktree or where you permit"
         }
@@ -1149,7 +1151,10 @@ candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "
             &vec![
                 Choice::new("advise", "a second opinion; read-only"),
                 Choice::new("review", "find problems; read-only"),
-                Choice::new("explore", "read the codebase; read-only"),
+                Choice::new(
+                    "explore",
+                    "explore with another vendor's eyes, or on another plan's budget; read-only"
+                ),
                 Choice::new(
                     "implement",
                     "make a change; writes in its own worktree or where you permit"

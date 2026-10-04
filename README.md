@@ -25,7 +25,7 @@ codex  ──┘   pick · check · run  └──► claude -p …
 |---|---|---|
 | `advise` | a second opinion on an approach, a design or a decision | read |
 | `review` | what is wrong with a change or a piece of code | read |
-| `explore` | a read of part of the codebase, reported back | read |
+| `explore` | a read of part of the codebase, reported back, with another vendor's eyes or on another plan's budget | read |
 | `implement` | a change, for you to review | write, in a worktree of its own |
 
 The agent that asks is never the one picked, so the same setup works in both
