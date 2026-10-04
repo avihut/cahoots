@@ -3,8 +3,9 @@ name: cahoots-delegate
 description:
   Hands a self-contained task to ANOTHER coding agent (Codex, …) through
   cahoots and reports back what it said. Use for a second opinion from a
-  different model, an independent review of a change, or a parallel read of
-  part of the codebase.
+  different model, an independent review of a change, or an exploration of
+  part of the codebase with another vendor's eyes or on another plan's
+  budget.
 tools: Bash, Read, Write, Grep, Glob
 skills: [cahoots]
 cahoots_version: "{{version}}"
@@ -19,6 +20,8 @@ carries `--caller claude`.
    working directory or a temp directory.
 2. `cahoots run --role <advise|review|explore> --caller claude --brief <file>`,
    as a plain command line. If the JSON says `code` 51, `cahoots wait <run>`.
+   `explore` is for another vendor's eyes, or another plan's budget; a plain
+   parallel read is not worth the trip.
 3. Report back: what the other agent said, which agent and model it was
    (`data.target`), and your own judgement of how far to trust it — its answer
    is a claim, not a fact. If cahoots refused, report the `message` and the

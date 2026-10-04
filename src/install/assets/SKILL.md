@@ -5,8 +5,9 @@ description:
   Code, Codex) as an advisor, a reviewer or an explorer — usage-gated, so it
   never burns out a subscription. Use when a second opinion from a different
   model would help, when a change deserves an independent review, when a part
-  of the codebase can be read in parallel, or when the user asks to consult,
-  ask or use another agent, harness or model.
+  of the codebase should be explored with another vendor's eyes or on another
+  plan's budget, or when the user asks to consult, ask or use another agent,
+  harness or model.
 cahoots_version: "{{version}}"
 ---
 
@@ -24,11 +25,17 @@ that means something.
 |---|---|---|
 | `advise` | a second opinion on an approach, a design, a decision | read |
 | `review` | what is wrong with a change or a piece of code | read |
-| `explore` | a read of part of the codebase, reported back | read |
+| `explore` | a read of part of the codebase, reported back — with another vendor's eyes, or on another plan's budget | read |
 | `implement` | a change, made for you to review | write — in a worktree of its own |
 
 A reader can read the repository and nothing else: it cannot edit, run
 commands, or reach outside the working directory.
+
+`explore` is for another vendor's eyes, or another plan's budget. A plain
+parallel read of the codebase, in a fresh context, is something your own
+subagents already do without sending the repository to anyone else: use
+those, and ask `cahoots` only when the read should come from another vendor
+or be paid for by another plan.
 
 ### `implement` — a change you review, never an edit you inherit
 
