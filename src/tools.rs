@@ -11,6 +11,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -83,6 +84,11 @@ impl Tool {
         &self.pinned
     }
 
+    /// The file it resolved to when it was located: the one fingerprinted.
+    pub fn canonical(&self) -> &Path {
+        &self.canonical
+    }
+
     /// The PATH a person recorded, which every PATH built for a program
     /// started beside this one ends with.
     pub fn recorded(&self) -> Option<&OsStr> {
@@ -96,6 +102,8 @@ impl Tool {
 
     /// The binary to run for a use whose workspace is `workspace`: the policy
     /// again, for these roots, and still the file that was fingerprinted.
+    /// For git, also the first `git` on the PATH this use gives it
+    /// (`Tool::path`), so what git starts for itself finds this one too.
     pub fn at(&self, workspace: &[&Path]) -> Res<PathBuf> {
         let name = self.id.name();
         let resolved = spawn::pinned_system_tool(name, &self.pinned, workspace)?;
@@ -104,6 +112,9 @@ impl Tool {
                 "cahoots needs `{name}`: {} changed after cahoots checked it",
                 self.pinned.display()
             )));
+        }
+        if self.id == ToolId::Git {
+            spawn::git_users_path(self, &[], self.recorded(), workspace)?;
         }
         Ok(resolved)
     }
@@ -207,17 +218,25 @@ pub fn locate_one(
             Exit::Policy => fail,
             _ => Fail::new(fail.exit, format!("{} — {}", fail.message, pin_again(id))),
         })?;
+    let path = spawn::own_path(&[pinned], recorded, workspace);
     if id == ToolId::Git {
-        programs_find(pinned).map_err(|why| {
+        let unfound = |why: String| {
             Fail::config(format!(
                 "cahoots needs `git`: {} {why}, so the programs cahoots starts would not find it \
                  first — {}",
                 pinned.display(),
                 pin_again(id)
             ))
-        })?;
+        };
+        programs_find(pinned).map_err(unfound)?;
+        // On the PATH this use would give it — a directory inside this
+        // workspace left off — the first `git` must be this one.
+        if spawn::first_git(path.as_deref()).as_deref() != Some(canonical.as_path()) {
+            return Err(unfound(
+                "is not the git found first on the PATH cahoots builds here".to_string(),
+            ));
+        }
     }
-    let path = spawn::own_path(&[pinned], recorded, workspace);
     let version = match id {
         ToolId::Git => Some(fingerprint_git_at(&canonical, pinned, path)?),
         ToolId::Ps => {
@@ -244,6 +263,12 @@ fn programs_find(pinned: &Path) -> Result<(), String> {
         return Err("is not named git".to_string());
     }
     let dir = pinned.parent().unwrap_or(Path::new("/"));
+    if dir.as_os_str().as_bytes().contains(&b':') {
+        return Err(format!(
+            "is in {}, a directory no PATH can hold (it has a `:`)",
+            dir.display()
+        ));
+    }
     holds_programs(dir, &fixed_temp_roots())
         .map_err(|why| format!("is in {}, {why}", dir.display()))
 }
@@ -351,22 +376,34 @@ fn candidates(
     path: Option<&OsStr>,
     workspace: &[PathBuf],
 ) -> Vec<(PathBuf, Option<String>)> {
-    let temp = recording_temp_roots();
     spawn::find_all_on_path(name, path)
         .into_iter()
         .map(|candidate| {
-            let canonical = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-            let why = [candidate.parent(), canonical.parent()]
-                .into_iter()
-                .flatten()
-                .find_map(|dir| {
-                    unfit_dir(dir, &temp, workspace, true).map(|why| {
-                        format!("{} is in {}, {why}", candidate.display(), dir.display())
-                    })
-                });
+            let why = pin_unfit(&candidate, workspace);
             (candidate, why)
         })
         .collect()
+}
+
+/// Why a program at `pinned` may not be run to be asked who it is — found
+/// on a person's PATH, kept from before, or named in `settings` — or `None`:
+/// the directory it is in, and the one it resolves into, must hold programs
+/// (`holds_programs`) and lie outside the person's own repository
+/// (`workspace`). One test, so that every way to a pin is held to it alike.
+pub fn pin_unfit(pinned: &Path, workspace: &[PathBuf]) -> Option<String> {
+    // Nothing there is nothing to run: the locator says it is gone.
+    if pinned.symlink_metadata().is_err() {
+        return None;
+    }
+    let temp = recording_temp_roots();
+    let canonical = fs::canonicalize(pinned).unwrap_or_else(|_| pinned.to_path_buf());
+    [pinned.parent(), canonical.parent()]
+        .into_iter()
+        .flatten()
+        .find_map(|dir| {
+            unfit_dir(dir, &temp, workspace, true)
+                .map(|why| format!("{} is in {}, {why}", pinned.display(), dir.display()))
+        })
 }
 
 /// Why `dir` may not hold a program `install` pins (`programs`), or be in a
@@ -463,9 +500,11 @@ pub fn discover_harness(
     id: HarnessId,
     path: Option<&OsStr>,
     home: Option<&Path>,
-    pins: &Pins,
+    git: Option<&Tool>,
+    recorded: Option<&OsStr>,
     workspace: &[PathBuf],
 ) -> Result<(PathBuf, Version), Option<String>> {
+    let roots: Vec<&Path> = workspace.iter().map(PathBuf::as_path).collect();
     let mut first_why = None;
     for (candidate, unfit) in candidates(crate::harness::harness(id).binary_name(), path, workspace)
     {
@@ -473,8 +512,8 @@ pub fn discover_harness(
             first_why.get_or_insert(why);
             continue;
         }
-        match crate::pick::locate_pinned(id, &candidate, home, pins) {
-            Ok((_, version)) => return Ok((candidate, version)),
+        match crate::pick::locate_pinned(id, &candidate, home, git, recorded, &roots) {
+            Ok(located) => return Ok((candidate, located.version)),
             Err(fail) => {
                 first_why.get_or_insert(fail.message);
             }
@@ -497,6 +536,9 @@ pub enum Decision {
     Repinned,
     /// No copy on the PATH locates: nothing is written.
     NoneFound,
+    /// Not asked anything — a harness, while no git is pinned — and left as
+    /// it is.
+    Unchecked,
 }
 
 /// One program's pin, as `install` decided it.
@@ -726,20 +768,29 @@ pub fn choose_pins(
     };
     let recorded_os = recorded.as_ref().map(OsString::from);
 
-    let mut tool = |id: ToolId| -> Pin {
+    // Where install runs: nothing in the person's repository is run, pinned
+    // or kept, and a pin kept from before is held to exactly what a copy on
+    // their PATH is held to, before it is asked anything.
+    let roots: Vec<&Path> = terminal.workspace.iter().map(PathBuf::as_path).collect();
+    let mut tool = |id: ToolId| -> (Pin, Option<Tool>) {
         let pinned = now.tools.of(id);
-        let kept = pinned.map(|pinned| locate_one(id, Some(pinned), recorded_os.as_deref(), &[]));
+        let kept = pinned.map(|pinned| match pin_unfit(pinned, &terminal.workspace) {
+            Some(why) => Err(why),
+            None => locate_one(id, Some(pinned), recorded_os.as_deref(), &roots)
+                .map_err(|fail| fail.message),
+        });
         let (decision, pin) = match kept {
             Some(Ok(tool)) => {
-                return Pin {
+                let pin = Pin {
                     decision: Decision::Kept,
-                    binary: Some(tool.pinned),
+                    binary: Some(tool.pinned.clone()),
                     version: tool.version.map(|v| v.to_string()),
                     was: None,
                     why: None,
                 };
+                return (pin, Some(tool));
             }
-            Some(Err(fail)) => (Decision::Repinned, Some((pinned, fail.message))),
+            Some(Err(why)) => (Decision::Repinned, Some((pinned, why))),
             None => (Decision::Pinned, None),
         };
         match discover(
@@ -750,33 +801,30 @@ pub fn choose_pins(
         ) {
             Ok(found) => {
                 changes.push(set(&id.key(), &found.pinned.to_string_lossy()));
-                Pin {
+                let pin = Pin {
                     decision,
-                    binary: Some(found.pinned),
+                    binary: Some(found.pinned.clone()),
                     version: found.version.map(|v| v.to_string()),
                     was: pin.as_ref().and_then(|(was, _)| was.map(Path::to_path_buf)),
                     why: pin.map(|(_, why)| why),
-                }
+                };
+                (pin, Some(found))
             }
-            Err(why) => Pin {
-                decision: Decision::NoneFound,
-                binary: None,
-                version: None,
-                was: pin.as_ref().and_then(|(was, _)| was.map(Path::to_path_buf)),
-                why: Some(why),
-            },
+            Err(why) => {
+                let pin = Pin {
+                    decision: Decision::NoneFound,
+                    binary: None,
+                    version: None,
+                    was: pin.as_ref().and_then(|(was, _)| was.map(Path::to_path_buf)),
+                    why: Some(why),
+                };
+                (pin, None)
+            }
         }
     };
-    let git = tool(ToolId::Git);
-    let ps = tool(ToolId::Ps);
+    let (git, located_git) = tool(ToolId::Git);
+    let (ps, _) = tool(ToolId::Ps);
 
-    // The harnesses are asked their version on the PATH a run gives them:
-    // the git pinned now first, and the PATH recorded now last.
-    let pins = Pins {
-        git: git.binary.clone().or_else(|| now.tools.git.clone()),
-        ps: ps.binary.clone().or_else(|| now.tools.ps.clone()),
-        path: recorded,
-    };
     let mut harnesses = Vec::new();
     let mut homes = Vec::new();
     for id in HarnessId::ALL
@@ -800,26 +848,52 @@ pub fn choose_pins(
             None => entry.home.clone(),
         };
         let pinned = entry.binary.as_deref();
-        let kept =
-            pinned.map(|pinned| crate::pick::locate_pinned(id, pinned, home.as_deref(), &pins));
+        // A harness runs git of its own: it is asked nothing until the git
+        // it would find first is the located one. Its pin stays as it is.
+        let Some(git) = located_git.as_ref() else {
+            harnesses.push((
+                id,
+                Pin {
+                    decision: Decision::Unchecked,
+                    binary: pinned.map(Path::to_path_buf),
+                    version: None,
+                    was: None,
+                    why: Some("no git is pinned, so it was not asked its version".to_string()),
+                },
+            ));
+            continue;
+        };
+        let kept = pinned.map(|pinned| match pin_unfit(pinned, &terminal.workspace) {
+            Some(why) => Err(why),
+            None => crate::pick::locate_pinned(
+                id,
+                pinned,
+                home.as_deref(),
+                Some(git),
+                recorded_os.as_deref(),
+                &roots,
+            )
+            .map_err(|fail| fail.message),
+        });
         let pin = match kept {
-            Some(Ok((_, version))) => Pin {
+            Some(Ok(located)) => Pin {
                 decision: Decision::Kept,
                 binary: pinned.map(Path::to_path_buf),
-                version: Some(version.to_string()),
+                version: Some(located.version.to_string()),
                 was: None,
                 why: None,
             },
             kept => {
                 let broken = match kept {
-                    Some(Err(fail)) => Some(fail.message),
+                    Some(Err(why)) => Some(why),
                     _ => None,
                 };
                 match discover_harness(
                     id,
                     terminal.path.as_deref(),
                     home.as_deref(),
-                    &pins,
+                    Some(git),
+                    recorded_os.as_deref(),
                     &terminal.workspace,
                 ) {
                     Ok((found, version)) => {
@@ -886,7 +960,13 @@ pub fn repository_around(cwd: &Path) -> Vec<PathBuf> {
 /// could otherwise unmark a temp directory of its choosing.
 pub fn fixed_temp_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for dir in ["/tmp", "/var/tmp", "/private/tmp", "/private/var/folders"] {
+    for dir in [
+        "/tmp",
+        "/var/tmp",
+        "/var/folders",
+        "/private/tmp",
+        "/private/var/folders",
+    ] {
         let dir = PathBuf::from(dir);
         if let Ok(canonical) = fs::canonicalize(&dir)
             && !roots.contains(&canonical)
@@ -1125,6 +1205,39 @@ pub(crate) mod tests {
             assert!(fail.message.contains(says), "{}", fail.message);
             assert!(fail.message.contains("find it first"), "{}", fail.message);
         }
+    }
+
+    #[test]
+    fn a_git_user_s_path_must_find_the_pinned_git_first() {
+        // Pinned as `g/git`, a link to `r/git-impl`: a stand-in that is the
+        // suite's git under another name.
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let real = tests_located().git.canonical;
+        fs::create_dir_all(root.join("g")).unwrap();
+        let impl_ = script(
+            &{
+                fs::create_dir_all(root.join("r")).unwrap();
+                root.join("r")
+            },
+            "git-impl",
+            &format!("exec '{}' \"$@\"", real.display()),
+        );
+        std::os::unix::fs::symlink(&impl_, root.join("g/git")).unwrap();
+        let git = locate_one(ToolId::Git, Some(&root.join("g/git")), None, &[]).unwrap();
+        let path = spawn::git_users_path(&git, &[], None, &[]).unwrap();
+        assert_eq!(
+            spawn::first_git(path.as_deref()).as_deref(),
+            Some(impl_.as_path())
+        );
+        // A use whose roots hold the pin's directory leaves it off the PATH,
+        // and `r` has no `git`: another one would be found first.
+        let hidden = root.join("g");
+        let fail = spawn::git_users_path(&git, &[], None, &[&hidden]).unwrap_err();
+        assert_eq!(fail.exit, Exit::Config);
+        assert!(fail.message.contains("would find"), "{}", fail.message);
+        // So does every use of that git itself.
+        assert_eq!(git.at(&[&hidden]).unwrap_err().exit, Exit::Config);
     }
 
     #[test]

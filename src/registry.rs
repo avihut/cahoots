@@ -255,11 +255,23 @@ pub fn set_enabled(
         }
         if entry.binary.is_none() {
             let name = crate::harness::harness(harness).binary_name();
+            // A harness runs git of its own: none is asked anything until the
+            // git it would find first is the located one.
+            let roots: Vec<&std::path::Path> =
+                terminal.workspace.iter().map(PathBuf::as_path).collect();
+            let recorded = pins.recorded();
+            let git = crate::tools::locate_one(
+                crate::tools::ToolId::Git,
+                pins.git.as_deref(),
+                recorded.as_deref(),
+                &roots,
+            )?;
             let (found, _) = crate::tools::discover_harness(
                 harness,
                 terminal.path.as_deref(),
                 home.as_deref(),
-                &pins,
+                Some(&git),
+                recorded.as_deref(),
                 &terminal.workspace,
             )
             .map_err(|why| {
@@ -548,6 +560,18 @@ mod tests {
         let codex = bin.join("codex");
         std::fs::write(&codex, "#!/bin/sh\necho 'codex-cli 0.155.1'\n").unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A harness is asked its version only with the located git first on
+        // its PATH: the suite's own, pinned.
+        let git = crate::tools::tests::tests_located()
+            .git
+            .pinned()
+            .to_path_buf();
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        std::fs::write(
+            dirs.config_file(),
+            format!("schema = 1\ntools.git.binary = {git:?}\n"),
+        )
+        .unwrap();
         let terminal = crate::tools::Terminal {
             path: Some(bin.clone().into_os_string()),
             homes: Vec::new(),

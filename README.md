@@ -84,7 +84,9 @@ system's folders and the PATH you recorded — never the agent's. A copy in a
 temp folder, in a folder everyone can write, or in the repository you run
 `install` from, is never pinned; none of those folders is recorded, nor is
 one your group can write. `enable` pins
-the agent it turns on, if nothing is pinned for it yet. To choose another
+the agent it turns on, if nothing is pinned for it yet. git comes first: an
+agent's program is not even asked its version until git is pinned, so
+`enable` and `settings` ask you to run `cahoots install` before they pin one. To choose another
 program, open `cahoots settings` (the **Tools** section, and **Program** under
 each agent); `cahoots doctor` shows each pin and whether it still runs. If
 you run Codex with a `CODEX_HOME`, or Claude Code with a `CLAUDE_CONFIG_DIR`,

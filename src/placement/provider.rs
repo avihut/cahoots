@@ -206,7 +206,7 @@ pub fn locate(
                      settings`)",
                 )
             })?;
-            locate_pinned_daft(pinned, Some(git), roots)
+            locate_pinned_daft(pinned, git, roots)
         }
     }
 }
@@ -214,21 +214,17 @@ pub fn locate(
 /// The daft at `path`, held to the binary policy and to its fingerprint: what
 /// a cut runs, and what a person is held to when they choose one. It is
 /// asked on the PATH a cut runs it with (`daft_path`).
-pub fn locate_pinned_daft(
-    path: &Path,
-    git: Option<&Tool>,
-    roots: &[&Path],
-) -> Res<(PathBuf, Version)> {
+pub fn locate_pinned_daft(path: &Path, git: &Tool, roots: &[&Path]) -> Res<(PathBuf, Version)> {
     let binary = spawn::pinned_system_tool("daft", path, roots)?;
-    fingerprinted(&Daft, binary, daft_path(path, git, roots))
+    fingerprinted(&Daft, binary, daft_path(path, git, roots)?)
 }
 
-/// The PATH daft runs with: the pinned git's directories first, so the
-/// `git` daft starts is the pinned one, then daft's own, the system's, and
-/// the recorded PATH (`spawn::own_path`).
-pub fn daft_path(daft: &Path, git: Option<&Tool>, roots: &[&Path]) -> Option<OsString> {
-    let binaries: Vec<&Path> = git.map(Tool::pinned).into_iter().chain([daft]).collect();
-    spawn::own_path(&binaries, git.and_then(Tool::recorded), roots)
+/// The PATH daft runs with: the pinned git's directories first, then
+/// daft's own, the system's, and the recorded PATH — refused (34) unless the
+/// `git` daft would find first on it is the located one
+/// (`spawn::git_users_path`).
+pub fn daft_path(daft: &Path, git: &Tool, roots: &[&Path]) -> Res<Option<OsString>> {
+    spawn::git_users_path(git, &[daft], git.recorded(), roots)
 }
 
 /// Asks `binary` its version, from `/` and on `path`, and holds it to the

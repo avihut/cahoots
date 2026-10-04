@@ -354,6 +354,11 @@ fn doctor_without_a_git_fails_and_says_why_in_plain_words() {
         line(&text, "■  fork ").contains("without its git"),
         "{text}"
     );
+    // Nor is a harness asked its version without it.
+    assert!(
+        line(&text, "■  claude: binary ").contains("until git is pinned"),
+        "{text}"
+    );
     // However the rail wraps it.
     let flat = text
         .split_whitespace()
@@ -368,7 +373,7 @@ fn doctor_without_a_git_fails_and_says_why_in_plain_words() {
         "{text}"
     );
     let last = line(&text, "└  ");
-    assert!(last.ends_with(", 2 failed"), "{last:?}");
+    assert!(last.ends_with(", 4 failed"), "{last:?}");
     no_json(&after);
 }
 

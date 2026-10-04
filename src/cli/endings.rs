@@ -95,6 +95,14 @@ fn pinned(pins: &crate::tools::Chosen, home: &Path) -> Vec<Block> {
                 "{name}: none pinned — {}",
                 pin.why.as_deref().unwrap_or_default()
             ),
+            Decision::Unchecked if pin.binary.is_some() => format!(
+                "{name}: {at}, left as pinned — {}",
+                pin.why.as_deref().unwrap_or_default()
+            ),
+            Decision::Unchecked => format!(
+                "{name}: none pinned — {}",
+                pin.why.as_deref().unwrap_or_default()
+            ),
         }
     };
     let mut lines = vec![program("git", &pins.git), program("ps", &pins.ps)];

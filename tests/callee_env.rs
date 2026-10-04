@@ -42,11 +42,11 @@ fn a_callers_tmpdir_does_not_reach_the_callee() {
     // A Codex writer in a fork, and a Claude Code reader.
     for (role, caller) in [("implement", "claude"), ("advise", "codex")] {
         let (dump, answer) = dumped(&world, role, caller, &[("TMPDIR", &home)]);
-        let tmp = common::callee_tmpdir(&answer.run_id());
+        let tmp = world.callee_tmpdir(&answer.run_id());
         assert_eq!(dump["env"]["TMPDIR"], path_str(&tmp), "{role}");
-        // Private while it ran, and never in cahoots' own directories.
+        // Private while it ran, and never in the run's own directory.
         assert_eq!(dump["tmpdir_mode"], 0o700, "{role}: {dump}");
-        assert!(!tmp.starts_with(&world.state), "{role}");
+        assert!(!tmp.starts_with(world.state.join("runs")), "{role}");
     }
 }
 
@@ -54,11 +54,11 @@ fn a_callers_tmpdir_does_not_reach_the_callee() {
 fn the_run_tmpdir_goes_with_the_run() {
     let world = World::new();
     let (_, answer) = dumped(&world, "advise", "claude", &[]);
-    assert!(!common::callee_tmpdir(&answer.run_id()).exists());
+    assert!(!world.callee_tmpdir(&answer.run_id()).exists());
     // A cancelled run's too.
     let run = world.run("FAKE: sleep=30", &["--wait", "0"]);
     let id = run.run_id();
-    let tmp = common::callee_tmpdir(&id);
+    let tmp = world.callee_tmpdir(&id);
     common::wait_until("the callee started", || tmp.is_dir());
     assert_eq!(world.ask(&["cancel", &id]).code, 42);
     assert!(!tmp.exists(), "the run's temp directory outlived it");
@@ -67,13 +67,19 @@ fn the_run_tmpdir_goes_with_the_run() {
     let kept = world.root.join("kept");
     fs::create_dir_all(&kept).unwrap();
     fs::write(kept.join("file"), "x").unwrap();
-    let id = format!("link-{}", std::process::id());
-    let link = common::callee_tmpdir(&id);
-    let _ = fs::remove_file(&link);
+    let dirs = cahoots::dirs::Dirs {
+        home: world.home.clone(),
+        config: world.config.clone(),
+        state: world.state.clone(),
+        data: world.data.clone(),
+        overridden: true,
+    };
+    let link = world.callee_tmpdir("link");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&kept, &link).unwrap();
-    cahoots::run::record::remove_callee_tmpdir(&id);
+    cahoots::run::record::remove_callee_tmpdir(&dirs, "link");
     assert!(kept.join("file").is_file(), "a link was followed");
-    fs::remove_file(&link).unwrap();
+    assert!(link.symlink_metadata().is_ok(), "the link was removed");
 }
 
 #[test]
@@ -243,4 +249,128 @@ fn doctor_says_when_the_recorded_path_is_stale() {
         detail.contains("no longer qualify") && detail.contains(path_str(&mine)),
         "{stale}"
     );
+}
+
+/// A private folder at `path`, made now.
+fn private_dir(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_settings_home_is_judged_where_it_is_written_and_where_it_leads() {
+    let pick = |world: &World| world.ask(&["pick", "--role", "advise", "--caller", "claude"]);
+    let world = World::new();
+    let outside = world.root.join("h");
+    private_dir(&outside);
+    // A link inside the workspace, to a folder outside it: refused for
+    // where it is, since the workspace could point it elsewhere once
+    // checked.
+    let in_workspace = world.work.join("home-link");
+    std::os::unix::fs::symlink(&outside, &in_workspace).unwrap();
+    world.configure(&format!("harness.codex.home = {in_workspace:?}"));
+    let answer = pick(&world);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    assert!(
+        answer.message().contains("inside the workspace"),
+        "{}",
+        answer.json
+    );
+    // The same from a temp directory.
+    let temp = tempfile::tempdir().unwrap();
+    let in_temp = temp.path().join("home-link");
+    std::os::unix::fs::symlink(&outside, &in_temp).unwrap();
+    world.configure(&format!("harness.codex.home = {in_temp:?}"));
+    let answer = pick(&world);
+    assert_eq!(answer.code, 33, "{}", answer.json);
+    assert!(
+        answer.message().contains("inside the temp directory"),
+        "{}",
+        answer.json
+    );
+}
+
+/// A pinned git that leaves `marker` and waits a few seconds when it cuts
+/// a worktree (`worktree add`), then is the real git: the moment between the
+/// client's checks and the supervisor's.
+fn slow_cut(world: &World, marker: &std::path::Path) {
+    let git = world.root.join("slow/git");
+    world.script_at(
+        &git,
+        &format!(
+            "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = add ]; then touch '{}'; sleep 3; break; fi\n\
+             done\nexec '{}' \"$@\"\n",
+            marker.display(),
+            common::real("git").display()
+        ),
+    );
+    world.pin_tool("git", Some(&git));
+}
+
+/// A Codex writer started with `--wait 0`, its brief a dump: its id.
+fn writer_started(world: &World) -> String {
+    let brief = world.brief("FAKE: dump\nFAKE: write=x.txt");
+    let started = common::answer(world.cahoots().args([
+        "run",
+        "--role",
+        "implement",
+        "--fork",
+        "--caller",
+        "claude",
+        "--wait",
+        "0",
+        "--brief",
+        path_str(&brief),
+    ]));
+    assert_eq!(started.code, 51, "{}", started.json);
+    started.run_id()
+}
+
+#[test]
+fn a_settings_home_pointed_elsewhere_after_its_check_is_never_followed() {
+    let world = World::new();
+    let (first, second) = (world.root.join("h1"), world.root.join("h2"));
+    private_dir(&first);
+    private_dir(&second);
+    let alias = world.root.join("alias");
+    std::os::unix::fs::symlink(&first, &alias).unwrap();
+    world.configure(&format!("harness.codex.home = {alias:?}"));
+    let marker = world.root.join("cutting");
+    slow_cut(&world, &marker);
+
+    // The alias is pointed elsewhere while the worktree is cut: after the
+    // client checked it, before the callee starts.
+    let id = writer_started(&world);
+    common::wait_until("the cut started", || marker.exists());
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&second, &alias).unwrap();
+    let done = world.ask(&["wait", &id, "--timeout", "60"]);
+    assert_eq!(done.code, 0, "{}", done.json);
+    let dump: Value = serde_json::from_str(done.text()).unwrap();
+    assert_eq!(
+        dump["env"]["CODEX_HOME"],
+        path_str(&fs::canonicalize(&first).unwrap()),
+        "the callee got a folder that was never checked: {dump}"
+    );
+
+    // The checked folder itself turned open meanwhile: checked again before
+    // the callee starts, and refused, so it never does.
+    fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&first, &alias).unwrap();
+    fs::remove_file(&marker).unwrap();
+    let id = writer_started(&world);
+    common::wait_until("the cut started", || marker.exists());
+    fs::set_permissions(&first, fs::Permissions::from_mode(0o777)).unwrap();
+    let refused = world.ask(&["wait", &id, "--timeout", "60"]);
+    assert_eq!(refused.code, 31, "{}", refused.json);
+    assert!(
+        refused.message().contains("harness.codex.home"),
+        "{}",
+        refused.json
+    );
+    assert!(
+        world.record(&id)["callee_pid"].is_null(),
+        "the callee started"
+    );
+    fs::set_permissions(&first, fs::Permissions::from_mode(0o700)).unwrap();
 }

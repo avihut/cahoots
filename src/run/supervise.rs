@@ -211,18 +211,26 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         resume: record.resume_session.clone(),
     };
     let argv = harness::command_line(&spec)?;
-    // The callee's own: a PATH from the pins — the pinned git's directories
-    // first, so the git it runs is that one — and a private TMPDIR under
-    // /tmp, made now, before it starts, and removed on every way out of
-    // carry, after the callee's group is gone.
-    let mut binaries: Vec<&std::path::Path> = vec![tools.git.pinned()];
-    binaries.extend(entry.binary.as_deref());
+    // The callee's own, decided against this run's final roots before it
+    // starts: a PATH on which the git it finds first is the located one
+    // (`spawn::git_users_path`), the settings folder the client checked —
+    // checked again, and still the same folder — and a private TMPDIR, made
+    // now and removed on every way out of carry, after the callee's group.
+    let roots = record.tool_roots();
+    let mut binaries: Vec<&std::path::Path> = entry.binary.as_deref().into_iter().collect();
     binaries.push(&record.binary);
-    let path = spawn::own_path(&binaries, tools.recorded.as_deref(), &record.tool_roots());
-    let tmpdir = record::make_callee_tmpdir(&record.id).inspect_err(|fail| {
+    let log = |fail: Fail| {
         let _ = writeln!(dir.log(), "[supervisor] {}", fail.message);
-    })?;
-    let _tmpdir = TmpCleanup(record.id.clone());
+        fail
+    };
+    let path = spawn::git_users_path(&tools.git, &binaries, tools.recorded.as_deref(), &roots)
+        .map_err(log)?;
+    let home = match &record.home {
+        Some(home) => Some(still_the_home(record.target.harness, home, &roots).map_err(log)?),
+        None => None,
+    };
+    let tmpdir = record::make_callee_tmpdir(dirs, &record.id).map_err(log)?;
+    let _tmpdir = TmpCleanup(dirs.clone(), record.id.clone());
     let mut child = spawn::spawn_callee(&Callee {
         harness: record.target.harness,
         binary: &record.binary,
@@ -235,7 +243,7 @@ fn carry(dirs: &Dirs, dir: &RunDir, record: &mut RunRecord) -> Res<()> {
         caller: record.caller,
         path,
         tmpdir: &tmpdir,
-        home: entry.home.as_deref(),
+        home: home.as_deref(),
     })?;
 
     let pid = child.id() as i32;
@@ -552,12 +560,33 @@ struct GroupCleanup(i32);
 
 /// Removes the run's temp directory when carry returns, however it does —
 /// declared before the callee's group, so it goes after the group does.
-struct TmpCleanup(String);
+struct TmpCleanup(Dirs, String);
 
 impl Drop for TmpCleanup {
     fn drop(&mut self) {
-        record::remove_callee_tmpdir(&self.0);
+        record::remove_callee_tmpdir(&self.0, &self.1);
     }
+}
+
+/// The settings folder the client checked (`RunRecord::home`, canonical),
+/// checked again against the run's final roots: still outside them and the
+/// temp directories, still this user's alone — and still itself, so that a
+/// link put in its place since is refused, never followed.
+fn still_the_home(
+    harness: crate::model::HarnessId,
+    home: &std::path::Path,
+    roots: &[&std::path::Path],
+) -> Res<std::path::PathBuf> {
+    let now = crate::pick::usable_home(harness, home, roots)?;
+    if now != home {
+        return Err(Fail::policy(format!(
+            "refusing to use harness.{harness}.home {}: it now leads to {}, not the folder that \
+             was checked",
+            home.display(),
+            now.display()
+        )));
+    }
+    Ok(now)
 }
 
 impl Drop for GroupCleanup {

@@ -8,7 +8,7 @@ mod common;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use common::{Answer, World, path_str};
 use serde_json::Value;
@@ -878,4 +878,126 @@ fn install_takes_nothing_from_the_repository_it_is_run_in() {
             .contains(path_str(&world.work)),
         "{pins}"
     );
+}
+
+// ── review of 58a2f62: the git a git user finds first is the pin ────────────
+
+/// A runnable stand-in for git at `path`, under whatever name, that leaves a
+/// mark whenever it runs, then is the real git.
+fn marked_git(world: &World, path: &Path) -> PathBuf {
+    let marker = path.with_extension("ran");
+    world.script_at(
+        path,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nexec '{}' \"$@\"\n",
+            marker.display(),
+            common::real("git").display()
+        ),
+    );
+    marker
+}
+
+#[test]
+fn a_git_pin_in_a_directory_no_path_can_hold_is_refused() {
+    let world = World::new();
+    let git = world.root.join("a:b/git");
+    let marker = marked_git(&world, &git);
+    world.pin_tool("git", Some(&git));
+    let run = reader(&world);
+    assert_eq!(run.code, 34, "{}", run.json);
+    assert!(run.message().contains("(it has a `:`)"), "{}", run.json);
+    assert!(!marker.exists(), "a git no PATH can hold ran");
+    assert_eq!(runs(&world), 0, "a run was created");
+
+    world.pin_tool("git", Some(&common::real("git")));
+    let set = world
+        .as_a_person(&["settings", "set", "tools.git.binary", path_str(&git)])
+        .finish();
+    assert_eq!(set.code, 2, "{}", set.text());
+    assert!(!marker.exists(), "a git no PATH can hold ran");
+}
+
+#[test]
+fn a_git_pin_whose_directory_the_workspace_hides_is_refused() {
+    // Pinned through a link inside the workspace, to a file elsewhere of
+    // another name: the policy takes the file, but the link's directory is
+    // left off every PATH this workspace gets, and the file's own directory
+    // has no `git` in it — another git would be found first.
+    let world = World::new();
+    let real = world.root.join("real/git-impl");
+    let marker = marked_git(&world, &real);
+    fs::create_dir_all(world.root.join("elsewhere")).unwrap();
+    std::os::unix::fs::symlink(&real, world.root.join("elsewhere/git")).unwrap();
+    std::os::unix::fs::symlink(world.root.join("elsewhere"), world.work.join("link")).unwrap();
+    let pinned = world.work.join("link/git");
+    world.pin_tool("git", Some(&pinned));
+    let run = reader(&world);
+    assert_eq!(run.code, 34, "{}", run.json);
+    assert!(
+        run.message()
+            .contains("is not the git found first on the PATH cahoots builds here"),
+        "{}",
+        run.json
+    );
+    assert!(
+        !marker.exists(),
+        "the pinned git ran before its PATH was proved"
+    );
+    assert_eq!(runs(&world), 0, "a run was created");
+
+    world.pin_tool("git", Some(&common::real("git")));
+    let set = world
+        .as_a_person(&["settings", "set", "tools.git.binary", path_str(&pinned)])
+        .finish();
+    assert_eq!(set.code, 2, "{}", set.text());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn install_asks_nothing_of_a_pin_kept_from_before_in_the_repository() {
+    // Pinned before, in the repository install now runs in: neither is run
+    // — not even for its version — and each is pinned again from the PATH.
+    let world = unpinned();
+    let git = world.work.join("bin/git");
+    let marker = marked_git(&world, &git);
+    let claude = world.work.join("bin/claude");
+    common::fake_at(&claude);
+    let asked = world.work.join("bin/claude.version-env");
+    fs::write(&asked, "").unwrap();
+    world.pin_tool("git", Some(&git));
+    world.configure(&format!("harness.claude.binary = {claude:?}"));
+    let tools = world.root.join("w");
+    let (good_git, _) = world.wrapper(&tools, "git");
+    world.wrapper(&tools, "ps");
+    let path = format!("{}:{}", tools.display(), world.bin.display());
+    for dry in [true, false] {
+        let extra: &[&str] = if dry { &["--dry-run"] } else { &[] };
+        let after = install(&world, &path, extra);
+        let pins = &after.json["data"]["pins"];
+        for (name, was, now) in [
+            ("git", &git, &good_git),
+            ("claude", &claude, &world.bin.join("claude")),
+        ] {
+            let pin = &pins[name];
+            assert_eq!(pin["decision"], "repinned", "{name} (dry {dry}): {pins}");
+            assert_eq!(pin["was"], path_str(was), "{name}: {pin}");
+            assert_eq!(pin["binary"], path_str(now), "{name}: {pin}");
+            assert!(
+                pin["why"]
+                    .as_str()
+                    .unwrap()
+                    .contains("inside the workspace"),
+                "{name}: {pin}"
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "install ran the repository's git (dry {dry})"
+        );
+        assert_eq!(
+            fs::read_to_string(&asked).unwrap(),
+            "",
+            "claude was asked (dry {dry})"
+        );
+    }
 }

@@ -612,15 +612,12 @@ fn two_meters(world: &World) {
 }
 
 /// `MINE` once `install` chose ccusage at a terminal whose PATH is the
-/// world's `bin`: the meter, that PATH recorded, and the harnesses there
-/// pinned (no git or ps is there to pin).
+/// world's `bin`: the meter, and that PATH recorded. No git or ps is there to
+/// pin, so no harness is asked its version, and none is pinned.
 fn chosen_and_pinned(world: &World) -> String {
     format!(
-        "{MINE}\n[meter]\nuse = \"ccusage\"\n\n[tools]\npath = {:?}\n\n[harness.claude]\n\
-         binary = {:?}\n\n[harness.codex]\nbinary = {:?}\n",
+        "{MINE}\n[meter]\nuse = \"ccusage\"\n\n[tools]\npath = {:?}\n",
         world.bin,
-        world.bin.join("claude"),
-        world.bin.join("codex")
     )
 }
 

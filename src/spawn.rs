@@ -492,6 +492,42 @@ pub fn own_path(
         .filter(|joined| !joined.is_empty())
 }
 
+/// The `git` a program started on `path` finds first when it looks `git`
+/// up, canonical: what `path` makes of the name, as a shell's lookup would.
+pub fn first_git(path: Option<&OsStr>) -> Option<PathBuf> {
+    find_on_path("git", path).and_then(|git| fs::canonicalize(git).ok())
+}
+
+/// The PATH for a program that runs `git` of its own — daft, a harness, and
+/// what either starts, its hooks among them — with `binaries`' directories
+/// after the pinned git's, for a use whose roots are `workspace`
+/// (`own_path`), and proof that the `git` it finds first is the located one:
+/// the file that was fingerprinted and held to the floors. A PATH on which
+/// it would find another `git`, or none, is refused (34) before anything
+/// starts — say, because the pinned git's directory is inside this use's
+/// workspace, or cannot be on a PATH at all. The caller starts the program
+/// with exactly the PATH returned.
+pub fn git_users_path(
+    git: &Tool,
+    binaries: &[&Path],
+    recorded: Option<&OsStr>,
+    workspace: &[&Path],
+) -> Res<Option<OsString>> {
+    let mut all = vec![git.pinned()];
+    all.extend(binaries);
+    let path = own_path(&all, recorded, workspace);
+    match first_git(path.as_deref()) {
+        Some(found) if found == git.canonical() => Ok(path),
+        found => Err(Fail::config(format!(
+            "cahoots needs `git`: a program cahoots starts here would find {} before the pinned \
+             {} — pin a git in a directory a PATH can hold, outside this workspace, with \
+             `cahoots install` or `cahoots settings` (tools.git.binary)",
+            found.map_or("no git".to_string(), |found| found.display().to_string()),
+            git.pinned().display()
+        ))),
+    }
+}
+
 /// `dirs` without the relative ones and without any inside `workspace` —
 /// by name or by where it resolves.
 fn drop_workspace(dirs: Vec<PathBuf>, workspace: &[&Path]) -> Vec<PathBuf> {

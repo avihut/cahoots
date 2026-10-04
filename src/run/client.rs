@@ -214,6 +214,7 @@ pub fn run(args: RunArgs) -> Res<Envelope> {
             wait_secs: args.wait_secs,
             binary: choice.binary,
             version: choice.version,
+            home: choice.home,
             admission: choice.admission,
             resumed_from: None,
             resume_session: None,
@@ -247,6 +248,8 @@ struct Launch {
     wait_secs: Option<u64>,
     binary: PathBuf,
     version: crate::harness::Version,
+    /// The callee's settings folder, canonical, as `pick` checked it.
+    home: Option<PathBuf>,
     admission: crate::gate::Admission,
     resumed_from: Option<String>,
     resume_session: Option<String>,
@@ -288,6 +291,7 @@ fn launch(dirs: &Dirs, registry: &Registry, tools: &Tools, launch: Launch) -> Re
         int_grace_secs: registry.limits.int_grace_secs,
         term_grace_secs: registry.limits.term_grace_secs,
         binary: launch.binary,
+        home: launch.home,
         harness_version: Some(launch.version),
         admission: launch.admission,
         created_at: now(),
@@ -423,7 +427,7 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             format!("{live} runs are already active"),
         ));
     }
-    let (binary, version, admission) =
+    let (located, admission) =
         pick::eligible(&dirs, &registry, &tools, &old.target, old.role, &roots)?;
     // A fork goes back into the worktree that was cut at its base, and its
     // patch is the worktree's whole change since then. Any other tree is
@@ -463,8 +467,9 @@ pub fn resume(args: ResumeArgs) -> Res<Envelope> {
             depth,
             timeout_secs: args.timeout_secs,
             wait_secs: args.wait_secs,
-            binary,
-            version,
+            binary: located.binary,
+            version: located.version,
+            home: located.home,
             admission,
             resumed_from: Some(old.id),
             resume_session: Some(session),
@@ -791,7 +796,7 @@ pub fn reconcile(dirs: &Dirs, tools: &Tools, invoker: &[&Path]) {
                     );
                 }
                 let _ = fs::remove_dir_all(&dir.path);
-                record::remove_callee_tmpdir(&record.id);
+                record::remove_callee_tmpdir(dirs, &record.id);
             }
             continue;
         }
@@ -813,7 +818,7 @@ pub fn reconcile(dirs: &Dirs, tools: &Tools, invoker: &[&Path]) {
             }
         }
         // A supervisor that died left its callee's temp directory behind.
-        record::remove_callee_tmpdir(&record.id);
+        record::remove_callee_tmpdir(dirs, &record.id);
         record.finish(
             State::Crashed,
             Exit::RunFailed,

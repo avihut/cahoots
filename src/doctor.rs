@@ -235,7 +235,9 @@ pub fn checks() -> Res<Diagnostics> {
         let entry = registry.harness(id);
         let tool = harness::harness(id);
         match pick::locate(&registry, git.as_ref(), id, &[]) {
-            Ok((binary, version)) => {
+            Ok(pick::Located {
+                binary, version, ..
+            }) => {
                 let newer = version >= tool.tested().1;
                 checks.push(check(
                     format!("{id}: binary"),
@@ -263,10 +265,10 @@ pub fn checks() -> Res<Diagnostics> {
         }
         if let Some(home) = &entry.home {
             checks.push(match pick::usable_home(id, home, &around) {
-                Ok(()) => check(
+                Ok(canonical) => check(
                     format!("{id}: home"),
                     Status::Ok,
-                    home.display().to_string(),
+                    canonical.display().to_string(),
                 ),
                 Err(fail) => check(format!("{id}: home"), Status::Fail, fail.message),
             });

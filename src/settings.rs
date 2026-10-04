@@ -1048,39 +1048,51 @@ pub fn set(file: &Path, key: &Key, value: &Value) -> Res<UserConfig> {
                 format!("{key} = {}: {}", path.display(), fail.message),
             )
         };
-        // Held to what `install` and `enable` pin from: never a program in a
-        // temp directory or one everyone can write, where it is or where it
-        // resolves.
         if matches!(key, Key::ForkDaftBinary | Key::Tool(_) | Key::Binary(_)) {
-            let canonical = std::fs::canonicalize(path).ok();
-            let temp = tools::fixed_temp_roots();
-            for dir in [path.parent(), canonical.as_deref().and_then(Path::parent)]
-                .into_iter()
-                .flatten()
-            {
-                tools::holds_programs(dir, &temp).map_err(|why| {
-                    refuse(Fail::new(
-                        Exit::Usage,
-                        format!("{} is {why}", dir.display()),
-                    ))
-                })?;
+            // Held to what `install` and `enable` pin from (`tools::pin_unfit`):
+            // never a program in a temp directory, one everyone can write, or
+            // the person's own repository — where it is or where it
+            // resolves — and located with that repository's roots.
+            let workspace = std::env::current_dir()
+                .map(|cwd| tools::repository_around(&cwd))
+                .unwrap_or_default();
+            if let Some(why) = tools::pin_unfit(path, &workspace) {
+                return Err(refuse(Fail::new(Exit::Usage, why)));
             }
-        }
-        match key {
-            Key::ForkDaftBinary => {
-                provider::locate_pinned_daft(path, None, &[]).map_err(refuse)?;
+            let roots: Vec<&Path> = workspace.iter().map(PathBuf::as_path).collect();
+            let now = Registry::effective(&UserConfig::load(file)?);
+            let recorded = now.tools.recorded();
+            if let Key::Tool(id) = key {
+                tools::locate_one(*id, Some(path), recorded.as_deref(), &roots).map_err(refuse)?;
+            } else {
+                // daft and a harness run git of their own: neither is asked
+                // anything until the git it would find first is the located
+                // one.
+                let git = tools::locate_one(
+                    ToolId::Git,
+                    now.tools.git.as_deref(),
+                    recorded.as_deref(),
+                    &roots,
+                )
+                .map_err(refuse)?;
+                match key {
+                    Key::ForkDaftBinary => {
+                        provider::locate_pinned_daft(path, &git, &roots).map_err(refuse)?;
+                    }
+                    Key::Binary(id) => {
+                        crate::pick::locate_pinned(
+                            *id,
+                            path,
+                            now.harness(*id).home.as_deref(),
+                            Some(&git),
+                            recorded.as_deref(),
+                            &roots,
+                        )
+                        .map_err(refuse)?;
+                    }
+                    _ => {}
+                }
             }
-            Key::Tool(id) => {
-                let pins = Registry::effective(&UserConfig::load(file)?).tools;
-                tools::locate_one(*id, Some(path), pins.recorded().as_deref(), &[])
-                    .map_err(refuse)?;
-            }
-            Key::Binary(id) => {
-                let now = Registry::effective(&UserConfig::load(file)?);
-                crate::pick::locate_pinned(*id, path, now.harness(*id).home.as_deref(), &now.tools)
-                    .map_err(refuse)?;
-            }
-            _ => {}
         }
     }
     if let Key::KindDescription(name)

@@ -108,6 +108,12 @@ impl Dirs {
         self.state.join("slots")
     }
 
+    /// The callees' `TMPDIR`s, one per running run: a tree of its own,
+    /// apart from the runs' directories (`run::record::callee_tmpdir`).
+    pub fn agent_tmp(&self) -> PathBuf {
+        self.state.join("agent-tmp")
+    }
+
     /// The eval suite's tasks, one directory each.
     pub fn evals_tasks(&self) -> PathBuf {
         self.data.join("evals/tasks")

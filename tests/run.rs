@@ -199,7 +199,7 @@ fn the_callee_gets_a_scrubbed_environment() {
     let dump: serde_json::Value = serde_json::from_str(answer.text()).unwrap();
     let env = dump["env"].as_object().unwrap();
     // PATH, TMPDIR and SHELL are cahoots' own, never the caller's.
-    let tmp = common::callee_tmpdir(&answer.run_id());
+    let tmp = world.callee_tmpdir(&answer.run_id());
     assert_eq!(env["TMPDIR"], common::path_str(&tmp));
     assert_eq!(dump["tmpdir_mode"], 0o700);
     assert_ne!(

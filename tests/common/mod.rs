@@ -132,14 +132,6 @@ pub fn own_path(binaries: &[&Path], tail: &[&Path]) -> String {
     std::env::join_paths(kept).unwrap().into_string().unwrap()
 }
 
-/// Where cahoots puts run `id`'s callee's TMPDIR: under `/tmp`, never
-/// inside its own directories, and gone once the run is over.
-pub fn callee_tmpdir(id: &str) -> PathBuf {
-    fs::canonicalize("/tmp")
-        .unwrap()
-        .join(format!("cahoots-{id}"))
-}
-
 pub struct Answer {
     pub code: i32,
     pub json: Value,
@@ -823,6 +815,13 @@ impl World {
 
     pub fn run_file(&self, run: &str, name: &str) -> PathBuf {
         self.state.join("runs").join(run).join(name)
+    }
+
+    /// Where cahoots puts run `id`'s callee's TMPDIR: a tree of its state of
+    /// its own, never inside the run's directory, and gone once the run is
+    /// over.
+    pub fn callee_tmpdir(&self, id: &str) -> PathBuf {
+        self.state.join("agent-tmp").join(id)
     }
 }
 

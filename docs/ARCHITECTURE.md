@@ -72,9 +72,9 @@ supervisor, and there is no second, foreground path to keep honest.
   the run id. `wait`, `status`, `result` and `cancel` complete the set.
 - **The run directory is the source of truth:**
   `<state>/runs/<id>/{run.json, brief, events.jsonl, final.md, supervisor.log, patch.diff, lock, cancel}`.
-  The callee's `TMPDIR` is `/tmp/cahoots-<id>`: private, made just before it
-  starts, removed once the run is over, and never inside cahoots' own
-  directories, since Codex makes it writable.
+  The callee's `TMPDIR` is `<state>/agent-tmp/<id>`: a tree of its own, never
+  inside the run's directory (Codex makes it writable), made 0700 just before
+  the callee starts and removed once the run is over.
   `run.json` has one writer — the supervisor — and is replaced atomically. Ids
   are time-sortable and match `^[0-9A-Za-z_-]{1,64}$`. There is no separate
   ledger file; `report` reads the folded history, which outlives a run's
@@ -210,10 +210,16 @@ PATH it builds (`spawn::own_path`): the pinned program's directories (not a
 temp one, nor one everyone can write), the pinned git's first for daft and the
 callee, then `/usr/bin:/bin:/usr/sbin:/sbin`, then `tools.path`, the PATH a
 person recorded with `install`, as it still qualifies — never the caller's.
-The callee's `TMPDIR` is the run's own, under `/tmp`, its `SHELL` comes from
-passwd, and its settings folder (`CODEX_HOME`,
-`CLAUDE_CONFIG_DIR`) from `harness.<id>.home` or nowhere
-(docs/THREAT-MODEL.md, Binaries and The callee's environment).
+For a program that runs git of its own (daft, a harness), the PATH is proved
+before it starts: the first `git` on it, for that use's roots, must be the
+located pin (`spawn::git_users_path`), or nothing starts. The callee's
+`TMPDIR` is the run's own (`<state>/agent-tmp/<id>`), its `SHELL` comes from
+passwd, and its settings folder (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) from
+`harness.<id>.home`, resolved and checked when the target is picked
+(`pick::usable_home`), recorded as the folder it leads to
+(`RunRecord::home`), and checked again by the supervisor before the callee
+starts — or nowhere (docs/THREAT-MODEL.md, Binaries and The callee's
+environment).
 
 **Task kinds are routing under roles.** Optional `[kinds.<name>]` tables in
 config.toml each require a description, a role and an ordered list of typed

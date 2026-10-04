@@ -143,11 +143,9 @@ pub fn cut(
     // located, fingerprint and floor and all (`provider::daft_path`).
     let path = match id {
         ProviderId::Git => git.path(&roots),
-        ProviderId::Daft => provider::daft_path(
-            fork.daft_binary.as_deref().unwrap_or(&binary),
-            Some(git),
-            &roots,
-        ),
+        ProviderId::Daft => {
+            provider::daft_path(fork.daft_binary.as_deref().unwrap_or(&binary), git, &roots)?
+        }
     };
     let hooks = id == ProviderId::Daft && fork.daft_hooks;
 
