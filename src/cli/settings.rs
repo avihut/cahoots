@@ -517,7 +517,7 @@ fn words(key: &Key) -> (String, String) {
             ),
         ),
         Key::KindDescription(name) => ("Description", format!("When to use this task kind, in your words. Change it with settings set kinds.{name}.description or in config.toml.")),
-        Key::KindRole(_) => ("Role", "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own.".into()),
+        Key::KindRole(_) => ("Role", "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own. Explore is for another vendor's eyes, or another plan's budget.".into()),
         Key::KindCandidates(_) => ("Candidates", "Who takes this kind of task, first choice first. Only this list is tried; the role's list is not used.".into()),
         Key::ExploreShare(role) => {
             return (
@@ -1140,7 +1140,7 @@ candidates = [{ harness = "codex", model = "m", effort = "high" }, { harness = "
         assert_eq!(kinds[1].label, "Role");
         assert_eq!(
             kinds[1].help,
-            "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own."
+            "What this kind may do. Advise, review and explore only read; implement writes and requires a place of its own. Explore is for another vendor's eyes, or another plan's budget."
         );
         let Edit::Choose { choices, current } = &kinds[1].edit else {
             panic!("not a choice")
