@@ -553,9 +553,11 @@ the data directory (`~/.local/share/cahoots`), which nothing ages out:
   file of the rest collide: one inside the other (a file became a directory,
   or the reverse), or the same path but for case. Paths are compared as the
   bytes they name, git's quoting undone, name by name: an ASCII name exactly
-  but for case, and a name that is not ASCII as one that may be any other,
-  since std can neither fold nor normalise Unicode as a filesystem does. Then
-  one diff would not apply without the other, and the run makes no task. A patch with no test file
+  but for case, and a name that is not ASCII as one that may be any other
+  name that is not ASCII, or any ASCII name that holds its ASCII bytes in
+  order, since std can neither fold nor normalise Unicode as a filesystem
+  does. Then one diff would not apply without the other, and the run makes no
+  task. A patch with no test file
   still makes a task, with no hidden tests. Rust's inline `#[cfg(test)]`
   modules count as solution.
 - **Only an accepted writer's own answer.** The run must be finished, an
