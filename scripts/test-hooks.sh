@@ -90,24 +90,30 @@ fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "warning: package diagnostic" >
 fails "$scripts/no-warnings.sh" /bin/sh -c 'echo "ld: warning: linker diagnostic"'
 
 # ── no-strays.sh ────────────────────────────────────────────────────────────
-# A program "under the build directory" is only its argv[0] to ps, so a
-# `sleep` is started under that name (a copied system binary would be killed
-# by macOS for its broken signature).
-strays_target="$tmp/strays-target"
+# A real program under a fake build directory: a copy of `sleep` (re-signed,
+# where macOS needs it, since a copied system binary is otherwise killed).
+physical_tmp=$(cd "$tmp" && pwd -P)
+strays_target="$physical_tmp/strays-target"
 fake="$strays_target/debug/cahoots"
 mkdir -p "$strays_target/debug"
+cp "$(command -v sleep)" "$fake"
+if command -v codesign >/dev/null 2>&1; then
+    codesign --force -s - "$fake" >/dev/null 2>&1
+fi
 no_strays() { env NO_STRAYS_TARGET="$strays_target" NO_STRAYS_GRACE=3 "$scripts/no-strays.sh" "$@"; }
-# `$tmp/fake-run <seconds> [background]`: a sleep whose program is the fake.
+# `$tmp/fake-run <seconds> [background|relative]`: the fake sleeps. `relative`
+# is in the background too, and started as `./cahoots` from its directory.
 cat >"$tmp/fake-run" <<'SCRIPT'
 #!/usr/bin/env bash
-fake="$(dirname "$0")/strays-target/debug/cahoots"
-if [ "${2:-}" = background ]; then
-    (exec -a "$fake" sleep "$1") >/dev/null 2>&1 &
-else
-    exec -a "$fake" sleep "$1"
-fi
+dir="$(cd "$(dirname "$0")" && pwd -P)/strays-target/debug"
+case "${2:-}" in
+    background) ("$dir/cahoots" "$1" >/dev/null 2>&1 &) ;;
+    relative) (cd "$dir" && ./cahoots "$1" >/dev/null 2>&1 &) ;;
+    *) exec "$dir/cahoots" "$1" ;;
+esac
 SCRIPT
 chmod +x "$tmp/fake-run"
+stray_sleeps() { pkill -f "$fake" 2>/dev/null || true; }
 passes no_strays /bin/sh -c 'echo clean'
 passes no_strays "$tmp/fake-run" 0
 exits 7 no_strays /bin/sh -c 'exit 7'
@@ -115,12 +121,76 @@ exits 7 no_strays /bin/sh -c 'exit 7'
 passes no_strays "$tmp/fake-run" 1 background
 # Left running for good: refused, and named.
 fails no_strays "$tmp/fake-run" 30 background
-said "$fake 30"
-pkill -f "$fake 30" 2>/dev/null || true
+said "$fake"
+stray_sleeps
+# Started by a relative path: the file it runs is what counts.
+fails no_strays "$tmp/fake-run" 30 relative
+said "$fake"
+stray_sleeps
+passes no_strays "$tmp/fake-run" 1 relative
+# A relative build directory is the one under the directory this runs in, and
+# a stray under it is refused like any other.
+in_tmp() { (cd "$physical_tmp" && env CARGO_TARGET_DIR=strays-target NO_STRAYS_GRACE=3 "$scripts/no-strays.sh" "$@"); }
+passes in_tmp /bin/sh -c 'echo clean'
+fails in_tmp "$tmp/fake-run" 30 background
+said "$fake"
+stray_sleeps
+fails in_tmp "$tmp/fake-run" 30 relative
+said "$fake"
+stray_sleeps
+passes in_tmp "$tmp/fake-run" 1 relative
 # One an earlier run left is not this command's.
 "$tmp/fake-run" 31 background
 passes no_strays /bin/sh -c 'echo clean'
-pkill -f "$fake 31" 2>/dev/null || true
+stray_sleeps
+# A process list that cannot be read is a refusal, never an empty list. The
+# lookup stands in for lsof: it prints what `$tmp/lookup.<call>` holds, and
+# fails when there is no such file.
+cat >"$tmp/lookup" <<'SCRIPT'
+#!/usr/bin/env bash
+count="$(dirname "$0")/lookup.count"
+n=$(($(cat "$count" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$count"
+cat "$(dirname "$0")/lookup.$n" 2>/dev/null
+SCRIPT
+chmod +x "$tmp/lookup"
+lookup_is() { # <call> <process lines…>: what the next runs' call number <call> shows
+    local call=$1 line
+    shift
+    : >"$tmp/lookup.$call"
+    for line in "$@"; do printf 'p%s\nn%s\n' "${line%% *}" "${line#* }" >>"$tmp/lookup.$call"; done
+}
+fresh_lookup() { rm -f "$tmp"/lookup.[0-9]* "$tmp/lookup.count"; }
+with_lookup() { env NO_STRAYS_LOOKUP="$tmp/lookup" NO_STRAYS_TARGET="$strays_target" NO_STRAYS_GRACE=2 "$scripts/no-strays.sh" "$@"; }
+ran="$tmp/ran"
+# A successful, empty snapshot (no process under the build directory) passes.
+fresh_lookup
+lookup_is 1 "1 /sbin/init"
+lookup_is 2 "1 /sbin/init"
+passes with_lookup /bin/sh -c 'echo clean'
+# Unreadable at the start: refused, and the command is not run.
+fresh_lookup
+rm -f "$ran"
+fails with_lookup /bin/sh -c "touch '$ran'"
+said "cannot be read"
+[ ! -e "$ran" ] || { echo "test-hooks: no-strays ran the command with no process list" >&2; exit 1; }
+# Unreadable at the end of the command.
+fresh_lookup
+lookup_is 1 "1 /sbin/init"
+fails with_lookup /bin/sh -c 'echo clean'
+said "cannot be read"
+# Unreadable while waiting out a stray.
+fresh_lookup
+lookup_is 1 "1 /sbin/init"
+lookup_is 2 "1 /sbin/init" "42 $fake"
+fails with_lookup /bin/sh -c 'echo clean'
+said "cannot be read"
+# And a stray that does not go is named from the same source.
+fresh_lookup
+lookup_is 1 "1 /sbin/init"
+for call in 2 3 4 5 6; do lookup_is "$call" "1 /sbin/init" "42 $fake"; done
+fails with_lookup /bin/sh -c 'echo clean'
+said "42 $fake"
 
 # ── real-state.sh ───────────────────────────────────────────────────────────
 fake_home="$tmp/fake-home"

@@ -5,10 +5,11 @@
 mod common;
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{AtTerminal, Stdout, alive, wait_until};
 
@@ -74,6 +75,54 @@ fn a_finished_session_leaves_nothing_behind() {
     // The descendant outlived the command that started it, and the session's
     // end took it with the group.
     gone(pid_in(&pidfile));
+}
+
+/// The piped mode, which `World::at_terminal` uses: a descendant that holds
+/// the command's stdout open must not keep `finish` waiting on it.
+#[test]
+fn a_finished_piped_session_does_not_wait_on_a_descendant_holding_its_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "echo '{}'; sleep 60 & echo $! > \"$1\"", "sh"]);
+    command.arg(&pidfile);
+    let started = Instant::now();
+    let finished = AtTerminal::start(command, Duration::from_millis(0), Stdout::Piped).finish();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "finish waited on the descendant: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(finished.code, 0);
+    gone(pid_in(&pidfile));
+}
+
+/// Cleanup signals the session's own group, by an id it still holds when the
+/// command has long been reaped, and no one else's.
+#[test]
+fn ending_a_session_spares_a_process_in_another_group() {
+    let bystander = Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = i64::from(bystander.id());
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "sleep 60 & echo $! > \"$1\"", "sh"]);
+    command.arg(&pidfile);
+    let terminal = start(command);
+    let descendant = pid_in(&pidfile);
+    // The command exits and is reaped (`finish`) while its descendant lives on.
+    assert!(alive(descendant));
+    let finished = terminal.finish();
+    assert_eq!(finished.code, 0);
+    gone(descendant);
+    assert!(alive(pid), "a process in another group was signalled");
+    let mut bystander = bystander;
+    bystander.kill().unwrap();
+    bystander.wait().unwrap();
 }
 
 /// The refusal case: what the helper is held against. Without the drop, a

@@ -862,6 +862,12 @@ pub enum Stdout {
 /// where its cursor is (`ESC [ 6 n`): at its far corner, which is its size.
 pub struct AtTerminal {
     child: std::process::Child,
+    /// Leads the command's process group and is never reaped before the group
+    /// is ended, so the group's id is ours until then: signalling it cannot
+    /// reach anyone else's, whenever the command itself is reaped.
+    anchor: std::process::Child,
+    /// The group has been ended: its id is never signalled again.
+    ended: bool,
     stdout: Stdout,
     master: Arc<OwnedFd>,
     /// Kept open, to read the terminal's mode once the command is gone.
@@ -956,8 +962,20 @@ impl AtTerminal {
                 Stdout::Terminal => Stdio::from(pty.slave.try_clone().unwrap()),
             });
         // A group of its own, so that ending the session can end everything
-        // the command started, not only the command.
-        command.process_group(0);
+        // the command started, not only the command. The anchor leads it; it
+        // gives up by itself when the test process is gone.
+        let anchor = StdCommand::new("/bin/sh")
+            .args([
+                "-c",
+                "while kill -0 \"$PPID\" 2>/dev/null; do sleep 1; done",
+            ])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a process group");
+        command.process_group(anchor.id() as i32);
         let child = command.spawn().expect("cahoots starts");
         let master = Arc::new(pty.master);
         let shown = Arc::new(Mutex::new(Vec::new()));
@@ -988,6 +1006,8 @@ impl AtTerminal {
         };
         AtTerminal {
             child,
+            anchor,
+            ended: false,
             stdout,
             master,
             slave: pty.slave,
@@ -996,6 +1016,17 @@ impl AtTerminal {
             done,
             reader: Some(reader),
         }
+    }
+
+    /// Ends the command's group and everything in it, once. Only the anchor
+    /// is reaped here, after the signal: until then the group's id is its pid.
+    fn end_group(&mut self) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        let group = nix::unistd::Pid::from_raw(self.anchor.id() as i32);
+        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        let _ = self.anchor.wait();
     }
 
     /// The terminal is `rows` by `cols` now: it says so the way a terminal
@@ -1028,6 +1059,8 @@ impl AtTerminal {
             self.child.try_wait().unwrap().is_some()
         });
         let code = self.child.wait().unwrap().code().expect("an exit code");
+        // What it started may hold its output open: end it before reading.
+        self.end_group();
         let mut stdout = String::new();
         if let Some(mut piped) = self.child.stdout.take() {
             piped.read_to_string(&mut stdout).unwrap();
@@ -1057,12 +1090,8 @@ impl AtTerminal {
 /// it: a `Child` that is dropped is left running (#85).
 impl Drop for AtTerminal {
     fn drop(&mut self) {
-        // The group is the command's own, and what the command started may
-        // outlive it, so it is signalled even when the command has exited (a
-        // group that is gone is no error). A group's id is not reused while
-        // any of it lives, and not within a test's span otherwise.
-        let group = nix::unistd::Pid::from_raw(self.child.id() as i32);
-        let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        self.end_group();
+        // Everything in the group is gone; this only reaps the command.
         let _ = self.child.wait();
         self.done.store(true, Ordering::Relaxed);
         if let Some(reader) = self.reader.take() {
