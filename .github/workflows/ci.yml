@@ -45,7 +45,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf https://github.com/avihut/daft/releases/latest/download/daft-installer.sh | sh
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
 
       - name: Every check
         run: mise run check-all
