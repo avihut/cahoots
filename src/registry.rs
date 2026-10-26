@@ -39,6 +39,9 @@ pub struct HarnessEntry {
     pub cap: u8,
     /// Where a run that is already going gets stopped. Always above `cap`.
     pub abort_at: u8,
+    /// From this much of the plan used, the forecast is asked too; below it
+    /// the cap alone decides.
+    pub forecast_floor: u8,
     pub max_concurrent: u32,
     pub billing: Billing,
     pub origin: BTreeMap<&'static str, Origin>,
@@ -140,6 +143,7 @@ pub struct Registry {
 }
 
 pub const DEFAULT_CAP: u8 = 75;
+pub const DEFAULT_FORECAST_FLOOR: u8 = 50;
 pub const DEFAULT_MAX_DATA_AGE_SECS: u64 = 900;
 
 /// Ten points above the cap, never at 100 if it can be helped (a plan that is
@@ -422,6 +426,10 @@ impl Registry {
             );
             pick("billing", user.is_some_and(|u| u.billing.is_some()));
             pick("abort_at", user.is_some_and(|u| u.abort_at.is_some()));
+            pick(
+                "forecast_floor",
+                user.is_some_and(|u| u.forecast_floor.is_some()),
+            );
             let cap = user.and_then(|u| u.cap).unwrap_or(DEFAULT_CAP);
             harnesses.insert(
                 id,
@@ -433,6 +441,9 @@ impl Registry {
                     abort_at: user
                         .and_then(|u| u.abort_at)
                         .unwrap_or_else(|| default_abort_at(cap)),
+                    forecast_floor: user
+                        .and_then(|u| u.forecast_floor)
+                        .unwrap_or(DEFAULT_FORECAST_FLOOR),
                     max_concurrent: user.and_then(|u| u.max_concurrent).unwrap_or(1),
                     billing: user.and_then(|u| u.billing).unwrap_or_default(),
                     origin,

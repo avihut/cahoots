@@ -46,6 +46,8 @@ fn a_run_is_stopped_when_its_target_crosses_the_abort_threshold() {
     let watches: Vec<String> = world
         .meter_calls()
         .into_iter()
+        // Admission's own ask is the first one without a forecast.
+        .skip(1)
         .filter(|c| !c.contains("--forecast"))
         .collect();
     assert!(watches.len() >= 2, "it takes two readings: {watches:?}");
@@ -85,6 +87,7 @@ fn one_reading_over_is_not_enough() {
     let watches = world
         .meter_calls()
         .into_iter()
+        .skip(1)
         .filter(|c| !c.contains("--forecast"))
         .count();
     assert!(

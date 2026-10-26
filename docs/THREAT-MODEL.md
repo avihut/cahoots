@@ -92,7 +92,10 @@ to a resumed session. cahoots generates the run ID before selection; no
 caller flag, brief, repository value or callee output supplies the ID or draw
 seed. The label is recorded locally and changes no authority. The share is a
 typed fraction in the person's `config.toml` (`explore.share.<role>`,
-`kinds.<name>.explore.share`); learned data has no field for it.
+`kinds.<name>.explore.share`); learned data has no field for it. So too the
+forecast floor (`harness.<id>.forecast_floor`): a typed percent in
+`config.toml` that only decides whether the tracker's forecast is asked, and
+that learned data and a callee's output cannot reach.
 
 `install` writes a kind's description — the person's own text — into that
 kind's subagent definition in the caller's harness, where the caller's model
