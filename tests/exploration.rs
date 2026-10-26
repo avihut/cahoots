@@ -451,7 +451,7 @@ fn exploration_keeps_the_gate_and_ledger_refusals() {
     let calls = world.meter_calls();
     assert_eq!(calls.len(), 1);
     assert!(
-        calls[0].starts_with("headroom --provider codex --cap 77 --forecast red --json"),
+        calls[0].starts_with("headroom --provider codex --cap 77 --json"),
         "{calls:?}"
     );
     // A sole filtered candidate: each existing refusal, with its own code.

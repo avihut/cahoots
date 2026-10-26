@@ -8,6 +8,7 @@ use std::fs;
 use std::process::Command as StdCommand;
 
 use common::World;
+use serde_json::json;
 
 const ON: &str = "[review]\nenabled = true\nsample_rate = 1.0";
 
@@ -76,6 +77,39 @@ fn review_is_off_until_a_person_turns_it_on() {
     assert!(next.data()["next"].is_null());
     let submit = world.ask(&["review", "submit", &run.run_id(), "--caller", "claude"]);
     assert_eq!(submit.code, 33, "{}", submit.json);
+}
+
+#[test]
+fn reviewing_spends_the_reviewers_plan_and_its_forecast_waits_for_the_floor() {
+    let world = World::new();
+    // The run is admitted under a low reading; then the reviewer's own plan
+    // (Claude's, cap 75 − 20) reads a red forecast.
+    world.meter(json!({"guarded": {"code": 0, "percent": 5}}), ON);
+    assert_eq!(world.run("hello", &[]).data()["pending_reviews"], 1);
+    let red = |percent: u32| {
+        json!({
+            "guarded": {"code": 0, "percent": percent},
+            "forecast": {"code": 25, "percent": percent},
+        })
+    };
+    world.meter(red(5), ON);
+    let handed_out = review_next(&world, "claude");
+    assert!(!handed_out.data()["next"].is_null(), "{}", handed_out.json);
+    assert!(
+        world
+            .meter_calls()
+            .iter()
+            .all(|c| !c.contains("--forecast"))
+    );
+
+    world.meter(red(50), ON);
+    let refused = review_next(&world, "claude");
+    assert!(refused.data()["next"].is_null(), "{}", refused.json);
+    assert!(
+        refused.message().contains("not now"),
+        "{}",
+        refused.message()
+    );
 }
 
 #[test]

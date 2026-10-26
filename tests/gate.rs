@@ -20,10 +20,11 @@ fn under_the_cap_the_run_is_admitted_and_the_reading_is_kept() {
     assert_eq!(answer.code, 0, "{}", answer.json);
     let record = world.record(&answer.run_id());
     assert_eq!(record["admission"]["reading"]["percent"], 35.0);
-    // cap 80, minus the 3-point reserve of a read-only role.
+    // cap 80, minus the 3-point reserve of a read-only role. Under the
+    // forecast floor, the cap alone decides: the forecast is never asked.
     let calls = world.meter_calls();
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].starts_with("headroom --provider codex --cap 77 --forecast red --json"));
+    assert!(calls[0].starts_with("headroom --provider codex --cap 77 --json"));
     assert!(calls[0].contains("--max-data-age 15m"));
 }
 
@@ -35,7 +36,14 @@ fn each_refusal_keeps_the_trackers_own_code() {
         (26, "other_target"),
         (13, "other_target"),
     ] {
-        let world = world(json!({"guarded": {"code": code, "percent": 91}}));
+        // Only the forecast ask can say 25.
+        let plan = match code {
+            25 => {
+                json!({"guarded": {"code": 0, "percent": 91}, "forecast": {"code": 25, "percent": 91}})
+            }
+            _ => json!({"guarded": {"code": code, "percent": 91}}),
+        };
+        let world = world(plan);
         let answer = world.run("hello", &[]);
         assert_eq!(answer.code, code, "{}", answer.json);
         assert_eq!(answer.json["retry"], retry);
@@ -92,10 +100,107 @@ fn stale_codex_data_is_re_asked_against_a_lower_cap() {
     assert_eq!(world.run("hello", &["--to", "codex"]).code, 24);
 }
 
-/// A stale Claude reading, with what the tracker's `status` says beside it.
+#[test]
+fn a_stale_reading_is_judged_before_its_forecast_and_is_held_to_the_lower_cap_alone() {
+    // The tracker answers a red forecast before a stale reading (issue #118):
+    // 5% used, 15 hours old, forecast red. Freshness is asked first, without
+    // the forecast, and a forecast built on stale data is not applied at all.
+    let world = world(json!({
+        "guarded": {"code": 21, "data_age": 54_448},
+        "forecast": {"code": 25, "percent": 5},
+        "unguarded": {"code": 0, "percent": 5},
+    }));
+    let answer = world.run("hello", &["--to", "codex"]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    let note = answer.data()["gate_notes"][0].as_str().unwrap();
+    assert!(
+        note.contains("stale") && note.contains("forecast was not applied"),
+        "{note}"
+    );
+    let calls = world.meter_calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls.iter().all(|call| !call.contains("--forecast")),
+        "{calls:?}"
+    );
+    assert!(calls[1].contains("--cap 62") && !calls[1].contains("--max-data-age"));
+}
+
+/// A reading of `percent`, with a red forecast: what only the forecast ask
+/// says, and which the cap-only ask does not.
+fn red_at(percent: u32) -> serde_json::Value {
+    json!({
+        "guarded": {"code": 0, "percent": percent},
+        "forecast": {"code": 25, "percent": percent},
+    })
+}
+
+#[test]
+fn under_the_forecast_floor_a_red_forecast_is_not_asked() {
+    let world = world(red_at(5));
+    let answer = world.run("hello", &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    let note = answer.data()["gate_notes"][0].as_str().unwrap();
+    assert!(
+        note.contains("5%") && note.contains("50% forecast floor") && note.contains("not applied"),
+        "{note}"
+    );
+    let calls = world.meter_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(!calls[0].contains("--forecast"));
+    // Just under the default floor of 50.
+    assert_eq!(self::world(red_at(49)).run("hello", &[]).code, 0);
+}
+
+#[test]
+fn from_the_forecast_floor_up_a_red_forecast_refuses() {
+    for percent in [50, 91] {
+        let world = world(red_at(percent));
+        let answer = world.run("hello", &[]);
+        assert_eq!(answer.code, 25, "{percent}%: {}", answer.json);
+        assert_eq!(answer.json["retry"], "after_reset");
+        let calls = world.meter_calls();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(!calls[0].contains("--forecast") && calls[1].contains("--forecast red"));
+        assert!(
+            !world.state.join("runs").exists(),
+            "a refused run left a record"
+        );
+    }
+    // A green forecast at the floor is admitted, and the note is not written.
+    let world = world(json!({"guarded": {"code": 0, "percent": 60}}));
+    let answer = world.run("hello", &[]);
+    assert_eq!(answer.code, 0, "{}", answer.json);
+    assert!(answer.data()["gate_notes"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn a_reading_with_no_percent_is_not_a_reason_to_skip_the_forecast() {
+    let world = world(json!({"guarded": {"code": 0}, "forecast": {"code": 25}}));
+    assert_eq!(world.run("hello", &[]).code, 25);
+}
+
+#[test]
+fn the_floor_is_the_persons_to_set() {
+    let set = |floor: u32, percent: u32| {
+        let world = World::new();
+        world.meter(
+            red_at(percent),
+            &format!("harness.codex.cap = 100\nharness.codex.forecast_floor = {floor}"),
+        );
+        world.run("hello", &[]).code
+    };
+    assert_eq!(set(80, 70), 0, "a higher floor lets 70% through");
+    assert_eq!(set(80, 80), 25);
+    assert_eq!(set(0, 5), 25, "at 0 the forecast is always asked");
+}
+
+/// A stale Claude reading, with what the tracker's `status` says beside it,
+/// and a red forecast that the staleness must come before.
 fn stale_claude(status: serde_json::Value) -> World {
     world(json!({
         "guarded": {"code": 21, "data_age": 2460},
+        "forecast": {"code": 25, "percent": 1},
         "unguarded": {"code": 0, "percent": 1},
         "status": status,
     }))
@@ -108,7 +213,7 @@ fn refused_as_stale(world: &World) -> String {
     assert_eq!(answer.code, 21, "{}", answer.json);
     let calls = world.meter_calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
-    assert!(calls[0].contains("--cap 47"));
+    assert!(calls[0].contains("--cap 47") && !calls[0].contains("--forecast"));
     assert!(calls[1].starts_with("status --provider claude"));
     let message = answer.json["message"].as_str().unwrap().to_string();
     assert!(

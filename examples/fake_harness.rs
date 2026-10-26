@@ -64,8 +64,9 @@ fn emit(value: serde_json::Value) {
 fn fake_meter(exe: &std::path::Path, argv: &[String]) {
     let calls = exe.with_file_name("usage-cli.calls");
     let is_watch = |line: &str| line.contains("--max-data-age") && !line.contains("--forecast");
-    // How many watchdog calls came before this one — for "watch_sequence".
-    let earlier_watches = std::fs::read_to_string(&calls)
+    // How many guarded calls without the forecast came before this one: the
+    // first is admission's, the rest the watchdog's — for "watch_sequence".
+    let earlier_unforecast = std::fs::read_to_string(&calls)
         .unwrap_or_default()
         .lines()
         .filter(|line| is_watch(line))
@@ -99,21 +100,29 @@ fn fake_meter(exe: &std::path::Path, argv: &[String]) {
         }
         finish(status);
     }
-    // Three kinds of call: admission (guarded by data age, asks the forecast),
-    // admission's stale re-ask (unguarded), and the mid-run watchdog (guarded,
-    // no forecast) — answered by "watch", or by "watch_sequence" in turn, or
-    // "under" when the plan says nothing about it.
+    // Four kinds of call: admission's freshness ask (guarded by data age, no
+    // forecast), its forecast ask (guarded, with `--forecast`), the stale
+    // re-ask (unguarded), and the mid-run watchdog (guarded, no forecast, so
+    // told from admission's by coming after it, and only when the plan has a
+    // "watch" or "watch_sequence"). A guarded call is answered by "guarded";
+    // with `--forecast`, by "forecast" when the plan has one. The watchdog is
+    // answered by "watch", or "watch_sequence" in turn.
     let guarded = argv.iter().any(|arg| arg == "--max-data-age");
     let forecast = argv.iter().any(|arg| arg == "--forecast");
-    let under = json!({"code": 0, "percent": 1});
+    let watches = plan["watch"].is_object() || plan["watch_sequence"].is_array();
     let answer = match (guarded, forecast) {
+        (true, true) if plan["forecast"].is_object() => &plan["forecast"],
         (true, true) => &plan["guarded"],
         (false, _) => &plan["unguarded"],
-        (true, false) => match plan["watch_sequence"].as_array() {
-            Some(sequence) if !sequence.is_empty() => &sequence[earlier_watches % sequence.len()],
-            _ if plan["watch"].is_object() => &plan["watch"],
-            _ => &under,
-        },
+        (true, false) if watches && earlier_unforecast > 0 => {
+            match plan["watch_sequence"].as_array() {
+                Some(sequence) if !sequence.is_empty() => {
+                    &sequence[(earlier_unforecast - 1) % sequence.len()]
+                }
+                _ => &plan["watch"],
+            }
+        }
+        (true, false) => &plan["guarded"],
     };
     if let Some(percent) = answer["percent"].as_f64() {
         println!(

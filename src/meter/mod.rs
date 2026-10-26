@@ -251,6 +251,11 @@ impl UsageMeter {
         }
     }
 
+    /// Whether it has a forecast to refuse on (`Ask::forecast`).
+    pub fn forecasts(&self) -> bool {
+        matches!(self, UsageMeter::AgentUsage(_))
+    }
+
     /// Whether it can tell a running job's target crossing `abort_at` — which
     /// takes a percentage, and one that moves while the job runs.
     pub fn watches(&self, harness: HarnessId) -> bool {

@@ -298,12 +298,39 @@ fn set_writes_one_key_among_the_others_and_reset_takes_it_out() {
 }
 
 #[test]
+fn the_forecast_floor_is_set_and_reset_like_the_cap() {
+    let world = World::new();
+    let file = world.config.join("config.toml");
+    let before = fs::read_to_string(&file).unwrap();
+    let key = "harness.codex.forecast_floor";
+    let set = world.at_terminal(&["settings", "set", key, "60"]).finish();
+    assert_eq!(set.code, 0, "{}", set.json);
+    assert_eq!(
+        set.json["data"]["changed"],
+        json!([{"key": key, "value": 60, "origin": "config"}])
+    );
+    assert!(
+        fs::read_to_string(&file)
+            .unwrap()
+            .contains("harness.codex.forecast_floor = 60\n")
+    );
+    let reset = world.at_terminal(&["settings", "reset", key]).finish();
+    assert_eq!(reset.code, 0, "{}", reset.json);
+    assert_eq!(
+        reset.json["data"]["changed"],
+        json!([{"key": key, "value": 50, "origin": "default"}])
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), before);
+}
+
+#[test]
 fn a_value_the_setting_cannot_take_is_refused_and_nothing_is_written() {
     let world = World::new();
     let file = world.config.join("config.toml");
     let before = fs::read_to_string(&file).unwrap();
     for (args, why) in [
         (vec!["harness.codex.cap", "101"], "1–100"),
+        (vec!["harness.codex.forecast_floor", "101"], "0–100"),
         (vec!["harness.codex.abort_at", "70"], "76–100"),
         (vec!["meter.use", "codexbar"], "agent-usage, ccusage, none"),
         (vec!["review.sample_rate", "20"], "0.0 to 1.0"),

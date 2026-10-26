@@ -149,6 +149,17 @@ admitting the run that crosses the line.
   choice, so a second one found later brings the question too. When none is
   found, the ledger alone gates runs. A `[meter.<id>]` table only holds that
   meter's knobs, and a `binary` there outranks where install found it.
+- **Order of asks, and the forecast floor.** Agent Usage is asked for
+  freshness and the cap first, without the forecast: the tracker answers a red
+  forecast before a stale reading, and a forecast built on hours-old data is
+  stale too. A stale reading takes the path below (a lower cap, no forecast: the
+  lowered cap is what pays for not knowing). A fresh one under the cap is
+  asked again with the forecast only once it is at or above the harness's
+  `forecast_floor` (default 50%; `harness.<id>.forecast_floor`); below it the
+  cap alone decides, and the admission notes say the forecast was not applied.
+  A reading with no percent is asked too: it fails closed. Reviewing
+  (`reviewer_may_spend`) follows the same rules for the reviewer's own plan.
+  ccusage has no forecast, so it is asked once.
 - **Stale data, per meter and harness.** The tracker's Codex numbers only
   refresh when Codex runs locally, so a strict freshness guard would refuse it
   forever. For such snapshot-on-use readings, a stale one is re-asked without

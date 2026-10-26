@@ -195,6 +195,7 @@ schema = 1
 enabled = true   # what `cahoots enable codex` writes
 cap = 80         # start a run only while Codex is under 80% of its plan (default 75)
 abort_at = 92    # stop a running one that goes past 92% (default: cap + 10)
+forecast_floor = 50  # ask the tracker's forecast only from 50% used up (default 50)
 
 [harness.claude]
 enabled = true

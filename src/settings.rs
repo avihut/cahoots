@@ -33,6 +33,7 @@ pub enum Key {
     Enabled(HarnessId),
     Cap(HarnessId),
     AbortAt(HarnessId),
+    ForecastFloor(HarnessId),
     MaxConcurrent(HarnessId),
     Billing(HarnessId),
     Binary(HarnessId),
@@ -102,6 +103,7 @@ impl Key {
                 Enabled(id),
                 Cap(id),
                 AbortAt(id),
+                ForecastFloor(id),
                 MaxConcurrent(id),
                 Billing(id),
                 Binary(id),
@@ -157,6 +159,7 @@ impl Key {
             Enabled(id) => format!("harness.{id}.enabled"),
             Cap(id) => format!("harness.{id}.cap"),
             AbortAt(id) => format!("harness.{id}.abort_at"),
+            ForecastFloor(id) => format!("harness.{id}.forecast_floor"),
             MaxConcurrent(id) => format!("harness.{id}.max_concurrent"),
             Billing(id) => format!("harness.{id}.billing"),
             Binary(id) => format!("harness.{id}.binary"),
@@ -218,8 +221,8 @@ impl Key {
     pub fn section(&self) -> Section {
         use Key::*;
         match self {
-            Enabled(id) | Cap(id) | AbortAt(id) | MaxConcurrent(id) | Billing(id) | Binary(id)
-            | Home(id) => Section::Harness(*id),
+            Enabled(id) | Cap(id) | AbortAt(id) | ForecastFloor(id) | MaxConcurrent(id)
+            | Billing(id) | Binary(id) | Home(id) => Section::Harness(*id),
             Meter | MeterBinary(_) | MaxDataAge | ClaudeBlockTokens | CodexDayTokens
             | RunsPerHour | TokensPerDay => Section::Meter,
             MaxActiveRuns | MaxDepth | Timeout | Wait | IntGrace | TermGrace | Watchdog
@@ -403,6 +406,13 @@ pub fn current(
                 set(|u| u.abort_at.is_some()),
             )
         });
+        all.push(Setting::new(
+            Key::ForecastFloor(id),
+            number_kind(&config::FORECAST_FLOOR, Unit::Percent),
+            number(entry.forecast_floor.into()),
+            number(base.harness(id).forecast_floor.into()),
+            set(|u| u.forecast_floor.is_some()),
+        ));
         all.push(Setting::new(
             Key::MaxConcurrent(id),
             number_kind(&config::MAX_CONCURRENT, Unit::Count),
@@ -1204,6 +1214,16 @@ mod tests {
             cap.kind,
             Kind::Number {
                 min: 1,
+                max: 100,
+                unit: Unit::Percent
+            }
+        );
+        let floor = setting(&settings, "harness.codex.forecast_floor");
+        assert_eq!(floor.value, Some(Value::Number(50)));
+        assert_eq!(
+            floor.kind,
+            Kind::Number {
+                min: 0,
                 max: 100,
                 unit: Unit::Percent
             }

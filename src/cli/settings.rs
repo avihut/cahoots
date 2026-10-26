@@ -432,6 +432,15 @@ fn words(key: &Key) -> (String, String) {
                 name(*id)
             ),
         ),
+        Key::ForecastFloor(id) => (
+            "Forecast from",
+            format!(
+                "A run is also refused when {}'s usage is on course to run out before the plan \
+                 resets, but only once this much of the plan is used. Below it, the usage cap \
+                 alone decides.",
+                name(*id)
+            ),
+        ),
         Key::MaxConcurrent(id) => (
             "Runs at once",
             format!("How many runs {} takes at the same time.", name(*id)),

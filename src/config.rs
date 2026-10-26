@@ -110,6 +110,9 @@ pub struct HarnessConfig {
     /// Above `cap`, which only decides whether a run may start. Default:
     /// cap + 10.
     pub abort_at: Option<u8>,
+    /// Percent of the plan used from which the usage meter's forecast is
+    /// asked too. Below it, `cap` alone decides. Default: 50.
+    pub forecast_floor: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +236,8 @@ pub const MIN_TOKEN_LIMIT: u64 = 100_000;
 // The values each knob may take. `validate` holds a file to them, and the
 // settings page offers nothing outside them.
 pub const CAP: RangeInclusive<u8> = 1..=100;
+/// 0 asks the forecast always; 100 effectively never.
+pub const FORECAST_FLOOR: RangeInclusive<u8> = 0..=100;
 pub const MAX_CONCURRENT: RangeInclusive<u32> = 1..=8;
 pub const MAX_ACTIVE_RUNS: RangeInclusive<u32> = 1..=16;
 pub const MAX_DEPTH: RangeInclusive<u32> = 0..=3;
@@ -334,6 +339,13 @@ impl UserConfig {
                         "harness.{id}.abort_at = {abort_at}: must be above the cap ({cap}) and at most 100"
                     )));
                 }
+            }
+            if let Some(floor) = harness.forecast_floor {
+                in_range(
+                    &format!("harness.{id}.forecast_floor"),
+                    floor,
+                    &FORECAST_FLOOR,
+                )?;
             }
             if let Some(n) = harness.max_concurrent {
                 in_range(&format!("harness.{id}.max_concurrent"), n, &MAX_CONCURRENT)?;
@@ -565,6 +577,7 @@ mod tests {
             "schema = 2",
             "schema = 1\n[harness.codex]\ncap = 0",
             "schema = 1\n[harness.codex]\ncap = 101",
+            "schema = 1\n[harness.codex]\nforecast_floor = 101",
             "schema = 1\n[harness.codex]\nbinary = \"codex\"",
             "schema = 1\n[roles.advise]\ncandidates = []",
             "schema = 1\n[roles.advise]\ncandidates = [{ harness = \"codex\", model = \"--oss\", effort = \"high\" }]",

@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::dirs::Dirs;
 use crate::exit::{Exit, Fail, Res};
-use crate::meter::Ask;
+use crate::meter::{Answer, Ask, UsageMeter};
 use crate::model::{Candidate, HarnessId, Role};
 use crate::registry::Registry;
 use crate::run::record::{self, now};
@@ -51,11 +51,14 @@ fn usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> 
         .cap
         .saturating_sub(role.reserve())
         .max(1);
+    // Freshness and the cap first, without the forecast: a forecast built on
+    // a reading that is hours old is stale too, and the tracker would answer
+    // it before the staleness.
     let ask = Ask {
         harness,
         cap,
         fresh: true,
-        forecast: true,
+        forecast: false,
     };
     let mut answer = meter.ask(&ask);
     let mut notes = Vec::new();
@@ -64,7 +67,8 @@ fn usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> 
         // something will refresh it: the run itself, for numbers that
         // refresh on use (Codex), or the tracker, while its heartbeat says
         // it is still polling (a quiet Claude is polled slowly). Otherwise
-        // nothing will: refuse.
+        // nothing will: refuse. The lowered cap is what pays for not
+        // knowing, so the forecast is not applied on this path.
         let why = if meter.refreshes_on_use(harness) {
             Ok("this run refreshes it")
         } else {
@@ -83,11 +87,22 @@ fn usage(registry: &Registry, harness: HarnessId, role: Role) -> Res<Admission> 
                 });
                 if answer.verdict == Exit::Ok {
                     notes.push(format!(
-                        "{harness}'s usage data was stale, so it was held to {lowered}% instead of {cap}% — {why}"
+                        "{harness}'s usage data was stale, so it was held to {lowered}% instead of {cap}% \
+                         and its forecast was not applied — {why}"
                     ));
                 }
             }
             Err(why) => answer.why = Some(why),
+        }
+    } else {
+        let floor = registry.harness(harness).forecast_floor;
+        let (checked, skipped) = forecast_check(meter, &ask, answer, floor);
+        answer = checked;
+        if let Some(percent) = skipped {
+            notes.push(format!(
+                "{harness} is at {percent:.0}%, under its {floor}% forecast floor, so the forecast \
+                 was not applied"
+            ));
         }
     }
     if answer.verdict == Exit::Ok {
@@ -114,13 +129,42 @@ pub fn reviewer_may_spend(registry: &Registry, reviewer: HarnessId) -> Result<()
         harness: reviewer,
         cap: registry.harness(reviewer).cap.saturating_sub(20).max(1),
         fresh: true,
-        forecast: true,
+        forecast: false,
     };
-    match meter.ask(&ask).verdict {
+    let floor = registry.harness(reviewer).forecast_floor;
+    match forecast_check(meter, &ask, meter.ask(&ask), floor)
+        .0
+        .verdict
+    {
         Exit::Ok => Ok(()),
         _ => Err(format!(
             "not now — reviewing spends {reviewer}'s own plan, and it is too close to its cap for that"
         )),
+    }
+}
+
+/// A fresh answer that is `Ok` is held to the forecast too, once usage is at
+/// the harness's `forecast_floor`; under it the cap alone has decided. Returns
+/// the answer that decides, and the percent when the forecast was skipped. A
+/// reading with no percent is no reason to skip it: that fails closed.
+fn forecast_check(
+    meter: &UsageMeter,
+    ask: &Ask,
+    answer: Answer,
+    floor: u8,
+) -> (Answer, Option<f64>) {
+    if answer.verdict != Exit::Ok || !meter.forecasts() {
+        return (answer, None);
+    }
+    match answer.percent {
+        Some(percent) if percent < f64::from(floor) => (answer, Some(percent)),
+        _ => (
+            meter.ask(&Ask {
+                forecast: true,
+                ..*ask
+            }),
+            None,
+        ),
     }
 }
 
